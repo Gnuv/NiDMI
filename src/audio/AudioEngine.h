@@ -25,6 +25,7 @@
  *    hors de la tâche audio.
  */
 #pragma once
+#include <Arduino.h>   // String, pour les messages d'erreur du sampler
 #include <stdint.h>
 #include <stddef.h>
 
@@ -67,6 +68,15 @@ int  engine();
 // moteur web. C'est ce qui permet à une cue de piloter indifféremment le WASM
 // du navigateur ou le DSP de la carte.
 struct Params { float harmonics, timbre, morph, decay, lpgColour; };
+
+// Lecteur d'échantillons — l'équivalent embarqué de trig-wav. Bien moins cher
+// que Plaits en RAM interne (quelques centaines d'octets contre 26 632), parce
+// que l'échantillon vit en PSRAM : il cohabite donc avec le service de
+// l'interface sans le dégrader. Voir SampleStore.
+bool setSampler(const char* nom, String& raison);
+void arreterSampler();
+bool samplerActif();
+const char* samplerNom();
 void setParams(const Params& p);
 Params params();
 

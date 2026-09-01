@@ -1,5 +1,6 @@
 #include "APICommon.h"
 #include "../audio/AudioEngine.h"
+#include "../audio/SampleStore.h"
 
 /*
  * API audio — pilotage et MÉTROLOGIE.
@@ -114,6 +115,59 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += ",\"decay\":"      + String(a.decay, 3);
         json += ",\"lpg_colour\":" + String(a.lpgColour, 3) + "}";
         request->send(200, "application/json", json);
+    });
+
+    /* ── Échantillons ────────────────────────────────────────────────────
+     * mapfs (1 Mo) était partitionnée mais jamais montée — §12.5 de
+     * CONVERGENCE_NIDMI.md. Elle sert enfin. Le fichier persiste en flash ; la
+     * lecture se fait depuis la PSRAM, inutilisée jusqu'ici (8,37 Mo) pendant
+     * que le tas interne se bat pour 13 ko. */
+
+    server.on("/api/audio/samples", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{\"mounted\":" + String(SampleStore::monter() ? "true" : "false");
+        json += ",\"total\":"  + String(SampleStore::espaceTotal());
+        json += ",\"used\":"   + String(SampleStore::espaceUtilise());
+        json += ",\"loaded\":\"" + String(AudioEngine::samplerNom()) + "\"";
+        json += ",\"psram_bytes\":" + String(SampleStore::octetsPsram());
+        json += ",\"files\":" + SampleStore::listerJson() + "}";
+        request->send(200, "application/json", json);
+    });
+
+    /* Téléversement d'un WAV : corps BRUT, comme /api/ota — le nom passe en
+     * paramètre d'URL. PCM 16 bits mono ou stéréo. */
+    server.on("/api/audio/sample", HTTP_POST,
+        [](AsyncWebServerRequest *request){
+            SampleStore::ecrireFin();
+            request->send(200, "application/json", "{\"status\":\"ok\"}");
+        },
+        nullptr,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len,
+           size_t index, size_t total){
+            if (index == 0) {
+                String nom = request->hasParam("name")
+                           ? request->getParam("name")->value() : String("sample.wav");
+                if (!SampleStore::ecrireDebut(nom.c_str())) return;
+            }
+            SampleStore::ecrireMorceau(data, len);
+        });
+
+    /* Choix de l'échantillon à jouer. name vide = on arrête le lecteur. */
+    server.on("/api/audio/sampler", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String nom = request->hasParam("name", true)
+                         ? request->getParam("name", true)->value() : String("");
+        if (!nom.length()) {
+            AudioEngine::arreterSampler();
+            request->send(200, "application/json", "{\"status\":\"ok\",\"sampler\":\"\"}");
+            return;
+        }
+        String raison;
+        if (AudioEngine::setSampler(nom.c_str(), raison)) {
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"sampler\":\"" + nom + "\"}");
+        } else {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+        }
     });
 
     /* Extinction — utile quand un noteOn de test reste accroché. */

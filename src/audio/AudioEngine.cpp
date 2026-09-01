@@ -10,6 +10,7 @@
 #include <math.h>
 #include <new>
 #include <PlaitsDSP.h>
+#include "SampleStore.h"
 
 namespace AudioEngine {
 namespace {
@@ -96,6 +97,41 @@ bool plaitsAlloue() {
   return true;
 }
 
+// ---- lecteur d'échantillons ----------------------------------------------
+// Monophonique, à la manière de trig-wav : un déclenchement repart de zéro.
+// La hauteur suit la note (do central = hauteur d'origine), par lecture à pas
+// fractionnaire avec interpolation linéaire — quelques opérations par
+// échantillon, sans commune mesure avec un moteur de synthèse.
+volatile bool  sampleActif = false;
+double         samplePos   = 0.0;
+double         samplePas   = 1.0;
+float          sampleGain  = 0.0f;
+
+void rendreSample() {
+  const int16_t* pcm = SampleStore::donnees();
+  const size_t   n   = SampleStore::trames();
+  const bool     st  = SampleStore::stereo();
+  for (size_t i = 0; i < FRAMES; i++) {
+    int16_t g = 0, d = 0;
+    if (sampleActif && pcm && samplePos < double(n - 1)) {
+      const size_t k = (size_t)samplePos;
+      const float  f = float(samplePos - double(k));
+      if (st) {
+        g = (int16_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
+        d = (int16_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
+      } else {
+        g = d = (int16_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
+      }
+      g = (int16_t)(g * sampleGain);
+      d = (int16_t)(d * sampleGain);
+      samplePos += samplePas;
+    } else {
+      sampleActif = false;
+    }
+    entrelace[i * 2] = g; entrelace[i * 2 + 1] = d;
+  }
+}
+
 void rendrePlaits() {
   for (size_t i = 0; i < FRAMES; i += plaits::kBlockSize) {
     plaitsVoix->Render(plaitsPatch, plaitsMod, &plaitsTrames[i], plaits::kBlockSize);
@@ -115,6 +151,17 @@ float frequenceDeNote(uint8_t note) {
 }
 
 void appliquer(const Evenement& e) {
+  if (SampleStore::estCharge() && moteurCourant == -2) {
+    if (e.velo == 0) return;                 // l'échantillon va au bout
+    // do central (60) = hauteur d'origine ; on compense aussi l'écart entre la
+    // fréquence du fichier et celle réellement obtenue par l'I2S.
+    samplePas   = (double(SampleStore::frequence()) / double(srReel))
+                * pow(2.0, (double(e.note) - 60.0) / 12.0);
+    samplePos   = 0.0;
+    sampleGain  = float(e.velo) / 127.0f;
+    sampleActif = true;
+    return;
+  }
   if (moteurCourant >= 0 && plaitsVoix) {
     if (e.velo == 0) return;                 // le LPG de Plaits gère l'extinction
     plaitsPatch.note = float(e.note);
@@ -168,7 +215,9 @@ void boucleAudio(void*) {
 
     const uint32_t t0 = millis();
     const uint32_t c0 = ESP.getCycleCount();
-    if (moteurCourant >= 0 && plaitsVoix) {
+    if (moteurCourant == -2 && SampleStore::estCharge()) {
+      rendreSample();
+    } else if (moteurCourant >= 0 && plaitsVoix) {
       if (plaitsTrigger) { plaitsMod.trigger = 1.0f; plaitsTrigger = false; }
       rendrePlaits();
     } else {
@@ -262,8 +311,27 @@ void libererPlaits() {
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
+bool setSampler(const char* nom, String& raison) {
+  if (!ensureStarted()) { raison = "audio indisponible"; return false; }
+  libererPlaits();                       // on ne tient jamais les deux à la fois
+  if (!SampleStore::charger(nom, raison)) return false;
+  moteurCourant = -2;
+  return true;
+}
+
+void arreterSampler() {
+  if (moteurCourant == -2) moteurCourant = -1;
+  sampleActif = false;
+  SampleStore::decharger();
+}
+
+bool samplerActif() { return moteurCourant == -2 && SampleStore::estCharge(); }
+const char* samplerNom() { return SampleStore::nomCharge(); }
+
 bool setEngine(int moteur) {
-  if (moteur < 0) { libererPlaits(); return true; }
+  if (moteur == -2) return false;        // passer par setSampler
+  if (moteur < 0) { sampleActif = false; libererPlaits(); return true; }
+  if (moteurCourant == -2) arreterSampler();
   if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
   if (!ensureStarted()) return false;
   if (!plaitsAlloue()) return false;
