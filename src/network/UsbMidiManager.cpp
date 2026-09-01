@@ -163,12 +163,21 @@ bool UsbMidiManager::isConnected() const {
 #endif
 }
 
+// [correctif NiDMI] Canal 1-16 (convention NiDMI, celle de l'UI) -> nibble 0-15
+// (convention MIDI). Les six constructions d'octet de statut de ce fichier
+// masquaient le canal SANS retrancher 1, malgre le commentaire qui l'annonçait :
+// le canal 1 sortait donc sur le canal 2. BluetoothManager.cpp:124 fait, lui,
+// la conversion correctement — d'ou la divergence entre transports.
+static inline uint8_t nidmiChannelNibble(uint8_t channel) {
+    return (uint8_t)((channel > 0 ? channel - 1 : 0) & 0x0F);
+}
+
 void UsbMidiManager::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
     if (usbMidi && isConnected()) {
         // USB MIDI format: CIN=0x09 pour Note On
         // Status: 0x90-0x9F (Note On, 0x9n où n=channel 0-15)
-        uint8_t status = 0x90 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0x90 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x09, status, note, velocity};
         usbMidi->writePacket(&packet);
     }
@@ -180,7 +189,7 @@ void UsbMidiManager::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity
     if (usbMidi && isConnected()) {
         // USB MIDI format: CIN=0x08 pour Note Off
         // Status: 0x80-0x8F (Note Off, 0x8n où n=channel 0-15)
-        uint8_t status = 0x80 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0x80 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x08, status, note, velocity};
         usbMidi->writePacket(&packet);
     }
@@ -192,7 +201,7 @@ void UsbMidiManager::sendControlChange(uint8_t channel, uint8_t control, uint8_t
     if (usbMidi && isConnected()) {
         // USB MIDI format: CIN=0x0B pour Control Change
         // Status: 0xB0-0xBF (Control Change, 0xBn où n=channel 0-15)
-        uint8_t status = 0xB0 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0xB0 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x0B, status, control, value};
         usbMidi->writePacket(&packet);
     }
@@ -205,7 +214,7 @@ void UsbMidiManager::sendProgramChange(uint8_t channel, uint8_t program) {
         // USB MIDI format: CIN=0x0C pour Program Change
         // Status: 0xC0-0xCF (Program Change, 0xCn où n=channel 0-15)
         // Data1: program (0-127), Data2: 0x00 (non utilisé)
-        uint8_t status = 0xC0 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0xC0 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x0C, status, program, 0x00};
         usbMidi->writePacket(&packet);
     }
@@ -220,7 +229,7 @@ void UsbMidiManager::sendPitchBend(uint8_t channel, int bend) {
         // USB MIDI format: CIN=0x0E pour Pitch Bend Change (3 octets)
         // Status: 0xE0-0xEF (Pitch Bend Change, 0xEn où n=channel 0-15)
         // Data1: LSB (bits 0-6), Data2: MSB (bits 7-13)
-        uint8_t status = 0xE0 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0xE0 | nidmiChannelNibble(channel);
         uint8_t lsb = midiBend & 0x7F; // Bits 0-6
         uint8_t msb = (midiBend >> 7) & 0x7F; // Bits 7-13
         midiEventPacket_t packet = {0x0E, status, lsb, msb};
@@ -236,7 +245,7 @@ void UsbMidiManager::sendAftertouch(uint8_t channel, uint8_t pressure) {
         // USB MIDI format: CIN=0x0D pour Channel Pressure (2 octets)
         // Status: 0xD0-0xDF (Channel Pressure, 0xDn où n=channel 0-15)
         // Data1: pressure (0-127), Data2: 0x00 (non utilisé)
-        uint8_t status = 0xD0 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0xD0 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x0D, status, pressure, 0x00};
         usbMidi->writePacket(&packet);
     }
@@ -249,7 +258,7 @@ void UsbMidiManager::sendKeyPressure(uint8_t channel, uint8_t note, uint8_t pres
         // USB MIDI format: CIN=0x0A pour Polyphonic Key Pressure (3 octets)
         // Status: 0xA0-0xAF (Polyphonic Key Pressure, 0xAn où n=channel 0-15)
         // Data1: note (0-127), Data2: pressure (0-127)
-        uint8_t status = 0xA0 | (channel & 0x0F); // Channel 1-16 -> 0-15
+        uint8_t status = 0xA0 | nidmiChannelNibble(channel);
         midiEventPacket_t packet = {0x0A, status, note & 0x7F, pressure & 0x7F};
         usbMidi->writePacket(&packet);
     }

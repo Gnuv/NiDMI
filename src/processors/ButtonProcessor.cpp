@@ -108,7 +108,9 @@ void ButtonProcessor::process(
     // Fonction helper pour envoyer Note On (utilise le coordinateur si mode RTP)
     uint32_t raw_for_event = falling ? 1 : 0; // RAW digital monitoring : 1=press, 0=release
     auto sendNoteOn = [&]() {
-        uint8_t value = 127; // Défaut pour Note
+        // [correctif NiDMI] etait code en dur a 127 : le champ velocite de
+        // l'interface etait affiche, saisi, serialise... et ignore.
+        uint8_t value = config.midiVelocity ? config.midiVelocity : 127;
         if (config.msg_type == MidiMessageType::CONTROL_CHANGE) {
             value = config.midiCcOnOffMin;
         }

@@ -43,6 +43,10 @@ void ComponentInitializer::initializeConfig(
     // Initialiser les valeurs CC On/Off pour boutons (défaut: 127 ON, 0 OFF)
     config.midiCcOnOffMin = 0;   // Défaut: 0 (OFF)
     config.midiCcOnOffMax = 127; // Défaut: 127 (ON)
+
+    // [correctif NiDMI] Vélocité Note On : le champ existait dans l'UI
+    // (ButtonDef.h:92, défaut "100") mais nulle part dans le firmware.
+    config.midiVelocity = 100;
     
     // Initialiser les champs génériques à zéro/vide
     config.customField1[0] = '\0';

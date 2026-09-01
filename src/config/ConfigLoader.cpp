@@ -964,6 +964,11 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                     // Valider et stocker
                     config->midiCcOnOffMin = (midiCcOnOffMin >= 0 && midiCcOnOffMin <= 127) ? midiCcOnOffMin : 0;
                     config->midiCcOnOffMax = (midiCcOnOffMax >= 0 && midiCcOnOffMax <= 127) ? midiCcOnOffMax : 127;
+
+                    // [correctif NiDMI] Lire midiVelocity (Note On des boutons).
+                    // Le champ etait declare dans l'UI et jamais lu ici.
+                    int midiVelocity = JSONParser::extractInt(pinConfig, "midiVelocity", 100);
+                    config->midiVelocity = (midiVelocity >= 1 && midiVelocity <= 127) ? midiVelocity : 100;
                     
                     // Balayage NOTE_SWEEP : clés midiNoteSweepMin/Max (formulaire), pas seulement midiNoteMin
                     // Pour les composants multi-axes (joystick), le formulaire envoie des clés préfixées

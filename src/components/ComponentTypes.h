@@ -79,6 +79,7 @@ struct ComponentConfig {
     uint8_t midiCcRangeMax; // Plage MIDI max (0-127, défaut: 127) pour CC/autres messages
     uint8_t midiCcOnOffMin; // Valeur CC pour état OFF (0-127, défaut: 0) - pour boutons
     uint8_t midiCcOnOffMax; // Valeur CC pour état ON (0-127, défaut: 127) - pour boutons
+    uint8_t midiVelocity;   // [correctif NiDMI] Vélocité Note On (1-127, défaut: 100) - pour boutons
     char mappingScript[128]; // Script de mapping personnalisé (max 127 + \0)
     char name[64];          // Nom personnalisé du composant (ex: "pot_volume", "btn_start")
     MidiMode midiMode;      // Mode MIDI: RTP config ou mapping script
