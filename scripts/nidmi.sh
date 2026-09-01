@@ -361,7 +361,7 @@ sync_files() {
     
     # Créer le dossier src/ et tous les sous-dossiers
     mkdir -p $ARDUINO_LIB_DIR/src
-    mkdir -p $ARDUINO_LIB_DIR/src/{api,components,components/basic,components/multiplexer,components/distance,components/environment,components/motion,components/color,components/interface,components/actuator,components/display,components/signal,config,hardware,managers,managers/complex,managers/complex/multiplexer,managers/complex/joystick,managers/complex/joystick3,mapping,midi,midi/handlers,network,osc,processors,server,ui,utils}
+    mkdir -p $ARDUINO_LIB_DIR/src/{api,audio,components,components/basic,components/multiplexer,components/distance,components/environment,components/motion,components/color,components/interface,components/actuator,components/display,components/signal,config,hardware,managers,managers/complex,managers/complex/multiplexer,managers/complex/joystick,managers/complex/joystick3,mapping,midi,midi/handlers,network,osc,processors,server,ui,utils}
     
     # Copier les fichiers de la racine src/
     cp -f $REPO_DIR/src/nidmi_config.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
@@ -374,6 +374,8 @@ sync_files() {
     # Copier les sous-dossiers
     cp -f $REPO_DIR/src/api/*.cpp $ARDUINO_LIB_DIR/src/api/ 2>/dev/null || true
     cp -f $REPO_DIR/src/api/*.h $ARDUINO_LIB_DIR/src/api/ 2>/dev/null || true
+    cp -f $REPO_DIR/src/audio/*.cpp $ARDUINO_LIB_DIR/src/audio/ 2>/dev/null || true
+    cp -f $REPO_DIR/src/audio/*.h $ARDUINO_LIB_DIR/src/audio/ 2>/dev/null || true
     cp -f $REPO_DIR/src/components/*.h $ARDUINO_LIB_DIR/src/components/ 2>/dev/null || true
     cp -f $REPO_DIR/src/components/*.cpp $ARDUINO_LIB_DIR/src/components/ 2>/dev/null || true
     cp -f $REPO_DIR/src/components/basic/*.h $ARDUINO_LIB_DIR/src/components/basic/ 2>/dev/null || true
@@ -723,6 +725,14 @@ compile_sketch() {
             EXTRA_FLAGS_ARRAY+=("${USB_MIDI_DEFINE[@]}")
         fi
 
+        # Audio : -O3 est OBLIGATOIRE pour le DSP (le core compile en -Os, soit
+        # un facteur 1,82 mesuré au banc) ; -DTEST bascule stmlib sur ses
+        # versions portables de Clip16/ClipU16/Sqrt, les originales étant de
+        # l'assembleur ARM. Vérifié : aucune collision sur TEST dans src/.
+        if true; then
+            EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
+        fi
+
         
         # Build properties (flags + partition C3 si --large-app)
         BUILD_PROPS=()
@@ -802,6 +812,14 @@ build_binary() {
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
         if [ ${#USB_MIDI_DEFINE[@]} -gt 0 ]; then
             EXTRA_FLAGS_ARRAY+=("${USB_MIDI_DEFINE[@]}")
+        fi
+
+        # Audio : -O3 est OBLIGATOIRE pour le DSP (le core compile en -Os, soit
+        # un facteur 1,82 mesuré au banc) ; -DTEST bascule stmlib sur ses
+        # versions portables de Clip16/ClipU16/Sqrt, les originales étant de
+        # l'assembleur ARM. Vérifié : aucune collision sur TEST dans src/.
+        if true; then
+            EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
         fi
 
         BUILD_PROPS=()

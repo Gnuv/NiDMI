@@ -5,6 +5,7 @@
 #include "../server/ServerCore.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
+#include "../audio/AudioEngine.h"
 
 MidiRouter::MidiRouter()
     : rtpEnabled(true), oscEnabled(true), bluetoothEnabled(true), usbMidiEnabled(true), oscToSta(true), oscPort(8000), defaultChannel(1) {}
@@ -41,6 +42,10 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     // localement par un composant du boîtier n'allume aucune LED du même boîtier.
     g_componentManager.handleMidiNoteOn(ch, note, velocity);
 
+    // Écho AUDIO : le boîtier s'entend lui-même. Le moteur démarre à la
+    // première note (init paresseuse) — rien au boot, l'OTA reste sauf.
+    AudioEngine::noteOn(note, velocity);
+
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
         serverCore.sendOscNote(ch, note, velocity, oscToSta, oscPort);
@@ -61,6 +66,8 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     }
     // Écho local (cf. sendNoteOn) : éteint les LEDs appairées à cette note.
     g_componentManager.handleMidiNoteOff(ch, note, velocity);
+
+    AudioEngine::noteOff(note);
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {

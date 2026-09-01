@@ -1,0 +1,85 @@
+#include "APICommon.h"
+#include "../audio/AudioEngine.h"
+
+/*
+ * API audio — pilotage et MÉTROLOGIE.
+ *
+ * /api/audio/status est autant un outil de diagnostic qu'un état : il expose le
+ * tas interne libre et surtout LE PLUS GROS BLOC CONTIGU. C'est ce dernier qui
+ * décide si Plaits est portable ici — il lui faut 16 ko d'un seul tenant
+ * (shared_buffer[16384]). Question restée ouverte au §12.7 de
+ * CONVERGENCE_NIDMI.md faute d'une mesure sur S3 avec WiFi et serveur debout.
+ */
+void setupAudioAPI(AsyncWebServer& server) {
+
+    server.on("/api/audio/status", HTTP_GET, [](AsyncWebServerRequest *request){
+        const AudioEngine::Metriques m = AudioEngine::metriques();
+        String json = "{";
+        json += "\"started\":"            + String(m.demarre ? "true" : "false") + ",";
+        json += "\"heap_free\":"          + String(m.heapLibre) + ",";
+        json += "\"heap_largest_block\":" + String(m.heapPlusGrosBloc) + ",";
+        json += "\"heap_before_init\":"   + String(m.heapAvantInit) + ",";
+        json += "\"heap_after_init\":"    + String(m.heapApresInit) + ",";
+        json += "\"psram_free\":"         + String(m.psramLibre) + ",";
+        json += "\"sample_rate\":"        + String(m.sampleRateReel) + ",";
+        json += "\"blocks\":"             + String(m.blocsRendus) + ",";
+        json += "\"underruns\":"          + String(m.sousAlimentations) + ",";
+        // Plaits demande 16 ko contigus, plus sa marge de manœuvre.
+        json += "\"engine\":"             + String(m.moteur) + ",";
+        json += "\"plaits_ready\":"       + String(m.plaitsPret ? "true" : "false") + ",";
+        json += "\"plaits_bytes\":"       + String(m.plaitsOctets) + ",";
+        json += "\"cycles_per_sample\":"  + String(m.cyclesParEch) + ",";
+        // 5000 cycles/echantillon disponibles a 240 MHz et 48 kHz (MESURES.md).
+        json += "\"load_percent\":" + String(m.cyclesParEch * 100.0f / 5000.0f, 1) + ",";
+        json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc > 24576 ? "true" : "false");
+        json += "}";
+        request->send(200, "application/json", json);
+    });
+
+    /* Bip de test — la preuve la plus courte que la chaîne I2S marche.
+     * POST /api/audio/test  (freq=440&ms=500)  ou  (note=60&ms=500) */
+    server.on("/api/audio/test", HTTP_POST, [](AsyncWebServerRequest *request){
+        uint32_t ms = 500;
+        if (request->hasParam("ms", true)) ms = request->getParam("ms", true)->value().toInt();
+        if (ms == 0 || ms > 5000) ms = 500;
+
+        if (request->hasParam("note", true)) {
+            const int n = request->getParam("note", true)->value().toInt();
+            AudioEngine::noteOn((uint8_t)constrain(n, 0, 127), 100);
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"note\":" + String(n) + "}");
+            return;
+        }
+        float hz = 440.0f;
+        if (request->hasParam("freq", true)) hz = request->getParam("freq", true)->value().toFloat();
+        AudioEngine::testTone(hz, ms);
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"freq\":" + String(hz, 1) + ",\"ms\":" + String(ms) + "}");
+    });
+
+    /* Choix du moteur : -1 = sinus interne, 0..15 = moteur Plaits.
+     * L'allocation de Plaits (~24 ko de tas interne) est faite ici, pas au
+     * boot : si elle echoue on reste au sinus et la carte ne bronche pas. */
+    server.on("/api/audio/engine", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("engine", true)) {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"engine parameter required (-1..15)\"}");
+            return;
+        }
+        const int n = request->getParam("engine", true)->value().toInt();
+        if (AudioEngine::setEngine(n)) {
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");
+        } else {
+            request->send(507, "application/json",
+                "{\"status\":\"error\",\"message\":\"Plaits indisponible (tas insuffisant ?) — sinus conserve\"}");
+        }
+    });
+
+    /* Extinction — utile quand un noteOn de test reste accroché. */
+    server.on("/api/audio/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+        for (int n = 0; n < 128; n++) AudioEngine::noteOff((uint8_t)n);
+        AudioEngine::testTone(0.0f, 0);
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+}
