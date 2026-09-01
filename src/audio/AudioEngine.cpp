@@ -240,8 +240,30 @@ void testTone(float hz, uint32_t ms) {
   bipBlocsRestants = hz > 0.0f ? (ms * srReel) / (1000UL * FRAMES) : 0;
 }
 
+// Rend les ~26,6 ko de Plaits au tas. INDISPENSABLE et pas cosmétique : avec
+// Plaits résident il ne reste que 7,7 ko de plus gros bloc, et AsyncTCP n'a
+// alors plus de quoi constituer ses tampons — la page ne se sert plus (mesuré :
+// au-delà de 120 s pour /). Les deux pics ne doivent pas coïncider : on charge
+// l'app moteur libéré, puis on alloue. Voir hardware/bench/MESURES.md §10.
+void libererPlaits() {
+  if (!plaitsVoix) return;
+  // La tâche audio (cœur 1, prio 11) doit cesser de lire l'objet avant qu'on le
+  // détruise. Elle repasse au sinus dès son bloc suivant (2,5 ms) ; on lui en
+  // laisse huit. L'appelant est le gestionnaire HTTP, de priorité INFÉRIEURE :
+  // le vTaskDelay lui rend donc bien la main.
+  moteurCourant = -1;
+  vTaskDelay(pdMS_TO_TICKS(20));
+  plaitsVoix->~Voice();
+  heap_caps_free(plaitsVoix); plaitsVoix = nullptr;
+  heap_caps_free(plaitsMem);  plaitsMem  = nullptr;
+  plaitsOctets = 0;
+  Serial.printf("[audio] Plaits libere — tas interne %lu o, plus gros bloc %lu o\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
 bool setEngine(int moteur) {
-  if (moteur < 0) { moteurCourant = -1; return true; }
+  if (moteur < 0) { libererPlaits(); return true; }
   if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
   if (!ensureStarted()) return false;
   if (!plaitsAlloue()) return false;

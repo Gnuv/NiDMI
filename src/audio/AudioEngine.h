@@ -58,6 +58,9 @@ void testTone(float hz, uint32_t ms);
 // l'allocation échoue, on reste au sinus et on le dit. Le son ne doit jamais
 // pouvoir emporter le reste du boîtier.
 bool setEngine(int moteur);
+// engine = -1 LIBÈRE Plaits (et ne fait pas que le désélectionner) : sans ça la
+// carte ne peut plus servir sa propre interface. Voir le .cpp.
+void libererPlaits();
 int  engine();
 
 // Les cinq continus de Plaits, 0..1 — mêmes identifiants et mêmes plages que le
