@@ -31,6 +31,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"cycles_per_sample\":"  + String(m.cyclesParEch) + ",";
         // 5000 cycles/echantillon disponibles a 240 MHz et 48 kHz (MESURES.md).
         json += "\"load_percent\":" + String(m.cyclesParEch * 100.0f / 5000.0f, 1) + ",";
+        json += "\"heap_min_ever\":"      + String(m.heapMiniJamais) + ",";
+        json += "\"reset_reason\":\""      + String(m.causeResetTexte) + "\",";
         json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc > 24576 ? "true" : "false");
         json += "}";
         request->send(200, "application/json", json);
@@ -63,7 +65,7 @@ void setupAudioAPI(AsyncWebServer& server) {
     server.on("/api/audio/engine", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!request->hasParam("engine", true)) {
             request->send(400, "application/json",
-                "{\"status\":\"error\",\"message\":\"engine parameter required (-1..15)\"}");
+                "{\"status\":\"error\",\"message\":\"engine parameter required (-1..23)\"}");
             return;
         }
         const int n = request->getParam("engine", true)->value().toInt();
@@ -74,6 +76,44 @@ void setupAudioAPI(AsyncWebServer& server) {
             request->send(507, "application/json",
                 "{\"status\":\"error\",\"message\":\"Plaits indisponible (tas insuffisant ?) — sinus conserve\"}");
         }
+    });
+
+    /* Réglages Plaits — la charge d'une CUE. Occasionnelle et courte, donc dans
+     * la classe de requêtes qui ne creuse pas le tas (MESURES.md §10). Tous les
+     * paramètres sont optionnels : on ne change que ce qui est envoyé.
+     * Mêmes noms et mêmes plages que engines/core/plaits/web/index.js. */
+    server.on("/api/audio/params", HTTP_POST, [](AsyncWebServerRequest *request){
+        // ORDRE IMPORTANT : le moteur D'ABORD. setEngine() peut déclencher
+        // l'allocation de Plaits, dont l'initialisation repose le patch sur ses
+        // valeurs par défaut — appliquer les continus avant, c'est les perdre.
+        if (request->hasParam("engine", true)) {
+            const int n = request->getParam("engine", true)->value().toInt();
+            if (!AudioEngine::setEngine(n)) {
+                request->send(507, "application/json",
+                    "{\"status\":\"error\",\"message\":\"moteur indisponible (tas insuffisant ?)\"}");
+                return;
+            }
+        }
+
+        AudioEngine::Params p = AudioEngine::params();
+        auto lire = [&](const char* nom, float& dest){
+            if (request->hasParam(nom, true))
+                dest = request->getParam(nom, true)->value().toFloat();
+        };
+        lire("harmonics",  p.harmonics);
+        lire("timbre",     p.timbre);
+        lire("morph",      p.morph);
+        lire("decay",      p.decay);
+        lire("lpg_colour", p.lpgColour);
+        AudioEngine::setParams(p);
+        const AudioEngine::Params a = AudioEngine::params();
+        String json = "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine());
+        json += ",\"harmonics\":"  + String(a.harmonics, 3);
+        json += ",\"timbre\":"     + String(a.timbre, 3);
+        json += ",\"morph\":"      + String(a.morph, 3);
+        json += ",\"decay\":"      + String(a.decay, 3);
+        json += ",\"lpg_colour\":" + String(a.lpgColour, 3) + "}";
+        request->send(200, "application/json", json);
     });
 
     /* Extinction — utile quand un noteOn de test reste accroché. */

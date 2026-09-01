@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -241,7 +242,7 @@ void testTone(float hz, uint32_t ms) {
 
 bool setEngine(int moteur) {
   if (moteur < 0) { moteurCourant = -1; return true; }
-  if (moteur > 15) return false;
+  if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
   if (!ensureStarted()) return false;
   if (!plaitsAlloue()) return false;
   plaitsPatch.engine = moteur;
@@ -250,6 +251,22 @@ bool setEngine(int moteur) {
 }
 
 int engine() { return moteurCourant; }
+
+void setParams(const Params& p) {
+  // Écriture directe : ce sont des float alignés, lus par la tâche audio au
+  // bloc suivant. Un verrou coûterait plus cher que le pire cas — un bloc rendu
+  // avec un mélange de l'ancien et du nouveau réglage, soit 2,5 ms.
+  plaitsPatch.harmonics  = constrain(p.harmonics, 0.0f, 1.0f);
+  plaitsPatch.timbre     = constrain(p.timbre,    0.0f, 1.0f);
+  plaitsPatch.morph      = constrain(p.morph,     0.0f, 1.0f);
+  plaitsPatch.decay      = constrain(p.decay,     0.0f, 1.0f);
+  plaitsPatch.lpg_colour = constrain(p.lpgColour, 0.0f, 1.0f);
+}
+
+Params params() {
+  return Params{ plaitsPatch.harmonics, plaitsPatch.timbre, plaitsPatch.morph,
+                 plaitsPatch.decay, plaitsPatch.lpg_colour };
+}
 
 Metriques metriques() {
   Metriques m{};
@@ -266,6 +283,21 @@ Metriques metriques() {
   m.sampleRateReel    = srReel;
   m.blocsRendus       = nBlocs;
   m.sousAlimentations = nRetards;
+  // Plancher historique : si ce chiffre frôle zéro, le crash est un épuisement
+  // du tas, pas un chien de garde. C'est la mesure qui départage.
+  m.heapMiniJamais    = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+  m.causeReset        = (int)esp_reset_reason();
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;
+    case ESP_RST_SW:       m.causeResetTexte = "logiciel";  break;
+    case ESP_RST_PANIC:    m.causeResetTexte = "PANIQUE";   break;
+    case ESP_RST_INT_WDT:  m.causeResetTexte = "wdt_int";   break;
+    case ESP_RST_TASK_WDT: m.causeResetTexte = "WDT_TACHE"; break;
+    case ESP_RST_WDT:      m.causeResetTexte = "wdt_autre"; break;
+    case ESP_RST_BROWNOUT: m.causeResetTexte = "BROWNOUT";  break;
+    case ESP_RST_DEEPSLEEP: m.causeResetTexte = "deepsleep"; break;
+    default:               m.causeResetTexte = "inconnu";   break;
+  }
   return m;
 }
 

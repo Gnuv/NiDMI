@@ -50,12 +50,22 @@ void noteOff(uint8_t note);
 // Bip de test : fréquence en Hz, durée en ms. 0 Hz = silence immédiat.
 void testTone(float hz, uint32_t ms);
 
-// Moteur : -1 = sinus interne (toujours disponible), 0..15 = moteur Plaits.
+// Moteur : -1 = sinus interne (toujours disponible), 0..23 = moteur Plaits.
+// 24 moteurs : les 8 de engine2/ puis les 16 classiques — même plage que le
+// moteur WASM du navigateur (engines/core/plaits/web/index.js), pour qu'un même
+// bloc de composition sonne pareil des deux côtés.
 // Le passage à Plaits alloue paresseusement ses ~24 ko sur le TAS INTERNE — si
 // l'allocation échoue, on reste au sinus et on le dit. Le son ne doit jamais
 // pouvoir emporter le reste du boîtier.
 bool setEngine(int moteur);
 int  engine();
+
+// Les cinq continus de Plaits, 0..1 — mêmes identifiants et mêmes plages que le
+// moteur web. C'est ce qui permet à une cue de piloter indifféremment le WASM
+// du navigateur ou le DSP de la carte.
+struct Params { float harmonics, timbre, morph, decay, lpgColour; };
+void setParams(const Params& p);
+Params params();
 
 // Métrologie — répond à la question §12.7 de CONVERGENCE_NIDMI.md : combien de
 // tas reste-t-il réellement une fois WiFi + serveur async + app embarquée en
@@ -75,6 +85,10 @@ struct Metriques {
   bool     plaitsPret;
   uint32_t plaitsOctets;       // ce que Plaits a réellement pris sur le tas
   uint32_t cyclesParEch;       // coût mesuré du rendu, en cycles/échantillon
+  uint32_t heapMiniJamais;     // plancher du tas depuis le boot — LE chiffre qui
+                               // dit si l'on est mort d'épuisement mémoire
+  int      causeReset;         // esp_reset_reason() : panique ? chien de garde ?
+  const char* causeResetTexte;
 };
 Metriques metriques();
 
