@@ -1,6 +1,7 @@
 #include "../server/ServerCore.h"
 #include "ui_index.h"
 #include "ui_bundle.h"
+#include "app_archive.h"
 #include "../utils/PinMapper.h"
 #include "../api/APICommon.h"
 #include "../api/NetworkAPI.h"
@@ -260,11 +261,68 @@ void sendRtpStatus(AsyncWebSocket& ws) {
     ws.textAll(json);
 }
 
+/* Sert un fichier de l'application embarquée (app_archive.h), en streaming
+   par chunks depuis PROGMEM — le même patron que l'index historique. Un
+   ETag faible (index+taille) épargne le re-téléchargement complet à chaque
+   rechargement : ~400 ko de WiFi économisés tant que l'archive ne change pas. */
+static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin){
+    const AppFile* f = nullptr;
+    size_t idx = 0;
+    for (; idx < APP_FILES_COUNT; idx++) {
+        if (chemin.equals(APP_FILES[idx].chemin)) { f = &APP_FILES[idx]; break; }
+    }
+    if (!f) {
+        request->send(404, "text/plain; charset=utf-8", "Not found: " + chemin);
+        return;
+    }
+    String etag = "\"" + String(idx) + "-" + String(f->taille) + "\"";
+    if (request->header("If-None-Match") == etag) {
+        AsyncWebServerResponse *rep = request->beginResponse(304);
+        rep->addHeader("ETag", etag);
+        rep->addHeader("Cache-Control", "no-cache");
+        request->send(rep);
+        return;
+    }
+    const uint8_t* donnees = f->donnees;
+    const size_t taille = f->taille;
+    AsyncWebServerResponse *rep = request->beginResponse(f->type, taille,
+        [donnees, taille](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            size_t aEcrire = (taille - index < maxLen) ? (taille - index) : maxLen;
+            if (aEcrire > 0) memcpy_P(buffer, donnees + index, aEcrire);
+            return aEcrire;
+        });
+    if (f->gz) rep->addHeader("Content-Encoding", "gzip");
+    rep->addHeader("Cache-Control", "no-cache");
+    rep->addHeader("ETag", etag);
+    request->send(rep);
+}
+
 void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
-    // Page principale - Utiliser streaming par chunks depuis PROGMEM
+    /* ── L'application NiDMI (nidmi.html + css/ + js/), embarquée ────────────
+       GÉNÉRÉE par scripts/cartes/embarquer-app.py (dépôt nidmi) : fichiers
+       gzippés en PROGMEM, servis tels quels (Content-Encoding: gzip). C'est
+       l'étape 1c de CONVERGENCE_NIDMI.md §10 — une seule origine sert l'app
+       ET l'API, donc plus de question CORS. Le streaming par chunks évite
+       toute copie heap : le plus gros fichier ne coûte que son tampon. */
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        _sertArchiveApp(request, "/nidmi.html");
+    });
+
+    /* Tout chemin de l'app qui n'a pas sa route explicite passe par le
+       not-found : l'archive tranche. /css/theme.css, /js/…, et un 404 propre
+       pour le reste. /api/* garde son 404 JSON. */
+    server.onNotFound([](AsyncWebServerRequest *request){
+        if (request->url().startsWith("/api/")) {
+            request->send(404, "application/json", "{\"error\":\"route inconnue\"}");
+            return;
+        }
+        _sertArchiveApp(request, request->url());
+    });
+
+    // L'UI historique de Patrice reste joignable — filet et comparaison.
+    server.on("/patrice", HTTP_GET, [](AsyncWebServerRequest *request){
         size_t htmlLen = strlen_P(INDEX_HTML);
-        AsyncWebServerResponse *response = request->beginResponse("text/html; charset=utf-8", htmlLen, 
+        AsyncWebServerResponse *response = request->beginResponse("text/html; charset=utf-8", htmlLen,
             [htmlLen](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
                 size_t toWrite = (htmlLen - index < maxLen) ? (htmlLen - index) : maxLen;
                 if (toWrite > 0) {
