@@ -1,4 +1,5 @@
 #include "NiDMI.h"
+#include <soc/rtc_cntl_reg.h>
 #include "server/ServerCore.h"
 #include "managers/ComponentManager.h"
 #include "utils/PinMapper.h"
@@ -52,6 +53,15 @@ static unsigned long g_rebootRequestTime = 0;
 extern "C" void nidmi_requestReboot(){
     g_rebootRequestTime = millis();
     g_requestReboot = true;
+}
+
+// Mode téléchargement (bootloader ROM), demandé par l'API. Même différé que le
+// reboot : bloquer ici bloquerait async_tcp, donc la réponse HTTP ne partirait
+// jamais — c'est ce qui s'était passé au premier essai.
+static volatile bool g_requestDownload = false;
+extern "C" void nidmi_requestDownloadMode(){
+    g_rebootRequestTime = millis();
+    g_requestDownload = true;
 }
 
 // Le mapping GPIO est maintenant géré par PinMapper
@@ -241,6 +251,10 @@ void nidmi_begin() {
 
 void nidmi_loop() {
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
+    if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
+        REG_WRITE(RTC_CNTL_OPTION1_REG, 0x1);   // force_download_boot
+        ESP.restart();
+    }
     if (g_requestReboot && (millis() - g_rebootRequestTime >= 2000)) {
         ESP.restart();
     }
