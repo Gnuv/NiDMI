@@ -11,6 +11,7 @@
 #include <new>
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
+#include <Preferences.h>
 
 namespace AudioEngine {
 namespace {
@@ -234,6 +235,57 @@ void boucleAudio(void*) {
 
 }  // namespace
 
+// ── Persistance du choix de moteur ─────────────────────────────────────────
+// Le fichier d'echantillon survit au redemarrage (il est sur mapfs), mais le
+// CHOIX ne survivait pas : apres un reboot on retombait sur le sinus, et
+// l'echantillon telebverse semblait avoir disparu. C'est de la configuration de
+// carte au sens du §11 de CONVERGENCE_NIDMI.md — « la carte detient la config
+// qui tourne » — donc elle a sa place en NVS.
+//
+// Format d'une seule cle : ""/"-1" = sinus · "p:<n>" = Plaits n · "s:<nom>" =
+// echantillon. Une cle plutot que deux : l'etat est exclusif par construction.
+namespace {
+constexpr const char* NVS_ESPACE = "nidmi-audio";
+constexpr const char* NVS_CLE    = "moteur";
+
+void memoriser(const String& valeur) {
+  Preferences p;
+  if (!p.begin(NVS_ESPACE, false)) return;
+  p.putString(NVS_CLE, valeur);
+  p.end();
+}
+
+// Appele une seule fois, a la premiere note : on ne charge JAMAIS au boot, pour
+// la meme raison que le reste du moteur est paresseux — un echec ici ne doit
+// pas pouvoir couter l'OTA.
+void restaurer() {
+  Preferences p;
+  if (!p.begin(NVS_ESPACE, true)) return;
+  const String v = p.getString(NVS_CLE, "");
+  p.end();
+  if (!v.length() || v == "-1") return;
+
+  if (v.startsWith("s:")) {
+    String raison;
+    const String nom = v.substring(2);
+    if (SampleStore::charger(nom.c_str(), raison)) {
+      moteurCourant = -2;
+      Serial.printf("[audio] echantillon restaure : %s\n", nom.c_str());
+    } else {
+      Serial.printf("[audio] restauration de %s impossible : %s\n",
+                    nom.c_str(), raison.c_str());
+    }
+  } else if (v.startsWith("p:")) {
+    const int n = v.substring(2).toInt();
+    if (n >= 0 && n <= 23 && plaitsAlloue()) {
+      plaitsPatch.engine = n;
+      moteurCourant = n;
+      Serial.printf("[audio] moteur Plaits restaure : %d\n", n);
+    }
+  }
+}
+}  // namespace
+
 bool isStarted() { return demarre; }
 
 bool ensureStarted() {
@@ -264,6 +316,7 @@ bool ensureStarted() {
 
   heapApres = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   demarre = true;
+  restaurer();          // le choix memorise, pas au boot : ici, a la 1re note
   Serial.printf("[audio] demarre — %lu Hz reels, heap interne %lu -> %lu (cout %ld o)\n",
                 (unsigned long)srReel, (unsigned long)heapAvant,
                 (unsigned long)heapApres, (long)heapAvant - (long)heapApres);
@@ -316,11 +369,12 @@ bool setSampler(const char* nom, String& raison) {
   libererPlaits();                       // on ne tient jamais les deux à la fois
   if (!SampleStore::charger(nom, raison)) return false;
   moteurCourant = -2;
+  memoriser(String("s:") + nom);
   return true;
 }
 
 void arreterSampler() {
-  if (moteurCourant == -2) moteurCourant = -1;
+  if (moteurCourant == -2) { moteurCourant = -1; memoriser("-1"); }
   sampleActif = false;
   SampleStore::decharger();
 }
@@ -330,13 +384,14 @@ const char* samplerNom() { return SampleStore::nomCharge(); }
 
 bool setEngine(int moteur) {
   if (moteur == -2) return false;        // passer par setSampler
-  if (moteur < 0) { sampleActif = false; libererPlaits(); return true; }
+  if (moteur < 0) { sampleActif = false; libererPlaits(); memoriser("-1"); return true; }
   if (moteurCourant == -2) arreterSampler();
   if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
   if (!ensureStarted()) return false;
   if (!plaitsAlloue()) return false;
   plaitsPatch.engine = moteur;
   moteurCourant = moteur;
+  memoriser(String("p:") + moteur);
   return true;
 }
 
