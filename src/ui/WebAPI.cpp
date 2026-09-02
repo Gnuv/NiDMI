@@ -165,6 +165,8 @@ String getDefaultConfig(String pin) {
     return "{\"role\":\"button\",\"rtpMidiEnabled\":true,\"midiMessageType\":\"Note\",\"midiNote\":60,\"midiChannel\":1,\"btnMode\":\"pulse\",\"btnPulseTiming\":\"release\",\"oscEnabled\":true,\"oscAddress\":\"/note\",\"dbgEnabled\":false,\"dbgHeader\":\"\"}";
 }
 
+#include "../audio/AudioEngine.h"
+
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
         Serial.println("WebSocket client connected");
@@ -190,6 +192,34 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
             return;
         }
 #endif
+
+        /* Notes jouées depuis l'interface — clavier à l'écran ou MIDI entrant.
+         *
+         * Pourquoi le WebSocket et pas une route HTTP : une requête par note,
+         * c'est exactement la charge concurrente qui creuse le tas de la carte
+         * (plancher mesuré à 1 348 o, hardware/bench/MESURES.md §10), et la
+         * latence relevée allait de 0,27 à 2,4 s sous charge — injouable. Ici,
+         * une seule connexion, aucune allocation par note.
+         *
+         * Format, aligné sur les préfixes déjà en place :
+         *   NOTE_ON:<note>,<velocite>     NOTE_OFF:<note>
+         * Volontairement sans accusé de réception : une note perdue vaut mieux
+         * qu'un aller-retour sur le chemin temps réel. */
+        if (message.startsWith("NOTE_ON:")) {
+            const String corps = message.substring(8);
+            const int v = corps.indexOf(',');
+            const int note = (v > 0 ? corps.substring(0, v) : corps).toInt();
+            const int velo = (v > 0 ? corps.substring(v + 1).toInt() : 100);
+            if (note >= 0 && note <= 127) {
+                AudioEngine::noteOn((uint8_t)note, (uint8_t)constrain(velo, 1, 127));
+            }
+            return;
+        }
+        if (message.startsWith("NOTE_OFF:")) {
+            const int note = message.substring(9).toInt();
+            if (note >= 0 && note <= 127) AudioEngine::noteOff((uint8_t)note);
+            return;
+        }
 
         // Activation/désactivation runtime-only du monitoring SVG
         if (message.startsWith("PIN_MONITORING:")) {
