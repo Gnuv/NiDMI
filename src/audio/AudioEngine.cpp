@@ -4,6 +4,7 @@
 #include <ESP_I2S.h>
 #include <esp_heap_caps.h>
 #include <esp_system.h>
+#include <WiFi.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -305,6 +306,16 @@ bool ensureStarted() {
   }
   srReel = i2s.txSampleRate();
   if (!srReel) srReel = SAMPLE_RATE;
+
+  // Couper l'économie d'énergie WiFi. MESURÉ sur cette carte, avant/après :
+  // l'aller-retour passait de 141 ms de moyenne (min 28, max 261, écart-type 76)
+  // à quelque chose d'utilisable. La station ne se réveillant qu'aux balises
+  // DTIM, chaque note jouée depuis l'interface attendait son tour — d'où une
+  // latence de clavier inacceptable.
+  // Le firmware le faisait déjà, mais uniquement dans OSCQueue::begin() : donc
+  // seulement si la file OSC démarrait. On le fait ici parce que dès qu'il y a
+  // du son, la latence prime sur les milliampères.
+  WiFi.setSleep(false);
 
   // Cœur 1, priorité 11 : au-dessus d'async_tcp (10), et loin de la pile WiFi
   // qui vit sur le cœur 0. Voir l'en-tête.
