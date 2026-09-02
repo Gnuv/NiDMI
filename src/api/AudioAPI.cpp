@@ -153,6 +153,28 @@ void setupAudioAPI(AsyncWebServer& server) {
             SampleStore::ecrireMorceau(data, len);
         });
 
+    /* Suppression d'un échantillon. Si c'est celui qui est chargé, on arrête
+     * d'abord le lecteur : sinon la PSRAM garderait des données orphelines et la
+     * NVS pointerait sur un fichier absent. */
+    server.on("/api/audio/sample", HTTP_DELETE, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("name")) {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
+            return;
+        }
+        const String nom = request->getParam("name")->value();
+        if (nom == String(AudioEngine::samplerNom())) {
+            AudioEngine::arreterSampler(/*persister=*/true);
+        }
+        if (SampleStore::supprimer(nom.c_str())) {
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"deleted\":\"" + nom + "\"}");
+        } else {
+            request->send(404, "application/json",
+                "{\"status\":\"error\",\"message\":\"fichier introuvable\"}");
+        }
+    });
+
     /* Choix de l'échantillon à jouer. name vide = on arrête le lecteur. */
     server.on("/api/audio/sampler", HTTP_POST, [](AsyncWebServerRequest *request){
         const String nom = request->hasParam("name", true)

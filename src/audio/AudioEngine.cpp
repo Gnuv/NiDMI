@@ -374,8 +374,15 @@ bool setSampler(const char* nom, String& raison, bool persister) {
 }
 
 void arreterSampler(bool persister) {
-  if (moteurCourant == -2) { moteurCourant = -1; if (persister) memoriser("-1"); }
+  const bool etaitCharge = (moteurCourant == -2);
+  if (etaitCharge) { moteurCourant = -1; if (persister) memoriser("-1"); }
   sampleActif = false;
+  // Même précaution que libererPlaits(), qui manquait ici : rendreSample() lit
+  // le tampon PSRAM à chaque bloc. Le libérer sans attendre, c'est un accès
+  // après libération — audio en charpie ou plantage. On laisse huit blocs
+  // (2,5 ms chacun) à la tâche audio pour repasser au sinus. L'appelant est le
+  // gestionnaire HTTP, de priorité inférieure : le vTaskDelay lui rend la main.
+  if (etaitCharge) vTaskDelay(pdMS_TO_TICKS(20));
   SampleStore::decharger();
 }
 
