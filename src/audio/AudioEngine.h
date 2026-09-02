@@ -58,7 +58,12 @@ void testTone(float hz, uint32_t ms);
 // Le passage à Plaits alloue paresseusement ses ~24 ko sur le TAS INTERNE — si
 // l'allocation échoue, on reste au sinus et on le dit. Le son ne doit jamais
 // pouvoir emporter le reste du boîtier.
-bool setEngine(int moteur);
+// persister : écrire le choix en NVS. FAUX PAR DÉFAUT, et ce n'est pas un
+// détail — une écriture NVS est une écriture FLASH, et une opération flash
+// bloque le cache d'instructions, donc la tâche audio (mesuré : 1,8 % de blocs
+// en retard, MESURES.md §13). Une cue qui change de moteur en performance ne
+// doit donc RIEN écrire. Seule une action humaine explicite persiste.
+bool setEngine(int moteur, bool persister = false);
 // engine = -1 LIBÈRE Plaits (et ne fait pas que le désélectionner) : sans ça la
 // carte ne peut plus servir sa propre interface. Voir le .cpp.
 void libererPlaits();
@@ -73,8 +78,12 @@ struct Params { float harmonics, timbre, morph, decay, lpgColour; };
 // que Plaits en RAM interne (quelques centaines d'octets contre 26 632), parce
 // que l'échantillon vit en PSRAM : il cohabite donc avec le service de
 // l'interface sans le dégrader. Voir SampleStore.
-bool setSampler(const char* nom, String& raison);
-void arreterSampler();
+bool setSampler(const char* nom, String& raison, bool persister = false);
+// Même règle que setEngine : on n'écrit en NVS que sur action explicite.
+// setEngine() appelle cette fonction en interne quand on quitte le mode
+// échantillon — y compris depuis le chemin des cues. Sans le paramètre, une cue
+// effaçait le choix mémorisé (constaté au test de redémarrage).
+void arreterSampler(bool persister = false);
 bool samplerActif();
 const char* samplerNom();
 void setParams(const Params& p);

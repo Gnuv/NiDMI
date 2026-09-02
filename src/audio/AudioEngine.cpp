@@ -364,17 +364,17 @@ void libererPlaits() {
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
-bool setSampler(const char* nom, String& raison) {
+bool setSampler(const char* nom, String& raison, bool persister) {
   if (!ensureStarted()) { raison = "audio indisponible"; return false; }
   libererPlaits();                       // on ne tient jamais les deux à la fois
   if (!SampleStore::charger(nom, raison)) return false;
   moteurCourant = -2;
-  memoriser(String("s:") + nom);
+  if (persister) memoriser(String("s:") + nom);
   return true;
 }
 
-void arreterSampler() {
-  if (moteurCourant == -2) { moteurCourant = -1; memoriser("-1"); }
+void arreterSampler(bool persister) {
+  if (moteurCourant == -2) { moteurCourant = -1; if (persister) memoriser("-1"); }
   sampleActif = false;
   SampleStore::decharger();
 }
@@ -382,16 +382,20 @@ void arreterSampler() {
 bool samplerActif() { return moteurCourant == -2 && SampleStore::estCharge(); }
 const char* samplerNom() { return SampleStore::nomCharge(); }
 
-bool setEngine(int moteur) {
+bool setEngine(int moteur, bool persister) {
   if (moteur == -2) return false;        // passer par setSampler
-  if (moteur < 0) { sampleActif = false; libererPlaits(); memoriser("-1"); return true; }
-  if (moteurCourant == -2) arreterSampler();
+  if (moteur < 0) {
+    sampleActif = false; libererPlaits();
+    if (persister) memoriser("-1");
+    return true;
+  }
+  if (moteurCourant == -2) arreterSampler(persister);   // propage la décision
   if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
   if (!ensureStarted()) return false;
   if (!plaitsAlloue()) return false;
   plaitsPatch.engine = moteur;
   moteurCourant = moteur;
-  memoriser(String("p:") + moteur);
+  if (persister) memoriser(String("p:") + moteur);
   return true;
 }
 

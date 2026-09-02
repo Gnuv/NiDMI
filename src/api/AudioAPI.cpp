@@ -70,7 +70,7 @@ void setupAudioAPI(AsyncWebServer& server) {
             return;
         }
         const int n = request->getParam("engine", true)->value().toInt();
-        if (AudioEngine::setEngine(n)) {
+        if (AudioEngine::setEngine(n, /*persister=*/true)) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");
         } else {
@@ -89,7 +89,9 @@ void setupAudioAPI(AsyncWebServer& server) {
         // valeurs par défaut — appliquer les continus avant, c'est les perdre.
         if (request->hasParam("engine", true)) {
             const int n = request->getParam("engine", true)->value().toInt();
-            if (!AudioEngine::setEngine(n)) {
+            // Chemin des CUES (js/device/audio-board.js) : on ne persiste pas.
+            // Une cue change le son, elle ne redéfinit pas le défaut du boîtier.
+            if (!AudioEngine::setEngine(n, /*persister=*/false)) {
                 request->send(507, "application/json",
                     "{\"status\":\"error\",\"message\":\"moteur indisponible (tas insuffisant ?)\"}");
                 return;
@@ -156,12 +158,12 @@ void setupAudioAPI(AsyncWebServer& server) {
         const String nom = request->hasParam("name", true)
                          ? request->getParam("name", true)->value() : String("");
         if (!nom.length()) {
-            AudioEngine::arreterSampler();
+            AudioEngine::arreterSampler(/*persister=*/true);   // action humaine
             request->send(200, "application/json", "{\"status\":\"ok\",\"sampler\":\"\"}");
             return;
         }
         String raison;
-        if (AudioEngine::setSampler(nom.c_str(), raison)) {
+        if (AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/true)) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"sampler\":\"" + nom + "\"}");
         } else {
