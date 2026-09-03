@@ -1,5 +1,6 @@
 #include "APICommon.h"
 #include "../audio/AudioEngine.h"
+#include "../midi/MidiRouter.h"
 #include "../audio/SampleStore.h"
 
 /*
@@ -40,6 +41,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
         json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
         json += "\"niveau\":"            + String(m.niveau) + ",";
+        json += "\"derniere_note\":"     + String(m.derniereNote) + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -222,6 +224,17 @@ void setupAudioAPI(AsyncWebServer& server) {
     /* PLAY : ouvre la porte de silence. Symetrique de /api/audio/stop, et
      * volontairement SANS reallocation — le moteur reste charge, pour que le
      * play suivant reparte instantanement. */
+    /* Script .nms applique au MIDI ENTRANT, par la CARTE. Le navigateur ne fait
+     * que POUSSER le script — il ne l'execute jamais (regle du headless : tout
+     * est fait dans la carte). Corps = le script, vide = passage direct. */
+    server.on("/api/midi/script", HTTP_POST, [](AsyncWebServerRequest *request){
+        String sc;
+        if (request->hasParam("script", true)) sc = request->getParam("script", true)->value();
+        g_midiRouter.setScriptMidi(sc);
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"len\":") + sc.length() + "}");
+    });
+
     server.on("/api/audio/resume", HTTP_POST, [](AsyncWebServerRequest *request){
         AudioEngine::ouvrirSon();
         request->send(200, "application/json", "{\"status\":\"ok\"}");

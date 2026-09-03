@@ -66,6 +66,7 @@ volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
 volatile bool    gSilence      = true;    // MUET au demarrage : rien ne sort tant que PLAY n'a pas ouvert
 volatile uint16_t niveauCrete  = 0;      // crete du DERNIER bloc reellement envoye
+volatile uint8_t  derniereNote  = 255;   // 255 = aucune ; temoin du MIDI reellement joue
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
 // moteur (« All engines will share the same RAM space », voice.cpp) : le pool
@@ -194,6 +195,7 @@ void appliquer(const Evenement& e) {
     sampleActif = true;
     return;
   }
+  if (e.velo != 0) derniereNote = e.note;   // temoin : la note REELLEMENT jouee
   if (moteurCourant >= 0 && plaitsVoix) {
     // Le LPG de Plaits gere l'extinction : son decay EST le relachement, et il
     // doit rester audible. (J'avais tente de fermer la porte au relachement de
@@ -699,6 +701,7 @@ Metriques metriques() {
   m.bootCoupe         = restaurationCoupee;
   m.silence           = gSilence;
   m.niveau            = niveauCrete;
+  m.derniereNote      = derniereNote;
   m.causeReset        = (int)esp_reset_reason();
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;

@@ -1,4 +1,5 @@
 #include "MidiRouter.h"
+#include "../mapping/MappingEngine.h"
 #include <Arduino.h>
 
 // Dépendances vers le serveur core
@@ -227,3 +228,40 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
 }
 
 
+
+
+// ── Script .nms sur le MIDI entrant ────────────────────────────────────────
+void MidiRouter::setScriptMidi(const String& script) {
+    scriptEntrant = script;
+    Serial.printf("[MidiRouter] script MIDI entrant : %s\n",
+                  scriptEntrant.length() ? scriptEntrant.c_str() : "(aucun)");
+}
+
+// Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,
+// donc identiquement pour l'USB, le clavier de l'app et le reste : c'est ce qui
+// garantit qu'un bloc mapping vaut pour toutes les sources, et pas seulement
+// pour celles qu'on aurait pense cabler une a une.
+void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
+    uint8_t n = note, v = velocity, c = channel;
+
+    if (scriptEntrant.length()) {
+        MappingEngine::SortieNote sortie;
+        if (MappingEngine::executeMidiNote(scriptEntrant.c_str(), note, velocity, channel,
+                                           estNoteOff, sortie)) {
+            n = sortie.note; v = sortie.velo; c = sortie.canal;
+        }
+        // Script present mais muet (aucun note.out) : on NE JOUE PAS. Un script
+        // qui filtre doit pouvoir bloquer une note — sinon « filtrer » serait
+        // impossible a exprimer.
+        else return;
+    }
+
+    // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
+    if (estNoteOff) {
+        g_componentManager.handleMidiNoteOff(c, n, v);
+        AudioEngine::noteOff(n);
+    } else {
+        g_componentManager.handleMidiNoteOn(c, n, v);
+        AudioEngine::noteOn(n, v);
+    }
+}

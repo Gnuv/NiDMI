@@ -237,14 +237,8 @@ void nidmi_begin() {
        Note : la porte de silence reste maitresse — sans PLAY, ces notes
        n'atteignent pas le DAC (MESURES.md §19). */
     serverCore.usbMidi().setMidiInputHooks(
-        [](uint8_t ch, uint8_t note, uint8_t vel) {
-            g_componentManager.handleMidiNoteOn(ch, note, vel);
-            AudioEngine::noteOn(note, vel);
-        },
-        [](uint8_t ch, uint8_t note, uint8_t vel) {
-            g_componentManager.handleMidiNoteOff(ch, note, vel);
-            AudioEngine::noteOff(note);
-        },
+        [](uint8_t ch, uint8_t note, uint8_t vel) { g_midiRouter.noteEntrante(ch, note, vel, false); },
+        [](uint8_t ch, uint8_t note, uint8_t vel) { g_midiRouter.noteEntrante(ch, note, vel, true); },
         [](uint8_t ch, uint8_t cc, uint8_t val) {
             g_componentManager.handleMidiControlChange(ch, cc, val);
         }

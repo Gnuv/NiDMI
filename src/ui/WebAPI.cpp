@@ -166,6 +166,7 @@ String getDefaultConfig(String pin) {
 }
 
 #include "../audio/AudioEngine.h"
+#include "../midi/MidiRouter.h"
 
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
@@ -211,13 +212,13 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
             const int note = (v > 0 ? corps.substring(0, v) : corps).toInt();
             const int velo = (v > 0 ? corps.substring(v + 1).toInt() : 100);
             if (note >= 0 && note <= 127) {
-                AudioEngine::noteOn((uint8_t)note, (uint8_t)constrain(velo, 1, 127));
+                g_midiRouter.noteEntrante(1, (uint8_t)note, (uint8_t)constrain(velo, 1, 127), false);
             }
             return;
         }
         if (message.startsWith("NOTE_OFF:")) {
             const int note = message.substring(9).toInt();
-            if (note >= 0 && note <= 127) AudioEngine::noteOff((uint8_t)note);
+            if (note >= 0 && note <= 127) g_midiRouter.noteEntrante(1, (uint8_t)note, 0, true);
             return;
         }
 

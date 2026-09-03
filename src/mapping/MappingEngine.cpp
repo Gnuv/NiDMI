@@ -197,3 +197,86 @@ void MappingEngine::execute(const char* script, float inputVal, MidiSender* midi
         end = s.indexOf(':', start);
     }
 }
+
+// ── Traitement d'un evenement MIDI entrant ─────────────────────────────────
+// Meme pipeline que execute(), mais la valeur courante part de la NOTE et peut
+// etre republiee comme note. C'est ce qui permet a un .nms de mapping de
+// transformer le MIDI ENTRANT — transposition, filtrage de canal, remappage —
+// SUR LA CARTE, sans qu'un navigateur soit dans le chemin du son.
+bool MappingEngine::executeMidiNote(const char* script,
+                                    uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
+                                    bool estNoteOff, SortieNote& sortie) {
+    sortie.emise = false;
+    if (!script || script[0] == '\0') return false;
+
+    float courant = (float)noteIn;      // par defaut le pipeline porte la note
+    String s = String(script);
+    int debut = 0;
+    int fin = s.indexOf(':');
+
+    while (debut < (int)s.length()) {
+        int finReelle = (fin == -1) ? s.length() : fin;
+        String seg = s.substring(debut, finReelle);
+        seg.trim();
+
+        if (seg.startsWith("note.in(")) {
+            courant = (float)noteIn;
+        }
+        else if (seg.startsWith("vel.in(") || seg.startsWith("velo.in(")) {
+            courant = (float)veloIn;
+        }
+        else if (seg.startsWith("chan.in(") || seg.startsWith("ch.in(")) {
+            courant = (float)canalIn;
+        }
+        else if (seg.startsWith("r(\"")) {
+            // r("param","nom",min,max,defaut) : valeur reglee depuis l'app, tenue
+            // par le FluxRegistry. Absente, on garde la valeur courante — un
+            // script incomplet ne doit pas rendre la carte muette.
+            int q1 = seg.indexOf('"');
+            int q2 = seg.indexOf('"', q1 + 1);
+            String cible = (q1 != -1 && q2 != -1) ? seg.substring(q1 + 1, q2) : String("");
+            // Forme r("param","nom",...) : c'est le DEUXIEME nom qui identifie.
+            if (cible == "param") {
+                int q3 = seg.indexOf('"', q2 + 1);
+                int q4 = seg.indexOf('"', q3 + 1);
+                if (q3 != -1 && q4 != -1) cible = seg.substring(q3 + 1, q4);
+            }
+            if (cible.length() && FluxRegistry::has(cible.c_str())) {
+                courant = FluxRegistry::get(cible.c_str());
+            } else {
+                // Valeur par defaut declaree en dernier argument, si presente.
+                int derniereVirgule = seg.lastIndexOf(',');
+                int par = seg.indexOf(')');
+                if (derniereVirgule != -1 && par != -1 && par > derniereVirgule)
+                    courant = seg.substring(derniereVirgule + 1, par).toFloat();
+            }
+        }
+        else if (seg.startsWith("+(")) { int p = seg.indexOf(')'); if (p!=-1) courant += seg.substring(2,p).toFloat(); }
+        else if (seg.startsWith("-(")) { int p = seg.indexOf(')'); if (p!=-1) courant -= seg.substring(2,p).toFloat(); }
+        else if (seg.startsWith("*(")) { int p = seg.indexOf(')'); if (p!=-1) courant *= seg.substring(2,p).toFloat(); }
+        else if (seg.startsWith("/(")) { int p = seg.indexOf(')'); if (p!=-1) { float d = seg.substring(2,p).toFloat(); if (d != 0) courant /= d; } }
+        else if (seg.startsWith("note.out(")) {
+            int par = seg.indexOf(')');
+            if (par != -1) {
+                String args = seg.substring(9, par);
+                int virgule = args.indexOf(',');
+                if (virgule == -1) {
+                    // note.out(ch) — forme MIDI : la valeur courante EST la note.
+                    sortie.note  = (uint8_t)constrain((int)lroundf(courant), 0, 127);
+                    sortie.canal = (uint8_t)constrain(args.toInt(), 1, 16);
+                } else {
+                    // note.out(note, ch) — forme CAPTEUR : note litterale.
+                    sortie.note  = (uint8_t)constrain(args.substring(0, virgule).toInt(), 0, 127);
+                    sortie.canal = (uint8_t)constrain(args.substring(virgule + 1).toInt(), 1, 16);
+                }
+                sortie.velo  = estNoteOff ? 0 : veloIn;
+                sortie.emise = true;
+            }
+        }
+
+        if (fin == -1) break;
+        debut = fin + 1;
+        fin = s.indexOf(':', debut);
+    }
+    return sortie.emise;
+}

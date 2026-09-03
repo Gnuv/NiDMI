@@ -177,6 +177,7 @@ struct Metriques {
   bool     bootCoupe;          // restauration coupée : garde-fou atteint
   bool     silence;            // porte de silence fermée (STOP)
   uint16_t niveau;             // crête réellement envoyée au DAC (0 = muet)
+  uint8_t  derniereNote;       // dernière note jouée (255 = aucune)
 };
 Metriques metriques();
 
