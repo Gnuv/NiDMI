@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <esp_heap_caps.h>
+#include <driver/rtc_io.h>
+#include <driver/touch_sensor.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -65,12 +67,31 @@ volatile uint32_t    plaitsOctets  = 0;
 volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
 
+// Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
+// moteur (« All engines will share the same RAM space », voice.cpp) : le pool
+// doit donc valoir la taille du moteur LE PLUS GOURMAND du registre, pas leur
+// somme. Mesure par moteur, MESURES.md §17 :
+//
+//   registre complet : Particle 16 384 · String 15 520 · Speech 14 656  -> 16 384
+//   image allegee    : les sept lourds sont substitues, le max devient
+//                      Swarm a 512 o                                    ->  1 024
+//                      (2x de marge sur une mesure exacte, pas estimee)
+#ifdef PLAITS_LEGER
+constexpr size_t POOL_PLAITS = 1024;
+#else
+constexpr size_t POOL_PLAITS = 16384;
+#endif
+
 bool plaitsAlloue() {
   if (plaitsVoix) return true;
   const uint32_t avant = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
-  plaitsMem = (char*)heap_caps_malloc(16384, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  if (!plaitsMem) { Serial.println("[audio] Plaits : 16 ko contigus indisponibles"); return false; }
+  plaitsMem = (char*)heap_caps_malloc(POOL_PLAITS, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  if (!plaitsMem) {
+    Serial.printf("[audio] Plaits : %u o contigus indisponibles pour le scratch\n",
+                  (unsigned)POOL_PLAITS);
+    return false;
+  }
 
   void* brut = heap_caps_malloc(sizeof(plaits::Voice), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   if (!brut) {
@@ -80,7 +101,7 @@ bool plaitsAlloue() {
   }
   plaitsVoix = new (brut) plaits::Voice();
 
-  stmlib::BufferAllocator allocateur(plaitsMem, 16384);
+  stmlib::BufferAllocator allocateur(plaitsMem, POOL_PLAITS);
   plaitsVoix->Init(&allocateur);
 
   plaitsPatch.note = 48.0f;
@@ -94,8 +115,14 @@ bool plaitsAlloue() {
   plaitsMod.trigger_patched = true;   // sans ça les moteurs jouent en continu
 
   plaitsOctets = avant - heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-  Serial.printf("[audio] Plaits alloue : %lu o (Voice %u + 16384)\n",
-                (unsigned long)plaitsOctets, (unsigned)sizeof(plaits::Voice));
+  Serial.printf("[audio] Plaits alloue : %lu o (Voice %u + pool %u)%s\n",
+                (unsigned long)plaitsOctets, (unsigned)sizeof(plaits::Voice),
+                (unsigned)POOL_PLAITS,
+#ifdef PLAITS_LEGER
+                " — IMAGE ALLEGEE, 7 emplacements substitues");
+#else
+                "");
+#endif
   return true;
 }
 
@@ -253,12 +280,18 @@ constexpr const char* NVS_CLE_ESSAIS = "bootess";
 // Garde-fou du chargement au boot. Le compteur vit en NVS pour survivre à une
 // coupure de courant — c'est tout l'intérêt : une config qui affame la carte se
 // désarme d'elle-même au bout de TENTATIVES_MAX cycles d'alimentation.
-// Seuil de la garde d'allocation à chaud, en octets de PLUS GROS BLOC CONTIGU.
-// Dérivé de la seule séquence mesurée comme viable (MESURES.md §11) : carte
-// fraîche, 31 732 o d'un seul tenant, Plaits alloué, 7 668 o restants, page
-// servie en 0,854 s. En dessous, on n'a aucune mesure qui tienne — et on a une
-// mesure d'échec. 28 000 laisse la carte fraîche passer et arrête le reste.
-constexpr uint32_t SEUIL_BASCULE_CHAUD = 28000;
+// Réserve de bloc contigu à laisser au serveur après l'allocation de Plaits.
+// Mesuré (MESURES.md §11, §16, §19) : la carte sert sa page en 0,05 s avec
+// 16 372 o de plus gros bloc, et n'y arrive JAMAIS à 7 668. On garde 12 000.
+constexpr uint32_t RESERVE_SERVICE = 12000;
+
+// Le seuil de bascule à chaud se DÉDUIT du besoin, il n'est pas une constante :
+// une image allégée (POOL_PLAITS = 1 024) doit pouvoir basculer là où l'image
+// complète (16 384) ne le doit pas. Un seuil figé se trompait forcément dans
+// l'un des deux cas.
+static inline uint32_t seuilBasculeChaud() {
+  return (uint32_t)POOL_PLAITS + (uint32_t)sizeof(plaits::Voice) + RESERVE_SERVICE;
+}
 Bascule derniereBasc = Bascule::Appliquee;
 
 uint8_t  essaisAuBoot      = 0;
@@ -406,6 +439,31 @@ bool ensureStarted() {
   evenements = xQueueCreate(32, sizeof(Evenement));
   if (!evenements) { Serial.println("[audio] file impossible"); return false; }
 
+  // ── Reprendre les broches au domaine RTC avant de configurer l'I2S ───────
+  // GPIO1 est le BCK de l'I2S ET la broche T1 du diagnostic tactile du boot
+  // (NiDMI.cpp, touchDiag). touchRead() bascule la broche dans le mux RTC, et
+  // i2s.begin() ne l'en sort PAS : plus d'horloge de bit, le DMA ne se vide
+  // jamais, et la tâche audio se bloque définitivement dans i2s.write() après
+  // avoir rempli le tampon.
+  //
+  // Symptôme mesuré : compteur de blocs figé à ~64 (soit exactement la taille
+  // du DMA, 6 × 240 trames), quel que soit le moteur et quel que soit le moment
+  // où l'audio démarre. Après ce correctif : 407 blocs/s, soit 48 840
+  // échantillons/s — le temps réel, avec zéro sous-alimentation.
+  //
+  // L'en-tête de ce fichier pariait sur l'ORDRE (« le diagnostic touch est
+  // passé depuis longtemps quand l'I2S s'installe »). L'ordre ne suffit pas :
+  // ce que touchRead laisse derrière lui est un état de broche, pas une
+  // occupation temporaire.
+  // rtc_gpio_deinit() seul NE SUFFIT PAS (mesuré) : c'est le périphérique
+  // tactile qui retient la broche, pas seulement le mux RTC. On le désarme.
+  touch_pad_deinit();
+  for (int broche : { PIN_BCLK, PIN_LRCK, PIN_DIN }) {
+    if (rtc_gpio_is_valid_gpio((gpio_num_t)broche)) {
+      rtc_gpio_deinit((gpio_num_t)broche);
+    }
+  }
+
   i2s.setPins(PIN_BCLK, PIN_LRCK, PIN_DIN);
   if (!i2s.begin(I2S_MODE_STD, SAMPLE_RATE,
                  I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
@@ -530,12 +588,12 @@ bool setEngine(int moteur, bool persister) {
   // d'allouer Plaits, ce serait rendre la carte muette jusqu'au redémarrage.
   if (!plaitsVoix) {
     const uint32_t bloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
-    if (bloc < SEUIL_BASCULE_CHAUD) {
+    if (bloc < seuilBasculeChaud()) {
       derniereBasc = Bascule::Armee;
       if (persister) memoriser(String("p:") + moteur);
       Serial.printf("[audio] bascule REFUSEE a chaud : plus gros bloc %lu o < %lu.\n"
                     "        Choix %s pour le prochain demarrage.\n",
-                    (unsigned long)bloc, (unsigned long)SEUIL_BASCULE_CHAUD,
+                    (unsigned long)bloc, (unsigned long)seuilBasculeChaud(),
                     persister ? "memorise" : "NON memorise (chemin cue)");
       return false;
     }
@@ -586,6 +644,7 @@ Metriques metriques() {
   // Plancher historique : si ce chiffre frôle zéro, le crash est un épuisement
   // du tas, pas un chien de garde. C'est la mesure qui départage.
   m.heapMiniJamais    = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+  m.seuilBascule      = seuilBasculeChaud();
   m.bootEssais        = essaisAuBoot;
   m.bootCoupe         = restaurationCoupee;
   m.causeReset        = (int)esp_reset_reason();

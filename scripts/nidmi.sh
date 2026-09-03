@@ -726,11 +726,22 @@ compile_sketch() {
         fi
 
         # Audio : -O3 est OBLIGATOIRE pour le DSP (le core compile en -Os, soit
-        # un facteur 1,82 mesuré au banc) ; -DTEST bascule stmlib sur ses
+        # un facteur 1,11 mesuré sur Plaits — le 1,82 du banc de biquads
+        # sur-évaluait, voir MESURES.md §18) ; -DTEST bascule stmlib sur ses
         # versions portables de Clip16/ClipU16/Sqrt, les originales étant de
         # l'assembleur ARM. Vérifié : aucune collision sur TEST dans src/.
         if true; then
             EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
+        fi
+
+        # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
+        # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque
+        # compiler.cpp.extra_flags les atteint (MESURES.md §18).
+        #   NIDMI_EXTRA_FLAGS="-DPLAITS_LEGER" ./scripts/nidmi.sh build --board s3 …
+        if [ -n "${NIDMI_EXTRA_FLAGS:-}" ]; then
+            # Decoupage voulu sur les espaces : plusieurs drapeaux possibles.
+            # shellcheck disable=SC2206
+            EXTRA_FLAGS_ARRAY+=($NIDMI_EXTRA_FLAGS)
         fi
 
         
@@ -815,11 +826,22 @@ build_binary() {
         fi
 
         # Audio : -O3 est OBLIGATOIRE pour le DSP (le core compile en -Os, soit
-        # un facteur 1,82 mesuré au banc) ; -DTEST bascule stmlib sur ses
+        # un facteur 1,11 mesuré sur Plaits — le 1,82 du banc de biquads
+        # sur-évaluait, voir MESURES.md §18) ; -DTEST bascule stmlib sur ses
         # versions portables de Clip16/ClipU16/Sqrt, les originales étant de
         # l'assembleur ARM. Vérifié : aucune collision sur TEST dans src/.
         if true; then
             EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
+        fi
+
+        # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
+        # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque
+        # compiler.cpp.extra_flags les atteint (MESURES.md §18).
+        #   NIDMI_EXTRA_FLAGS="-DPLAITS_LEGER" ./scripts/nidmi.sh build --board s3 …
+        if [ -n "${NIDMI_EXTRA_FLAGS:-}" ]; then
+            # Decoupage voulu sur les espaces : plusieurs drapeaux possibles.
+            # shellcheck disable=SC2206
+            EXTRA_FLAGS_ARRAY+=($NIDMI_EXTRA_FLAGS)
         fi
 
         BUILD_PROPS=()

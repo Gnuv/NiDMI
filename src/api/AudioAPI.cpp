@@ -38,9 +38,11 @@ void setupAudioAPI(AsyncWebServer& server) {
         // sans que l'interface ait pu être servie, et si le chargement est coupé.
         json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
-        // Même seuil que la garde de setEngine() : l'UI et le firmware doivent
-        // dire la même chose, sinon le bouton promet ce que la carte refuse.
-        json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc >= 28000 ? "true" : "false");
+        // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
+        // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
+        // taille du pool, donc de l'image — allégée ou complète).
+        json += "\"switch_threshold\":" + String(m.seuilBascule) + ",";
+        json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc >= m.seuilBascule ? "true" : "false");
         json += "}";
         request->send(200, "application/json", json);
     });

@@ -80,7 +80,13 @@ void processComponents() {
 }
 
 // Diagnostic touch au boot : mettre à 1 pour activer, 0 pour désactiver.
+// Surchargeable au build : -DTOUCH_BOOT_DIAG=0 desactive le diagnostic.
+// GPIO1 est AUSSI le BCK de l'I2S (AudioEngine.h) : touchRead(1) bascule la
+// broche en mode RTC, et rien ne garantit qu'un i2s.begin() ulterieur la
+// reprenne. Piste testee pour le blocage de la tache audio.
+#ifndef TOUCH_BOOT_DIAG
 #define TOUCH_BOOT_DIAG 1
+#endif
 
 static void touchDiag(const char* label) {
 #if TOUCH_BOOT_DIAG && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(ARDUINO_ESP32S3_DEV) || defined(ARDUINO_ESP32S3))
@@ -238,12 +244,6 @@ void nidmi_begin() {
 
     touchDiag("APRES ComponentManager.begin (MuxTask+MidiTask demarres)");
     
-    /* Chargement du process audio mémorisé — ICI et nulle part ailleurs.
-       Le tas est à son état de repos (~51 ko libres, ~31 ko d'un seul tenant,
-       MESURES.md §11) : WiFi et serveur ont pris leur part, aucune page n'a
-       encore été servie. C'est le seul ordre mesuré comme sûr. */
-    AudioEngine::restaurerAuBoot();
-
     Serial.println("[NiDMI] Ready");
     NIDMI_WEB_LOG("[NiDMI] Ready (console web dispo sur S3 si activée)");
     Serial.print("  AP SSID: "); Serial.println(apSsid);
@@ -257,6 +257,22 @@ void nidmi_begin() {
 }
 
 void nidmi_loop() {
+    /* Chargement du process audio mémorisé, sur un tas encore vierge : c'est
+       l'ordre d'allocation qui décide (MESURES.md §15), et trois secondes après
+       le boot on est très loin devant l'ouverture d'un navigateur.
+
+       Note honnête : ce déplacement de setup() vers loop() avait été fait en
+       poursuivant un blocage de la tâche audio, sur l'hypothèse que le contexte
+       d'appel comptait. C'ÉTAIT FAUX — la cause était le diagnostic tactile qui
+       laissait GPIO1 (le BCK) au périphérique de touch (voir AudioEngine.cpp).
+       L'appel est resté ici parce qu'il y est correct et qu'il laisse setup()
+       se terminer, pas parce que setup() poserait un problème. */
+    static bool audioRestaure = false;
+    if (!audioRestaure && millis() > 3000) {
+        audioRestaure = true;
+        AudioEngine::restaurerAuBoot();
+    }
+
     AudioEngine::entretienBoot();   // écrit la NVS hors du contexte async
 
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)

@@ -155,6 +155,7 @@ struct Metriques {
                                // dit si l'on est mort d'épuisement mémoire
   int      causeReset;         // esp_reset_reason() : panique ? chien de garde ?
   const char* causeResetTexte;
+  uint32_t seuilBascule;       // plus gros bloc requis pour basculer à chaud
   uint8_t  bootEssais;         // boots consécutifs sans interface servie
   bool     bootCoupe;          // restauration coupée : garde-fou atteint
 };
