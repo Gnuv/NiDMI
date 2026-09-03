@@ -504,6 +504,17 @@ bool ensureStarted() {
   return true;
 }
 
+// Doit rester d'accord avec les NIDMI_LOURD de plaits/dsp/voice.cpp
+// (hardware/bench/plaits-instrumentation.patch) : six_op x3 (2,3,4),
+// string_machine (6), speech (15), particle (18), string (19).
+const char* moteursSubstitues() {
+#ifdef PLAITS_LEGER
+  return "2,3,4,6,15,18,19";
+#else
+  return "";
+#endif
+}
+
 void couperSon() {
   gSilence = true;                       // la porte se ferme
   bipBlocsRestants = 0;                   // coupe le bip de test

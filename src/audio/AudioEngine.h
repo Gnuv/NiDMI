@@ -90,6 +90,13 @@ void testTone(float hz, uint32_t ms);
 // note, qui la rouvre (jeu live au clavier après un STOP). Voir le .cpp.
 void couperSon();
 
+// Indices des moteurs Plaits SUBSTITUÉS dans cette image (liste "2,3,4,..."),
+// chaîne vide si l'image est complète. Sous -DPLAITS_LEGER, sept emplacements
+// jouent virtual-analog à la place de leur moteur d'origine : les indices sont
+// préservés (compatibilité navigateur ↔ carte) mais l'étiquette ment. L'UI a
+// besoin de le savoir pour ne pas proposer un son qu'elle n'obtiendra pas.
+const char* moteursSubstitues();
+
 // Moteur : -1 = sinus interne (toujours disponible), 0..23 = moteur Plaits.
 // 24 moteurs : les 8 de engine2/ puis les 16 classiques — même plage que le
 // moteur WASM du navigateur (engines/core/plaits/web/index.js), pour qu'un même
