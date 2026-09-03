@@ -65,7 +65,7 @@ volatile uint32_t    plaitsOctets  = 0;
 volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
 volatile bool        gSilence      = false;   // STOP : sortie zerotee jusqu'a la note suivante
-int              notesTenues   = 0;      // touches Plaits encore enfoncees
+volatile uint16_t niveauCrete  = 0;      // crete du DERNIER bloc reellement envoye
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
 // moteur (« All engines will share the same RAM space », voice.cpp) : le pool
@@ -195,18 +195,10 @@ void appliquer(const Evenement& e) {
     return;
   }
   if (moteurCourant >= 0 && plaitsVoix) {
-    if (e.velo == 0) {
-      // RELACHEMENT. Plaits ignore le note-off — son LPG decide seul de
-      // l'extinction — si bien qu'une note tenue ne s'arretait JAMAIS : le
-      // moteur dronait indefiniment et le STOP semblait sans effet. On ferme
-      // donc la porte quand la DERNIERE touche est relachee, ce que l'oreille
-      // attend d'un clavier. Coupure nette assumee (pas de traine) : c'est un
-      // clavier de test, et une note qui ne finit pas est bien pire.
-      if (notesTenues > 0) notesTenues--;
-      if (notesTenues == 0) gSilence = true;
-      return;
-    }
-    notesTenues++;
+    // Le LPG de Plaits gere l'extinction : son decay EST le relachement, et il
+    // doit rester audible. (J'avais tente de fermer la porte au relachement de
+    // la derniere touche : ca coupait net et supprimait le decay — regression.)
+    if (e.velo == 0) return;
     plaitsPatch.note = float(e.note);
     plaitsTrigger = true;
     return;
@@ -269,6 +261,18 @@ void boucleAudio(void*) {
     cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
     // Porte de silence (STOP) : Plaits rend en continu et ignore le note-off.
     if (gSilence) memset(entrelace, 0, sizeof(entrelace));
+    // Niveau crete de ce qui part REELLEMENT vers le DAC (donc apres la porte).
+    // Sans cette mesure, « est-ce que ca sonne ? » ne se repond qu'a l'oreille,
+    // et tout diagnostic audio devient une conversation au lieu d'une lecture.
+    {
+      uint16_t crete = 0;
+      for (size_t i = 0; i < FRAMES * 2; i++) {
+        int16_t v = entrelace[i];
+        uint16_t a = (v < 0) ? (uint16_t)(-(int32_t)v) : (uint16_t)v;
+        if (a > crete) crete = a;
+      }
+      niveauCrete = crete;
+    }
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
@@ -529,7 +533,6 @@ const char* moteursSubstitues() {
 
 void couperSon() {
   gSilence = true;                       // la porte se ferme
-  notesTenues = 0;                        // plus aucune touche tenue
   bipBlocsRestants = 0;                   // coupe le bip de test
   for (auto& v : voix) v.cible = 0.0f;    // le sinus s'eteint
   sampleActif = false;                    // l'echantillon s'arrete net
@@ -680,6 +683,7 @@ Metriques metriques() {
   m.bootEssais        = essaisAuBoot;
   m.bootCoupe         = restaurationCoupee;
   m.silence           = gSilence;
+  m.niveau            = niveauCrete;
   m.causeReset        = (int)esp_reset_reason();
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;

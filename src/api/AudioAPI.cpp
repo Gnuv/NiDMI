@@ -39,6 +39,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
         json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
+        json += "\"niveau\":"            + String(m.niveau) + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
