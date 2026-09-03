@@ -533,6 +533,15 @@ const char* moteursSubstitues() {
 
 // PLAY : la porte s'ouvre. Le moteur reste charge (aucune reallocation), on ne
 // fait que laisser passer le son.
+//
+// ⚠️ PORTEE DE CE CHOIX — il ne vaut QUE pour la carte unique.
+// Ici le process est FIGE : sur 8 Mo avec l'interface embarquee, on ne peut pas
+// changer de famille de moteur en cours de session (MESURES.md §15, l'ordre
+// d'allocation). Garder Plaits charge au STOP est donc gratuit, et evite une
+// reallocation risquee.
+// En architecture MULTI-CARTES (V2, ETUDE_V2_FERME.md), la regle S'INVERSE : le
+// principe meme est de CHANGER de process selon les cues, donc le STOP doit
+// DECHARGER pour liberer le worker. Ne pas transposer ce comportement tel quel.
 void ouvrirSon() {
   gSilence = false;
 }
