@@ -38,6 +38,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         // sans que l'interface ait pu être servie, et si le chargement est coupé.
         json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
+        json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
         // taille du pool, donc de l'image — allégée ou complète).
@@ -217,6 +218,11 @@ void setupAudioAPI(AsyncWebServer& server) {
 
     /* Extinction — utile quand un noteOn de test reste accroché. */
     server.on("/api/audio/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+        // couperSon() ferme la porte de silence : Plaits rend en continu et
+        // ignore le note-off (son LPG gere l'extinction), donc les note-off
+        // ci-dessous ne le taisent pas — la porte, si. Elle rouvre a la note
+        // suivante (jeu live apres un STOP).
+        AudioEngine::couperSon();
         for (int n = 0; n < 128; n++) AudioEngine::noteOff((uint8_t)n);
         AudioEngine::testTone(0.0f, 0);
         request->send(200, "application/json", "{\"status\":\"ok\"}");

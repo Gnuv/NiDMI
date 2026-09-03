@@ -64,6 +64,7 @@ int                  moteurCourant = -1;          // -1 = sinus
 volatile uint32_t    plaitsOctets  = 0;
 volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
+volatile bool        gSilence      = false;   // STOP : sortie zerotee jusqu'a la note suivante
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
 // moteur (« All engines will share the same RAM space », voice.cpp) : le pool
@@ -178,6 +179,9 @@ float frequenceDeNote(uint8_t note) {
 }
 
 void appliquer(const Evenement& e) {
+  // Toute note JOUEE (velo != 0) rouvre la porte de silence : apres un STOP,
+  // appuyer sur une touche doit s'entendre (monitoring live).
+  if (e.velo != 0) gSilence = false;
   if (SampleStore::estCharge() && moteurCourant == -2) {
     if (e.velo == 0) return;                 // l'échantillon va au bout
     // do central (60) = hauteur d'origine ; on compense aussi l'écart entre la
@@ -251,6 +255,8 @@ void boucleAudio(void*) {
       rendre();
     }
     cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
+    // Porte de silence (STOP) : Plaits rend en continu et ignore le note-off.
+    if (gSilence) memset(entrelace, 0, sizeof(entrelace));
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
@@ -498,6 +504,13 @@ bool ensureStarted() {
   return true;
 }
 
+void couperSon() {
+  gSilence = true;                       // la porte se ferme
+  bipBlocsRestants = 0;                   // coupe le bip de test
+  for (auto& v : voix) v.cible = 0.0f;    // le sinus s'eteint
+  sampleActif = false;                    // l'echantillon s'arrete net
+}
+
 void noteOn(uint8_t note, uint8_t velocity) {
   if (!ensureStarted()) return;
   Evenement e{note, velocity};
@@ -642,6 +655,7 @@ Metriques metriques() {
   m.seuilBascule      = seuilBasculeChaud();
   m.bootEssais        = essaisAuBoot;
   m.bootCoupe         = restaurationCoupee;
+  m.silence           = gSilence;
   m.causeReset        = (int)esp_reset_reason();
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;

@@ -83,6 +83,13 @@ void noteOff(uint8_t note);
 // Bip de test : fréquence en Hz, durée en ms. 0 Hz = silence immédiat.
 void testTone(float hz, uint32_t ms);
 
+// Coupe le son IMMÉDIATEMENT : porte de silence sur la sortie I2S. Plaits rend
+// en continu et ignore le note-off (son LPG gère l'extinction) — donc un
+// simple note-off ne le fait pas taire, et le moteur « dronait » sans jamais
+// s'arrêter au STOP du transport. La porte zère la sortie jusqu'à la prochaine
+// note, qui la rouvre (jeu live au clavier après un STOP). Voir le .cpp.
+void couperSon();
+
 // Moteur : -1 = sinus interne (toujours disponible), 0..23 = moteur Plaits.
 // 24 moteurs : les 8 de engine2/ puis les 16 classiques — même plage que le
 // moteur WASM du navigateur (engines/core/plaits/web/index.js), pour qu'un même
@@ -158,6 +165,7 @@ struct Metriques {
   uint32_t seuilBascule;       // plus gros bloc requis pour basculer à chaud
   uint8_t  bootEssais;         // boots consécutifs sans interface servie
   bool     bootCoupe;          // restauration coupée : garde-fou atteint
+  bool     silence;            // porte de silence fermée (STOP)
 };
 Metriques metriques();
 
