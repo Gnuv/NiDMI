@@ -3,8 +3,6 @@
 #include <Arduino.h>
 #include <ESP_I2S.h>
 #include <esp_heap_caps.h>
-#include <driver/rtc_io.h>
-#include <driver/touch_sensor.h>
 #include <esp_system.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -455,14 +453,11 @@ bool ensureStarted() {
   // passé depuis longtemps quand l'I2S s'installe »). L'ordre ne suffit pas :
   // ce que touchRead laisse derrière lui est un état de broche, pas une
   // occupation temporaire.
-  // rtc_gpio_deinit() seul NE SUFFIT PAS (mesuré) : c'est le périphérique
-  // tactile qui retient la broche, pas seulement le mux RTC. On le désarme.
-  touch_pad_deinit();
-  for (int broche : { PIN_BCLK, PIN_LRCK, PIN_DIN }) {
-    if (rtc_gpio_is_valid_gpio((gpio_num_t)broche)) {
-      rtc_gpio_deinit((gpio_num_t)broche);
-    }
-  }
+  // NE PAS appeler touch_pad_deinit() ici : l'API tactile LEGACY entre en
+  // CONFLIT avec le nouveau driver tactile (IDF 5.5), et le boot part en
+  // abort() en boucle — « legacy_touch_driver: CONFLICT! ». Le bon remède est
+  // en amont : ne jamais SONDER GPIO1 (le BCK) au boot. Voir NiDMI.cpp,
+  // TOUCH_BOOT_DIAG, désormais à 0 par défaut. MESURES.md §19, CORRECTIFS_AMONT §10.
 
   i2s.setPins(PIN_BCLK, PIN_LRCK, PIN_DIN);
   if (!i2s.begin(I2S_MODE_STD, SAMPLE_RATE,

@@ -84,8 +84,14 @@ void processComponents() {
 // GPIO1 est AUSSI le BCK de l'I2S (AudioEngine.h) : touchRead(1) bascule la
 // broche en mode RTC, et rien ne garantit qu'un i2s.begin() ulterieur la
 // reprenne. Piste testee pour le blocage de la tache audio.
+// 0 PAR DEFAUT : le diagnostic sonde GPIO1 (T1) au boot, or GPIO1 est le BCK de
+// l'I2S sur la maquette audio. touchRead() capture la broche au peripherique
+// tactile et l'I2S ne peut plus la cadencer -> tache audio figee (MESURES.md
+// §19). Le remede par touch_pad_deinit() crashait (conflit legacy/new driver) :
+// on NE SONDE simplement PAS. Reactiver avec -DTOUCH_BOOT_DIAG=1 sur une carte
+// sans audio sur ces broches.
 #ifndef TOUCH_BOOT_DIAG
-#define TOUCH_BOOT_DIAG 1
+#define TOUCH_BOOT_DIAG 0
 #endif
 
 static void touchDiag(const char* label) {
