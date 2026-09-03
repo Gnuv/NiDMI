@@ -2,6 +2,7 @@
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
 #include "../mapping/ScriptStore.h"
+#include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
 
 /*
@@ -232,7 +233,58 @@ void setupAudioAPI(AsyncWebServer& server) {
      * (« scripts de mapping », table de partitions). Le moteur de script est le
      * COEUR du boitier : une carte peut n'avoir que des .nms et des cues, sans
      * aucun audio. Ces routes sont donc de l'image de base, pas un accessoire. */
-    server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
+        /* ── CUES SUR LA CARTE ──────────────────────────────────────────────
+     * Une carte deployee n'a pas de navigateur pour lui dire quelle cue jouer.
+     * Elle tient sa liste (mapfs:/cues.txt), la parcourt et applique elle-meme
+     * ce que chaque cue decrit. L'app devient un outil d'ECRITURE de cette
+     * liste, pas un maillon de son execution.
+     *
+     * ⚠️ ORDRE D'ENREGISTREMENT CRITIQUE. ESPAsyncWebServer fait du PREFIXE,
+     * pas de l'exact : un handler "/api/cues" intercepte aussi
+     * "/api/cues/play". Enregistre en premier, il a avale les commandes de
+     * transport — un POST /api/cues/play a ete traite comme un envoi de liste
+     * et a EFFACE les cues. Les routes SPECIFIQUES passent donc d'abord. */
+    server.on("/api/cues/play", HTTP_POST, [](AsyncWebServerRequest *request){
+        Cues::demarrer();
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    server.on("/api/cues/stop", HTTP_POST, [](AsyncWebServerRequest *request){
+        Cues::arreter();
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+    server.on("/api/cues/go", HTTP_POST, [](AsyncWebServerRequest *request){
+        Cues::suivant();
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant() + "}");
+    });
+    server.on("/api/cues/goto", HTTP_POST, [](AsyncWebServerRequest *request){
+        const int i = request->hasParam("i", true)
+                    ? request->getParam("i", true)->value().toInt() : 0;
+        const bool ok = Cues::aller(i);
+        request->send(ok ? 200 : 404, "application/json",
+                      String("{\"status\":\"") + (ok ? "ok" : "hors liste")
+                      + "\",\"index\":" + Cues::indexCourant() + "}");
+    });
+    server.on("/api/cues/texte", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/plain; charset=utf-8", Cues::contenu());
+    });
+    server.on("/api/cues", HTTP_GET, [](AsyncWebServerRequest *request){
+        String j = "{\"n\":" + String(Cues::nombre())
+                 + ",\"index\":" + String(Cues::indexCourant())
+                 + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                 + ",\"restant\":" + String(Cues::restantSec(), 2) + "}";
+        request->send(200, "application/json", j);
+    });
+    server.on("/api/cues", HTTP_POST, [](AsyncWebServerRequest *request){
+        String texte;
+        if (request->hasParam("cues", true)) texte = request->getParam("cues", true)->value();
+        const bool ok = Cues::ecrireTout(texte);
+        request->send(ok ? 200 : 507, "application/json",
+                      String("{\"status\":\"") + (ok ? "ok" : "error")
+                      + "\",\"n\":" + Cues::nombre() + "}");
+    });
+
+server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json",
                       "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"fichiers\":"
                       + ScriptStore::listerJson() + "}");

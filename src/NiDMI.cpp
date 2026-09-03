@@ -10,6 +10,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "audio/AudioEngine.h"
+#include "mapping/CueStore.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
 #endif
@@ -301,6 +302,7 @@ void nidmi_loop() {
     }
 
     AudioEngine::entretienBoot();   // écrit la NVS hors du contexte async
+    Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
 
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
