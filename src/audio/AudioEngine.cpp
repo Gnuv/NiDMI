@@ -65,6 +65,7 @@ volatile uint32_t    plaitsOctets  = 0;
 volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
 volatile bool        gSilence      = false;   // STOP : sortie zerotee jusqu'a la note suivante
+int              notesTenues   = 0;      // touches Plaits encore enfoncees
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
 // moteur (« All engines will share the same RAM space », voice.cpp) : le pool
@@ -194,7 +195,18 @@ void appliquer(const Evenement& e) {
     return;
   }
   if (moteurCourant >= 0 && plaitsVoix) {
-    if (e.velo == 0) return;                 // le LPG de Plaits gère l'extinction
+    if (e.velo == 0) {
+      // RELACHEMENT. Plaits ignore le note-off — son LPG decide seul de
+      // l'extinction — si bien qu'une note tenue ne s'arretait JAMAIS : le
+      // moteur dronait indefiniment et le STOP semblait sans effet. On ferme
+      // donc la porte quand la DERNIERE touche est relachee, ce que l'oreille
+      // attend d'un clavier. Coupure nette assumee (pas de traine) : c'est un
+      // clavier de test, et une note qui ne finit pas est bien pire.
+      if (notesTenues > 0) notesTenues--;
+      if (notesTenues == 0) gSilence = true;
+      return;
+    }
+    notesTenues++;
     plaitsPatch.note = float(e.note);
     plaitsTrigger = true;
     return;
@@ -517,6 +529,7 @@ const char* moteursSubstitues() {
 
 void couperSon() {
   gSilence = true;                       // la porte se ferme
+  notesTenues = 0;                        // plus aucune touche tenue
   bipBlocsRestants = 0;                   // coupe le bip de test
   for (auto& v : voix) v.cible = 0.0f;    // le sinus s'eteint
   sampleActif = false;                    // l'echantillon s'arrete net
