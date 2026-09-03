@@ -233,6 +233,22 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
 
 
 // ── Script .nms sur le MIDI entrant ────────────────────────────────────────
+void MidiRouter::setParamsScript(const String& params) {
+    int debut = 0;
+    while (debut < (int)params.length()) {
+        int fin = params.indexOf(';', debut);
+        if (fin < 0) fin = params.length();
+        String kv = params.substring(debut, fin);
+        const int eq = kv.indexOf('=');
+        if (eq > 0) {
+            String cle = kv.substring(0, eq); cle.trim();
+            const float v = kv.substring(eq + 1).toFloat();
+            FluxRegistry::update(cle.c_str(), v);
+        }
+        debut = fin + 1;
+    }
+}
+
 void MidiRouter::setScriptMidi(const String& script) {
     scriptEntrant = script;
     Serial.printf("[MidiRouter] script MIDI entrant : %s\n",

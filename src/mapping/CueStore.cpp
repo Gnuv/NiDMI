@@ -44,6 +44,7 @@ void _appliquer(const Cue& c) {
   // 1. Le script .nms d'abord : il transforme le MIDI, donc il doit etre en
   //    place avant que la moindre note n'arrive.
   g_midiRouter.chargerScriptNomme(c.script.c_str(), false);
+  if (c.paramsScript.length()) g_midiRouter.setParamsScript(c.paramsScript);
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.
@@ -111,6 +112,7 @@ bool lire(int index, Cue& sortie) {
     const String e = _champ(l, 3);
     sortie.engine = e.length() ? e.toInt() : -1;
     sortie.params = _champ(l, 4);
+    sortie.paramsScript = _champ(l, 5);
     trouve = true;
     break;
   }

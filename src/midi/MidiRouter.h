@@ -42,6 +42,12 @@ public:
     // traitement — c'est la regle du headless.
     void setScriptMidi(const String& script);
 
+    // Parametres du script, format "cle=valeur;cle=valeur". Un .nms lit ses
+    // reglages par r("param","nom",min,max,defaut) : sans eux il retombe sur le
+    // DEFAUT et parait ne rien faire — c'est ce qui rendait un bloc transpose
+    // silencieux alors que le script etait bien charge.
+    void setParamsScript(const String& params);
+
     // Charge un script PAR NOM depuis mapfs. persister = memoriser ce nom en
     // NVS pour qu'il revienne au demarrage : la carte redevient autonome, sans
     // qu'un navigateur ait a la reconfigurer. Seul le NOM va en NVS — le

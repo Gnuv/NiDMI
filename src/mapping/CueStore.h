@@ -6,7 +6,7 @@
 // a de l'audio — un moteur et ses reglages.
 //
 // FORMAT (une cue par ligne, mapfs:/cues.txt) :
-//     nom | duree_s | script.nms | engine | params
+//     nom | duree_s | script.nms | engine | params_audio | params_script
 //   duree 0        = attendre un GO (cue infinie)
 //   script vide    = passage direct du MIDI
 //   engine -1      = pas d'audio  (une carte sans audio n'ecrit que ca)
@@ -33,6 +33,7 @@ struct Cue {
   String  script;            // nom de fichier .nms ("" = aucun)
   int     engine  = -1;      // -1 = pas d'audio
   String  params;            // "cle=valeur;cle=valeur"
+  String  paramsScript;      // reglages du .nms, meme format ("semitones=12")
 };
 
 // ── Magasin ───────────────────────────────────────────────────────────────

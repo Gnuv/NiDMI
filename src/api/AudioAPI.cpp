@@ -340,6 +340,12 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         String sc;
         if (request->hasParam("script", true)) sc = request->getParam("script", true)->value();
         g_midiRouter.setScriptMidi(sc);
+        // Les REGLAGES du script. Sans eux, r("param","nom",min,max,defaut)
+        // retombe sur son defaut et le script parait inerte : c'est ce qui
+        // rendait un bloc transpose sans effet alors que son code etait bien
+        // charge et correctement interprete.
+        if (request->hasParam("params", true))
+            g_midiRouter.setParamsScript(request->getParam("params", true)->value());
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"len\":") + sc.length() + "}");
     });
