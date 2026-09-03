@@ -90,6 +90,9 @@ void testTone(float hz, uint32_t ms);
 // note, qui la rouvre (jeu live au clavier après un STOP). Voir le .cpp.
 void couperSon();
 
+// PLAY : ouvre la porte. Le moteur reste charge — « silence, mais moteur prêt ».
+void ouvrirSon();
+
 // Indices des moteurs Plaits SUBSTITUÉS dans cette image (liste "2,3,4,..."),
 // chaîne vide si l'image est complète. Sous -DPLAITS_LEGER, sept emplacements
 // jouent virtual-analog à la place de leur moteur d'origine : les indices sont

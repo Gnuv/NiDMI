@@ -64,7 +64,7 @@ int                  moteurCourant = -1;          // -1 = sinus
 volatile uint32_t    plaitsOctets  = 0;
 volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
-volatile bool        gSilence      = false;   // STOP : sortie zerotee jusqu'a la note suivante
+volatile bool    gSilence      = true;    // MUET au demarrage : rien ne sort tant que PLAY n'a pas ouvert
 volatile uint16_t niveauCrete  = 0;      // crete du DERNIER bloc reellement envoye
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
@@ -180,9 +180,9 @@ float frequenceDeNote(uint8_t note) {
 }
 
 void appliquer(const Evenement& e) {
-  // Toute note JOUEE (velo != 0) rouvre la porte de silence : apres un STOP,
-  // appuyer sur une touche doit s'entendre (monitoring live).
-  if (e.velo != 0) gSilence = false;
+  // La porte n'est PAS ouverte par les notes : c'est le TRANSPORT qui decide.
+  // Sans play, le clavier ne doit rien produire — regle demandee explicitement.
+  // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
   if (SampleStore::estCharge() && moteurCourant == -2) {
     if (e.velo == 0) return;                 // l'échantillon va au bout
     // do central (60) = hauteur d'origine ; on compense aussi l'écart entre la
@@ -529,6 +529,12 @@ const char* moteursSubstitues() {
 #else
   return "";
 #endif
+}
+
+// PLAY : la porte s'ouvre. Le moteur reste charge (aucune reallocation), on ne
+// fait que laisser passer le son.
+void ouvrirSon() {
+  gSilence = false;
 }
 
 void couperSon() {

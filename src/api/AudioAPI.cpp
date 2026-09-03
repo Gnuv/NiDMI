@@ -219,6 +219,14 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
 
     /* Extinction — utile quand un noteOn de test reste accroché. */
+    /* PLAY : ouvre la porte de silence. Symetrique de /api/audio/stop, et
+     * volontairement SANS reallocation — le moteur reste charge, pour que le
+     * play suivant reparte instantanement. */
+    server.on("/api/audio/resume", HTTP_POST, [](AsyncWebServerRequest *request){
+        AudioEngine::ouvrirSon();
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
+    });
+
     server.on("/api/audio/stop", HTTP_POST, [](AsyncWebServerRequest *request){
         // couperSon() ferme la porte de silence : Plaits rend en continu et
         // ignore le note-off (son LPG gere l'extinction), donc les note-off
