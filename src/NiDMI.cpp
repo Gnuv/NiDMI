@@ -228,6 +228,11 @@ void nidmi_begin() {
     // Initialiser MidiRouter (qui initialisera USB MIDI si activé et supporté)
     g_midiRouter.begin();
 
+    /* Script .nms memorise : la carte se reconfigure SEULE au demarrage. C'est
+       la condition du headless — une carte deployee n'a pas de navigateur pour
+       lui redire quoi faire. Le NOM vient de la NVS, le CONTENU de mapfs. */
+    g_midiRouter.restaurerScript();
+
     /* MIDI USB ENTRANT -> moteur audio.
        Le port USB de la carte etait uniquement SORTANT : un clavier ou un DAW
        branche dessus n'avait aucun effet (UsbMidiManager::update() ne lisait

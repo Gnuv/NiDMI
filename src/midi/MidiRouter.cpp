@@ -1,5 +1,7 @@
 #include "MidiRouter.h"
 #include "../mapping/MappingEngine.h"
+#include "../mapping/ScriptStore.h"
+#include <Preferences.h>
 #include <Arduino.h>
 
 // Dépendances vers le serveur core
@@ -263,5 +265,53 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
     } else {
         g_componentManager.handleMidiNoteOn(c, n, v);
         AudioEngine::noteOn(n, v);
+    }
+}
+
+
+// ── Script nomme : contenu dans LittleFS, nom en NVS ───────────────────────
+namespace {
+constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
+constexpr const char* NVS_CLE_SCRIPT  = "script";
+}
+
+bool MidiRouter::chargerScriptNomme(const char* nom, bool persister) {
+    if (!nom || !*nom) {                       // "" = plus de script du tout
+        scriptEntrant = "";
+        nomScriptActif = "";
+        if (persister) {
+            Preferences p;
+            if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(NVS_CLE_SCRIPT); p.end(); }
+        }
+        Serial.println("[MidiRouter] script MIDI : aucun (passage direct)");
+        return true;
+    }
+    String contenu;
+    if (!ScriptStore::lire(nom, contenu)) {
+        Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
+        return false;
+    }
+    scriptEntrant  = contenu;
+    nomScriptActif = nom;
+    if (persister) {
+        Preferences p;
+        if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(NVS_CLE_SCRIPT, nomScriptActif); p.end(); }
+    }
+    Serial.printf("[MidiRouter] script '%s' charge (%u o)%s\n",
+                  nom, (unsigned)contenu.length(), persister ? " et memorise" : "");
+    return true;
+}
+
+void MidiRouter::restaurerScript() {
+    Preferences p;
+    if (!p.begin(NVS_ESPACE_MIDI, true)) return;
+    const String nom = p.getString(NVS_CLE_SCRIPT, "");
+    p.end();
+    if (!nom.length()) return;
+    if (!chargerScriptNomme(nom.c_str(), false)) {
+        // Le fichier a disparu (mapfs efface, script supprime). On ne bloque
+        // rien : la carte demarre en passage direct plutot qu'a moitie
+        // configuree, et le nom reste en NVS au cas ou le fichier revienne.
+        Serial.printf("[MidiRouter] script memorise '%s' absent — passage direct\n", nom.c_str());
     }
 }

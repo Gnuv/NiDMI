@@ -1,6 +1,7 @@
 #include "APICommon.h"
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
+#include "../mapping/ScriptStore.h"
 #include "../audio/SampleStore.h"
 
 /*
@@ -227,6 +228,62 @@ void setupAudioAPI(AsyncWebServer& server) {
     /* Script .nms applique au MIDI ENTRANT, par la CARTE. Le navigateur ne fait
      * que POUSSER le script — il ne l'execute jamais (regle du headless : tout
      * est fait dans la carte). Corps = le script, vide = passage direct. */
+    /* Les scripts .nms vivent dans mapfs — la partition prevue pour eux
+     * (« scripts de mapping », table de partitions). Le moteur de script est le
+     * COEUR du boitier : une carte peut n'avoir que des .nms et des cues, sans
+     * aucun audio. Ces routes sont donc de l'image de base, pas un accessoire. */
+    server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json",
+                      "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"fichiers\":"
+                      + ScriptStore::listerJson() + "}");
+    });
+
+    /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */
+    server.on("/api/midi/scripts", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("name", true)) {
+            request->send(400, "application/json",
+                          "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
+            return;
+        }
+        const String nom = request->getParam("name", true)->value();
+        String contenu;
+        if (request->hasParam("script", true)) contenu = request->getParam("script", true)->value();
+        if (!ScriptStore::ecrire(nom.c_str(), contenu)) {
+            request->send(507, "application/json",
+                          "{\"status\":\"error\",\"message\":\"ecriture impossible\"}");
+            return;
+        }
+        // Si c'est le script ACTIF qu'on vient de reecrire, on le recharge.
+        if (g_midiRouter.nomScript() == nom) g_midiRouter.chargerScriptNomme(nom.c_str(), false);
+        request->send(200, "application/json",
+                      "{\"status\":\"ok\",\"name\":\"" + nom + "\"}");
+    });
+
+    server.on("/api/midi/scripts", HTTP_DELETE, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("name")) {
+            request->send(400, "application/json",
+                          "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
+            return;
+        }
+        const String nom = request->getParam("name")->value();
+        request->send(ScriptStore::supprimer(nom.c_str()) ? 200 : 404, "application/json",
+                      "{\"status\":\"ok\"}");
+    });
+
+    /* Choisit le script ACTIF, par nom. persist=1 le memorise en NVS : la carte
+     * le rechargera seule au demarrage, sans navigateur. Seul le NOM est
+     * persiste — le contenu reste dans LittleFS. */
+    server.on("/api/midi/script/select", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String nom = request->hasParam("name", true)
+                         ? request->getParam("name", true)->value() : String("");
+        const bool persister = request->hasParam("persist", true)
+                            && request->getParam("persist", true)->value() != "0";
+        const bool ok = g_midiRouter.chargerScriptNomme(nom.c_str(), persister);
+        request->send(ok ? 200 : 404, "application/json",
+                      String("{\"status\":\"") + (ok ? "ok" : "introuvable")
+                      + "\",\"actif\":\"" + g_midiRouter.nomScript() + "\"}");
+    });
+
     server.on("/api/midi/script", HTTP_POST, [](AsyncWebServerRequest *request){
         String sc;
         if (request->hasParam("script", true)) sc = request->getParam("script", true)->value();

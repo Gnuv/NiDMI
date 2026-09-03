@@ -41,6 +41,17 @@ public:
     // l'execute jamais. Debranche, la carte continue d'appliquer le meme
     // traitement — c'est la regle du headless.
     void setScriptMidi(const String& script);
+
+    // Charge un script PAR NOM depuis mapfs. persister = memoriser ce nom en
+    // NVS pour qu'il revienne au demarrage : la carte redevient autonome, sans
+    // qu'un navigateur ait a la reconfigurer. Seul le NOM va en NVS — le
+    // contenu vit dans LittleFS, et l'y ecrire a chaque cue ferait payer une
+    // ecriture flash, donc un craquement audio (MESURES.md §13).
+    bool chargerScriptNomme(const char* nom, bool persister = false);
+    const String& nomScript() const { return nomScriptActif; }
+
+    // Au boot : recharge le script memorise. Appele une fois depuis nidmi_setup.
+    void restaurerScript();
     const String& scriptMidi() const { return scriptEntrant; }
 
     // Point d'entree UNIQUE de toute note ENTRANTE (USB, clavier de l'app par
@@ -56,6 +67,7 @@ public:
 
 private:
     String scriptEntrant;      // .nms applique au MIDI entrant ("" = passage direct)
+    String nomScriptActif;     // nom du fichier .nms charge ("" = aucun)
     bool rtpEnabled;
     bool oscEnabled;
     bool bluetoothEnabled;
