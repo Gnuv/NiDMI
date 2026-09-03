@@ -303,6 +303,22 @@ void sendRtpStatus(AsyncWebSocket& ws) {
    jamais à écouler les 17 933 o (60 s, zéro octet reçu). Valider à l'entrée du
    gestionnaire déclarait donc saine une config qui ne sert rien — le garde-fou
    ne protégeait de rien. */
+/* Politique de cache.
+   « no-cache » n'a PAS suffi : il autorise le navigateur à garder la copie et à
+   REVALIDER, et certains (Opera, constaté) servent quand même du périmé — au
+   point qu'après un flash l'utilisateur continuait d'exécuter l'ancien
+   JavaScript sans aucun moyen simple de s'en apercevoir. Sur une carte qu'on
+   reflashe sans arrêt, c'est un piège permanent.
+   Donc : « no-store » pour le CODE de l'app (html/js/css/json) — jamais gardé,
+   toujours frais. Les POLICES, elles, ne changent jamais et pèsent 91 ko : on
+   les laisse en cache long, sinon chaque rechargement les retélécharge pour
+   rien. */
+static const char* _politiqueCache(const String& chemin){
+  if (chemin.endsWith(".woff2") || chemin.endsWith(".woff"))
+    return "public, max-age=31536000, immutable";
+  return "no-store";
+}
+
 static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin,
                             bool validerAuBout = false){
     const AppFile* f = nullptr;
@@ -315,10 +331,16 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
         return;
     }
     String etag = "\"" + String(idx) + "-" + String(f->taille) + "\"";
-    if (request->header("If-None-Match") == etag) {
+    // Le 304 n'est offert QUE pour ce qui est réellement cacheable (les
+    // polices). Pour le code de l'app on répond toujours 200 avec le contenu :
+    // un navigateur qui aurait gardé une copie malgré no-store ne doit pas
+    // pouvoir se la faire confirmer. C'est la deuxième moitié du correctif —
+    // sans elle, un If-None-Match suffisait à ressusciter l'ancien code.
+    const bool cacheable = (String(_politiqueCache(chemin)) != "no-store");
+    if (cacheable && request->header("If-None-Match") == etag) {
         AsyncWebServerResponse *rep = request->beginResponse(304);
         rep->addHeader("ETag", etag);
-        rep->addHeader("Cache-Control", "no-cache");
+        rep->addHeader("Cache-Control", _politiqueCache(chemin));
         request->send(rep);
         // Un 304 est une réponse servie : le navigateur a l'app en cache et la
         // carte a tenu son bout. Ça compte comme preuve de vie.
@@ -340,7 +362,7 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
             return aEcrire;
         });
     if (f->gz) rep->addHeader("Content-Encoding", "gzip");
-    rep->addHeader("Cache-Control", "no-cache");
+    rep->addHeader("Cache-Control", _politiqueCache(chemin));
     rep->addHeader("ETag", etag);
     request->send(rep);
 }
