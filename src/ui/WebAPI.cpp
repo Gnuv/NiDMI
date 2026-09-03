@@ -296,7 +296,15 @@ void sendRtpStatus(AsyncWebSocket& ws) {
    par chunks depuis PROGMEM — le même patron que l'index historique. Un
    ETag faible (index+taille) épargne le re-téléchargement complet à chaque
    rechargement : ~400 ko de WiFi économisés tant que l'archive ne change pas. */
-static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin){
+/* validerAuBout : poser la preuve de vie du garde-fou de boot QUAND LE DERNIER
+   OCTET DU CORPS a été remis à la pile TCP — pas à l'arrivée de la requête.
+   La distinction n'est pas théorique : mesuré le 2026-09-03, une carte avec
+   Plaits résident ACCEPTE la connexion et parse la requête, puis n'arrive
+   jamais à écouler les 17 933 o (60 s, zéro octet reçu). Valider à l'entrée du
+   gestionnaire déclarait donc saine une config qui ne sert rien — le garde-fou
+   ne protégeait de rien. */
+static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin,
+                            bool validerAuBout = false){
     const AppFile* f = nullptr;
     size_t idx = 0;
     for (; idx < APP_FILES_COUNT; idx++) {
@@ -312,14 +320,23 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
         rep->addHeader("ETag", etag);
         rep->addHeader("Cache-Control", "no-cache");
         request->send(rep);
+        // Un 304 est une réponse servie : le navigateur a l'app en cache et la
+        // carte a tenu son bout. Ça compte comme preuve de vie.
+        if (validerAuBout) AudioEngine::validerConfigBoot();
         return;
     }
     const uint8_t* donnees = f->donnees;
     const size_t taille = f->taille;
     AsyncWebServerResponse *rep = request->beginResponse(f->type, taille,
-        [donnees, taille](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+        [donnees, taille, validerAuBout](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
             size_t aEcrire = (taille - index < maxLen) ? (taille - index) : maxLen;
             if (aEcrire > 0) memcpy_P(buffer, donnees + index, aEcrire);
+            // Dernier morceau du corps : la réponse est entièrement écoulée.
+            // validerConfigBoot() ne fait que lever un drapeau — on est dans
+            // async_tcp, on n'y écrit pas la flash (l'écriture a lieu dans
+            // nidmi_loop(), via entretienBoot()).
+            if (validerAuBout && aEcrire > 0 && index + aEcrire >= taille)
+                AudioEngine::validerConfigBoot();
             return aEcrire;
         });
     if (f->gz) rep->addHeader("Content-Encoding", "gzip");
@@ -336,7 +353,12 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
        ET l'API, donc plus de question CORS. Le streaming par chunks évite
        toute copie heap : le plus gros fichier ne coûte que son tampon. */
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        _sertArchiveApp(request, "/nidmi.html");
+        /* Preuve de vie du garde-fou de boot : servir l'interface est
+           exactement ce que le chargement d'un process peut empêcher (il prend
+           le dernier gros bloc contigu et AsyncTCP n'a plus de tampons). Y
+           arriver déclare donc la config du boot saine. Ne fait que poser un
+           drapeau — l'écriture NVS a lieu dans nidmi_loop(). */
+        _sertArchiveApp(request, "/nidmi.html", /*validerAuBout=*/true);
     });
 
     /* Tout chemin de l'app qui n'a pas sa route explicite passe par le

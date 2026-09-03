@@ -9,6 +9,7 @@
 #include "Globals.h"
 #include <Preferences.h>
 #include <WiFi.h>
+#include "audio/AudioEngine.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
 #endif
@@ -237,6 +238,12 @@ void nidmi_begin() {
 
     touchDiag("APRES ComponentManager.begin (MuxTask+MidiTask demarres)");
     
+    /* Chargement du process audio mémorisé — ICI et nulle part ailleurs.
+       Le tas est à son état de repos (~51 ko libres, ~31 ko d'un seul tenant,
+       MESURES.md §11) : WiFi et serveur ont pris leur part, aucune page n'a
+       encore été servie. C'est le seul ordre mesuré comme sûr. */
+    AudioEngine::restaurerAuBoot();
+
     Serial.println("[NiDMI] Ready");
     NIDMI_WEB_LOG("[NiDMI] Ready (console web dispo sur S3 si activée)");
     Serial.print("  AP SSID: "); Serial.println(apSsid);
@@ -250,6 +257,8 @@ void nidmi_begin() {
 }
 
 void nidmi_loop() {
+    AudioEngine::entretienBoot();   // écrit la NVS hors du contexte async
+
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
         REG_WRITE(RTC_CNTL_OPTION1_REG, 0x1);   // force_download_boot

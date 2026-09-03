@@ -44,6 +44,38 @@ bool ensureStarted();
 
 bool isStarted();
 
+// ── Restauration au boot ───────────────────────────────────────────────────
+// MESURES.md §11 (corrigé le 2026-09-03) : c'est l'ORDRE d'allocation qui
+// décide, pas la quantité. Allouer un engine sur un tas VIERGE laisse un bloc
+// contigu suffisant à AsyncTCP — mesuré, la page sort en 0,854 s. Le faire
+// APRÈS un chargement de page (32 requêtes en 6 connexions, plancher du tas à
+// 1 348 o) prend le dernier gros bloc et le serveur ne se relève plus : la
+// carte répond au ping et ne sert plus rien.
+//
+// Conséquence structurante : les engines se chargent AU BOOT, une fois, et ne
+// changent plus de la session. Une cue fait varier les PARAMÈTRES d'un process
+// résident (y compris les 24 moteurs de Plaits, qui ne réallouent rien), jamais
+// le process lui-même. Changer de process demande un redémarrage.
+//
+// À appeler UNE FOIS à la fin de nidmi_setup() : après serverCore.begin(), donc
+// WiFi et serveur déjà installés, et avant qu'aucune page n'ait été servie.
+void restaurerAuBoot();
+
+// Garde-fou, qui remplace la protection qu'offrait l'initialisation paresseuse
+// (« un échec ici ne doit pas pouvoir coûter l'OTA »). Le compteur de tentatives
+// est écrit en NVS AVANT d'allouer, et remis à zéro quand l'interface a
+// réellement été servie. Au bout de TENTATIVES_MAX boots sans cette preuve de
+// vie, la restauration se coupe : la carte démarre nue, joignable, flashable.
+// Une action humaine explicite (choix d'un moteur dans l'UI) la réarme.
+constexpr uint8_t TENTATIVES_MAX = 3;
+
+// Appelée par la route "/" : ne fait que lever un drapeau (contexte async_tcp,
+// on n'y écrit pas la flash).
+void validerConfigBoot();
+
+// Appelée par nidmi_loop() : c'est elle qui écrit la NVS, hors du contexte async.
+void entretienBoot();
+
 // Thread-safe. velocity 0 sur noteOn = noteOff (convention MIDI).
 void noteOn(uint8_t note, uint8_t velocity);
 void noteOff(uint8_t note);
@@ -63,6 +95,18 @@ void testTone(float hz, uint32_t ms);
 // bloque le cache d'instructions, donc la tâche audio (mesuré : 1,8 % de blocs
 // en retard, MESURES.md §13). Une cue qui change de moteur en performance ne
 // doit donc RIEN écrire. Seule une action humaine explicite persiste.
+// GARDE D'ALLOCATION À CHAUD. Prendre 16 ko d'un seul tenant sur un tas déjà
+// haché par un chargement de page prend le dernier gros bloc, et AsyncTCP ne
+// s'en relève pas : la carte répond au ping sans plus servir de HTTP (constaté
+// le 2026-09-03). setEngine() refuse donc d'allouer sous le seuil — mais
+// mémorise le choix, qui sera chargé au prochain boot sur un tas vierge.
+// Deux cas ne sont JAMAIS refusés, parce qu'ils n'allouent rien :
+//   - Plaits déjà résident : changer parmi ses 24 moteurs écrit un entier ;
+//   - moteur = -1 : libère.
+// C'est ce qui permet à une cue de piloter le son sans jamais risquer la carte.
+enum class Bascule : uint8_t { Appliquee, Armee, Echec };
+Bascule derniereBascule();
+
 bool setEngine(int moteur, bool persister = false);
 // engine = -1 LIBÈRE Plaits (et ne fait pas que le désélectionner) : sans ça la
 // carte ne peut plus servir sa propre interface. Voir le .cpp.
@@ -111,6 +155,8 @@ struct Metriques {
                                // dit si l'on est mort d'épuisement mémoire
   int      causeReset;         // esp_reset_reason() : panique ? chien de garde ?
   const char* causeResetTexte;
+  uint8_t  bootEssais;         // boots consécutifs sans interface servie
+  bool     bootCoupe;          // restauration coupée : garde-fou atteint
 };
 Metriques metriques();
 

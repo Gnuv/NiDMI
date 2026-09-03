@@ -34,7 +34,13 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"load_percent\":" + String(m.cyclesParEch * 100.0f / 5000.0f, 1) + ",";
         json += "\"heap_min_ever\":"      + String(m.heapMiniJamais) + ",";
         json += "\"reset_reason\":\""      + String(m.causeResetTexte) + "\",";
-        json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc > 24576 ? "true" : "false");
+        // Garde-fou du chargement au boot : combien de démarrages consécutifs
+        // sans que l'interface ait pu être servie, et si le chargement est coupé.
+        json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
+        json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
+        // Même seuil que la garde de setEngine() : l'UI et le firmware doivent
+        // dire la même chose, sinon le bouton promet ce que la carte refuse.
+        json += "\"plaits_fits\":" + String(m.heapPlusGrosBloc >= 28000 ? "true" : "false");
         json += "}";
         request->send(200, "application/json", json);
     });
@@ -73,6 +79,14 @@ void setupAudioAPI(AsyncWebServer& server) {
         if (AudioEngine::setEngine(n, /*persister=*/true)) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");
+        } else if (AudioEngine::derniereBascule() == AudioEngine::Bascule::Armee) {
+            // 202 : la demande est acceptée mais pas appliquée maintenant. Le
+            // choix est en NVS ; il sera chargé au prochain démarrage, sur un
+            // tas vierge — le seul ordre d'allocation mesuré comme sûr.
+            request->send(202, "application/json",
+                "{\"status\":\"armed\",\"engine\":" + String(n) + ",\"message\":"
+                "\"tas trop fragmente pour basculer a chaud — choix memorise, "
+                "actif au prochain redemarrage\"}");
         } else {
             request->send(507, "application/json",
                 "{\"status\":\"error\",\"message\":\"Plaits indisponible (tas insuffisant ?) — sinus conserve\"}");
@@ -91,7 +105,12 @@ void setupAudioAPI(AsyncWebServer& server) {
             const int n = request->getParam("engine", true)->value().toInt();
             // Chemin des CUES (js/device/audio-board.js) : on ne persiste pas.
             // Une cue change le son, elle ne redéfinit pas le défaut du boîtier.
-            if (!AudioEngine::setEngine(n, /*persister=*/false)) {
+            // Un refus de bascule n'est PAS un échec de la cue : les continus
+            // qui suivent s'appliquent au process résident, et le spectacle
+            // continue. On ne renvoie une erreur que si l'engine a vraiment
+            // cassé. Le cas « armé » n'existe pas ici : une cue ne persiste rien.
+            if (!AudioEngine::setEngine(n, /*persister=*/false)
+                && AudioEngine::derniereBascule() != AudioEngine::Bascule::Armee) {
                 request->send(507, "application/json",
                     "{\"status\":\"error\",\"message\":\"moteur indisponible (tas insuffisant ?)\"}");
                 return;

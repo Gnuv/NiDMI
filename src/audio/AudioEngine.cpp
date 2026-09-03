@@ -248,12 +248,36 @@ void boucleAudio(void*) {
 namespace {
 constexpr const char* NVS_ESPACE = "nidmi-audio";
 constexpr const char* NVS_CLE    = "moteur";
+constexpr const char* NVS_CLE_ESSAIS = "bootess";
+
+// Garde-fou du chargement au boot. Le compteur vit en NVS pour survivre à une
+// coupure de courant — c'est tout l'intérêt : une config qui affame la carte se
+// désarme d'elle-même au bout de TENTATIVES_MAX cycles d'alimentation.
+// Seuil de la garde d'allocation à chaud, en octets de PLUS GROS BLOC CONTIGU.
+// Dérivé de la seule séquence mesurée comme viable (MESURES.md §11) : carte
+// fraîche, 31 732 o d'un seul tenant, Plaits alloué, 7 668 o restants, page
+// servie en 0,854 s. En dessous, on n'a aucune mesure qui tienne — et on a une
+// mesure d'échec. 28 000 laisse la carte fraîche passer et arrête le reste.
+constexpr uint32_t SEUIL_BASCULE_CHAUD = 28000;
+Bascule derniereBasc = Bascule::Appliquee;
+
+uint8_t  essaisAuBoot      = 0;
+bool     restaurationCoupee = false;
+bool     configValidee      = false;   // l'interface a été servie
+volatile bool aValider      = false;   // drapeau posé par la route "/"
 
 void memoriser(const String& valeur) {
   Preferences p;
   if (!p.begin(NVS_ESPACE, false)) return;
   p.putString(NVS_CLE, valeur);
+  // Un choix humain explicite réarme le garde-fou : c'est le seul chemin de
+  // sortie quand la restauration a été coupée (la carte sert alors son UI, donc
+  // l'utilisateur peut choisir autre chose — ou le même moteur, en connaissance
+  // de cause).
+  p.putUChar(NVS_CLE_ESSAIS, 0);
   p.end();
+  essaisAuBoot = 0;
+  restaurationCoupee = false;
 }
 
 // Appele une seule fois, a la premiere note : on ne charge JAMAIS au boot, pour
@@ -288,6 +312,91 @@ void restaurer() {
 }  // namespace
 
 bool isStarted() { return demarre; }
+
+// ── Restauration au boot, et son garde-fou ─────────────────────────────────
+// Voir l'en-tête pour le pourquoi. Ici, le comment :
+//
+//   1. lire le choix mémorisé — s'il n'y a rien à charger, on ne compte pas
+//      de tentative et on ne touche à rien ;
+//   2. si le compteur a atteint TENTATIVES_MAX, couper : la carte démarre nue.
+//      C'est la protection de l'OTA que l'initialisation paresseuse assurait
+//      avant, transposée au nouvel ordre ;
+//   3. sinon incrémenter EN NVS (donc avant le risque, pour survivre à une
+//      coupure), puis démarrer l'audio et restaurer.
+//
+// L'écriture NVS de l'étape 3 est sans danger pour le son : la tâche audio
+// n'existe pas encore. Celle de validerConfigBoot(), si — d'où son report dans
+// entretienBoot(), et le coût connu (MESURES.md §13 : 1,8 % de blocs en retard
+// le temps de l'écriture, une fois par boot).
+void restaurerAuBoot() {
+  String choix;
+  {
+    Preferences p;
+    if (!p.begin(NVS_ESPACE, true)) return;
+    choix = p.getString(NVS_CLE, "");
+    essaisAuBoot = p.getUChar(NVS_CLE_ESSAIS, 0);
+    p.end();
+  }
+  if (!choix.length() || choix == "-1") {
+    Serial.println("[audio] boot : aucun process memorise, la carte demarre nue");
+    return;
+  }
+
+  if (essaisAuBoot >= TENTATIVES_MAX) {
+    restaurationCoupee = true;
+    Serial.printf("[audio] boot : restauration COUPEE — %u demarrages sans interface servie.\n"
+                  "        La carte demarre nue (choix conserve : %s).\n"
+                  "        Choisir un process dans l'UI rearme le chargement.\n",
+                  (unsigned)essaisAuBoot, choix.c_str());
+    return;
+  }
+
+  {
+    Preferences p;
+    if (p.begin(NVS_ESPACE, false)) {
+      p.putUChar(NVS_CLE_ESSAIS, (uint8_t)(essaisAuBoot + 1));
+      p.end();
+    }
+  }
+  // La copie RAM doit refléter ce qui vient d'être écrit : c'est elle que lit
+  // validerConfigBoot() pour savoir s'il y a un compteur à effacer, et
+  // metriques() pour l'exposer. La laisser à sa valeur d'avant l'incrément,
+  // c'est un compteur qui ne redescend jamais et un /api/audio/status qui ment.
+  essaisAuBoot++;
+
+  Serial.printf("[audio] boot : chargement de %s (tentative %u/%u), tas %lu o, plus gros bloc %lu o\n",
+                choix.c_str(), (unsigned)essaisAuBoot, (unsigned)TENTATIVES_MAX,
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
+  if (!ensureStarted()) {
+    Serial.println("[audio] boot : I2S indisponible — le reste du boitier continue");
+    return;
+  }
+  restaurer();
+
+  Serial.printf("[audio] boot : apres chargement, tas %lu o, plus gros bloc %lu o\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
+void validerConfigBoot() {
+  if (configValidee || restaurationCoupee || essaisAuBoot == 0) return;
+  aValider = true;              // rien de plus : on est dans async_tcp
+}
+
+void entretienBoot() {
+  if (!aValider) return;
+  aValider = false;
+  if (configValidee) return;
+  configValidee = true;
+  Preferences p;
+  if (!p.begin(NVS_ESPACE, false)) return;
+  p.putUChar(NVS_CLE_ESSAIS, 0);
+  p.end();
+  essaisAuBoot = 0;
+  Serial.println("[audio] interface servie — config du boot validee, compteur remis a zero");
+}
 
 bool ensureStarted() {
   if (demarre) return true;
@@ -327,7 +436,9 @@ bool ensureStarted() {
 
   heapApres = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   demarre = true;
-  restaurer();          // le choix memorise, pas au boot : ici, a la 1re note
+  // NE RESTAURE PLUS ICI. Le chemin paresseux (première note) est précisément
+  // l'ordre fatal : à ce moment la page est chargée et le tas haché. La
+  // restauration est passée au boot, dans restaurerAuBoot().
   Serial.printf("[audio] demarre — %lu Hz reels, heap interne %lu -> %lu (cout %ld o)\n",
                 (unsigned long)srReel, (unsigned long)heapAvant,
                 (unsigned long)heapApres, (long)heapAvant - (long)heapApres);
@@ -405,12 +516,33 @@ bool setEngine(int moteur, bool persister) {
   if (moteur < 0) {
     sampleActif = false; libererPlaits();
     if (persister) memoriser("-1");
+    derniereBasc = Bascule::Appliquee;
     return true;
   }
+  if (moteur > 23) { derniereBasc = Bascule::Echec; return false; }
+  if (!ensureStarted()) { derniereBasc = Bascule::Echec; return false; }
+
+  // Garde d'allocation à chaud — voir l'en-tête. Si Plaits est déjà résident,
+  // plaitsAlloue() sort immédiatement et rien n'est pris au tas : on ne teste
+  // donc le seuil que dans le cas où il y a vraiment 16 ko à trouver.
+  // ELLE PASSE AVANT arreterSampler() : un refus doit laisser le boîtier
+  // EXACTEMENT dans l'état où il était. Couper l'échantillon puis refuser
+  // d'allouer Plaits, ce serait rendre la carte muette jusqu'au redémarrage.
+  if (!plaitsVoix) {
+    const uint32_t bloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (bloc < SEUIL_BASCULE_CHAUD) {
+      derniereBasc = Bascule::Armee;
+      if (persister) memoriser(String("p:") + moteur);
+      Serial.printf("[audio] bascule REFUSEE a chaud : plus gros bloc %lu o < %lu.\n"
+                    "        Choix %s pour le prochain demarrage.\n",
+                    (unsigned long)bloc, (unsigned long)SEUIL_BASCULE_CHAUD,
+                    persister ? "memorise" : "NON memorise (chemin cue)");
+      return false;
+    }
+  }
   if (moteurCourant == -2) arreterSampler(persister);   // propage la décision
-  if (moteur > 23) return false;   // 24 moteurs (engine2 + classiques)
-  if (!ensureStarted()) return false;
-  if (!plaitsAlloue()) return false;
+  if (!plaitsAlloue()) { derniereBasc = Bascule::Echec; return false; }
+  derniereBasc = Bascule::Appliquee;
   plaitsPatch.engine = moteur;
   moteurCourant = moteur;
   if (persister) memoriser(String("p:") + moteur);
@@ -418,6 +550,7 @@ bool setEngine(int moteur, bool persister) {
 }
 
 int engine() { return moteurCourant; }
+Bascule derniereBascule() { return derniereBasc; }
 
 void setParams(const Params& p) {
   // Écriture directe : ce sont des float alignés, lus par la tâche audio au
@@ -453,6 +586,8 @@ Metriques metriques() {
   // Plancher historique : si ce chiffre frôle zéro, le crash est un épuisement
   // du tas, pas un chien de garde. C'est la mesure qui départage.
   m.heapMiniJamais    = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+  m.bootEssais        = essaisAuBoot;
+  m.bootCoupe         = restaurationCoupee;
   m.causeReset        = (int)esp_reset_reason();
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;
