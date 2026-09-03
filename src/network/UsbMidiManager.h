@@ -37,6 +37,11 @@ inline bool nidmi_usb_midi_enabled_at_compile_time() {
  * Disponible uniquement sur ESP32-S3 avec USB-OTG activé (CONFIG_SOC_USB_OTG_SUPPORTED=y).
  */
 class UsbMidiManager {
+public:
+    // (canal 1..16, note/controleur, velocite/valeur)
+    typedef void (*HookNote)(uint8_t, uint8_t, uint8_t);
+    typedef void (*HookCC)(uint8_t, uint8_t, uint8_t);
+
 private:
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
     USBMIDI* usbMidi;
@@ -44,6 +49,14 @@ private:
 #endif
     bool isStarted;
     bool available; // USB disponible
+
+    // Hooks d'ENTREE. Le MIDI USB etait jusqu'ici uniquement SORTANT : update()
+    // portait le commentaire « peut etre ajoute plus tard pour la reception ».
+    // Meme forme que les hooks RTP-MIDI de NiDMIServer, pour que le cablage se
+    // lise pareil des deux cotes.
+    HookNote onNoteOn = nullptr;
+    HookNote onNoteOff = nullptr;
+    HookCC   onControlChange = nullptr;
     
 public:
     UsbMidiManager();
@@ -67,6 +80,12 @@ public:
     void sendStop();
     void sendContinue();
     
+    // Reception : brancher ce que devient une note entrante. Sans ces hooks,
+    // update() lit les paquets et les jette.
+    void setMidiInputHooks(HookNote noteOn, HookNote noteOff, HookCC cc) {
+        onNoteOn = noteOn; onNoteOff = noteOff; onControlChange = cc;
+    }
+
     // État de connexion
     bool isConnected() const;
     bool isInitialized() const { return isStarted; }

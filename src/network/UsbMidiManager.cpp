@@ -145,12 +145,45 @@ void UsbMidiManager::stop() {
 }
 
 void UsbMidiManager::update() {
-    // Vérification de connexion USB si nécessaire
-    // Sur ESP32-S3, USB est toujours disponible une fois initialisé
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
-    if (isStarted && usbInitialized) {
-        // Lire les messages MIDI entrants si nécessaire
-        // (peut être ajouté plus tard pour la réception)
+    // RECEPTION. Le MIDI USB etait uniquement SORTANT : un clavier ou un
+    // sequenceur branche au port USB de la carte n'avait aucun effet, faute
+    // d'etre lu. On draine ici la file d'entree et on dispatche par les hooks.
+    //
+    // Format d'un paquet USB-MIDI (4 octets) :
+    //   header = (cable << 4) | CIN,  CIN 0x8 = note off, 0x9 = note on,
+    //                                 0xB = control change
+    //   byte1  = statut (0x9n / 0x8n / 0xBn), byte2 = note/CC, byte3 = velo/valeur
+    //
+    // Convention MIDI respectee : un note-on de velocite 0 EST un note-off.
+    // Sans ca, les claviers qui n'emettent jamais de 0x8n laissent des notes
+    // tenues pour toujours.
+    if (!isStarted || !usbInitialized || usbMidi == nullptr) return;
+
+    midiEventPacket_t paquet;
+    // Borne dure : une rafale (glissando, dump SysEx d'un DAW) ne doit pas
+    // monopoliser la boucle principale, qui sert aussi les requetes HTTP.
+    int garde = 0;
+    while (usbMidi->readPacket(&paquet) && ++garde <= 64) {
+        const uint8_t cin   = paquet.header & 0x0F;
+        const uint8_t canal = (uint8_t)((paquet.byte1 & 0x0F) + 1);   // 1..16
+        switch (cin) {
+            case 0x9:
+                if (paquet.byte3 == 0) {
+                    if (onNoteOff) onNoteOff(canal, paquet.byte2, 0);
+                } else if (onNoteOn) {
+                    onNoteOn(canal, paquet.byte2, paquet.byte3);
+                }
+                break;
+            case 0x8:
+                if (onNoteOff) onNoteOff(canal, paquet.byte2, paquet.byte3);
+                break;
+            case 0xB:
+                if (onControlChange) onControlChange(canal, paquet.byte2, paquet.byte3);
+                break;
+            default:
+                break;   // horloge, SysEx, pitch bend : pas encore route
+        }
     }
 #endif
 }

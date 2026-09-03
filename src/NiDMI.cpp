@@ -227,6 +227,28 @@ void nidmi_begin() {
 
     // Initialiser MidiRouter (qui initialisera USB MIDI si activé et supporté)
     g_midiRouter.begin();
+
+    /* MIDI USB ENTRANT -> moteur audio.
+       Le port USB de la carte etait uniquement SORTANT : un clavier ou un DAW
+       branche dessus n'avait aucun effet (UsbMidiManager::update() ne lisait
+       rien). On branche donc la reception sur les memes deux destinations que
+       le MIDI RTP : les composants (LEDs appairees) ET le moteur audio, pour
+       que la carte SONNE quand on la joue de l'exterieur.
+       Note : la porte de silence reste maitresse — sans PLAY, ces notes
+       n'atteignent pas le DAC (MESURES.md §19). */
+    serverCore.usbMidi().setMidiInputHooks(
+        [](uint8_t ch, uint8_t note, uint8_t vel) {
+            g_componentManager.handleMidiNoteOn(ch, note, vel);
+            AudioEngine::noteOn(note, vel);
+        },
+        [](uint8_t ch, uint8_t note, uint8_t vel) {
+            g_componentManager.handleMidiNoteOff(ch, note, vel);
+            AudioEngine::noteOff(note);
+        },
+        [](uint8_t ch, uint8_t cc, uint8_t val) {
+            g_componentManager.handleMidiControlChange(ch, cc, val);
+        }
+    );
     NIDMI_WEB_LOG("[MEM] apres MidiRouter: %d\n", (int)ESP.getFreeHeap());
     
     // Initialiser RTP-MIDI
