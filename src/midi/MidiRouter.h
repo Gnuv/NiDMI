@@ -66,6 +66,13 @@ public:
     // n'aurait porte que sur celles qu'on aurait pense cabler.
     void noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff);
 
+    // Meme role pour les CONTROLEURS CONTINUS. Un CC entrant n'allait qu'aux
+    // composants (LEDs) : rien ne le reliait a un parametre, donc le CC learn
+    // n'existait que dans le navigateur et mourait avec lui. Il passe
+    // desormais par la table CcMap — apprentissage compris — avant d'aller
+    // aux composants comme avant.
+    void ccEntrant(uint8_t channel, uint8_t control, uint8_t value);
+
     // Réception MIDI pour piloter les LEDs
     void handleMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
     void handleMidiNoteOff(uint8_t channel, uint8_t note, uint8_t velocity);

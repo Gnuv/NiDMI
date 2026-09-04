@@ -2,6 +2,7 @@
 #include "../mapping/MappingEngine.h"
 #include "../mapping/ScriptStore.h"
 #include <Preferences.h>
+#include "CcMap.h"
 #include <Arduino.h>
 
 // Dépendances vers le serveur core
@@ -226,6 +227,22 @@ void MidiRouter::handleMidiNoteOff(uint8_t channel, uint8_t note, uint8_t veloci
 
 void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8_t value) {
     // Transmettre au ComponentManager pour piloter les LEDs
+    g_componentManager.handleMidiControlChange(channel, control, value);
+}
+
+// Point d'entree unique de tout CC ENTRANT — pendant de noteEntrante. Toutes
+// les sources (USB, RTP, et demain la WebSocket de l'app) passent par ici,
+// sinon la table ne vaudrait que pour celles qu'on aurait pense cabler : c'est
+// exactement l'erreur qui avait ete faite sur les notes.
+void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
+    // 1. Apprentissage. Il precede l'application pour que la cible bouge des
+    //    le geste qui l'apprend — sans ca il faut toucher le potentiometre une
+    //    seconde fois pour entendre quoi que ce soit, et l'apprentissage a
+    //    l'air de n'avoir rien fait.
+    CcMap::apprendre(channel, control);
+    // 2. Table CC -> parametre (moteur audio ou parametre de script).
+    CcMap::appliquer(channel, control, value);
+    // 3. Composants : comportement historique, conserve tel quel.
     g_componentManager.handleMidiControlChange(channel, control, value);
 }
 

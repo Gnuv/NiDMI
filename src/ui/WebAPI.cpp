@@ -204,6 +204,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
          *
          * Format, aligné sur les préfixes déjà en place :
          *   NOTE_ON:<note>,<velocite>     NOTE_OFF:<note>
+         *   CC:<controleur>,<valeur>
          * Volontairement sans accusé de réception : une note perdue vaut mieux
          * qu'un aller-retour sur le chemin temps réel. */
         if (message.startsWith("NOTE_ON:")) {
@@ -219,6 +220,21 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
         if (message.startsWith("NOTE_OFF:")) {
             const int note = message.substring(9).toInt();
             if (note >= 0 && note <= 127) g_midiRouter.noteEntrante(1, (uint8_t)note, 0, true);
+            return;
+        }
+
+        /* CC:<controleur>,<valeur> — meme chemin que le CC d'un controleur
+         * branche en USB : table CcMap, apprentissage compris. Sans ce
+         * message, la seule facon d'apprendre un CC etait d'avoir du materiel
+         * sous la main, et le point d'entree unique n'en etait pas un pour
+         * l'app. Meme parti pris que les notes : aucun accuse de reception. */
+        if (message.startsWith("CC:")) {
+            const String corps = message.substring(3);
+            const int v = corps.indexOf(',');
+            const int cc  = (v > 0 ? corps.substring(0, v) : corps).toInt();
+            const int val = (v > 0 ? corps.substring(v + 1).toInt() : 0);
+            if (cc >= 0 && cc <= 127)
+                g_midiRouter.ccEntrant(1, (uint8_t)cc, (uint8_t)constrain(val, 0, 127));
             return;
         }
 

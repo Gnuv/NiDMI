@@ -1,6 +1,7 @@
 #include "APICommon.h"
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
+#include "../midi/CcMap.h"
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
@@ -355,6 +356,56 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"len\":")
                           + g_midiRouter.scriptMidi().length() + "}");
+    });
+
+    /* ── Table CC -> parametre ────────────────────────────────────────────
+     * Le CC learn vivait entierement dans le navigateur : il cessait des
+     * qu'on le debranchait. La table vit maintenant dans la carte, en NVS.
+     *
+     * ORDRE : /api/midi/cc/learn AVANT /api/midi/cc — ESPAsyncWebServer fait
+     * du prefixe, pas de l'exact, et le generique avalerait la commande
+     * (meme piege que /api/cues, qui avait efface la liste des cues).       */
+    server.on("/api/midi/cc/learn", HTTP_POST, [](AsyncWebServerRequest *request){
+        String cible;
+        if (request->hasParam("cible", true)) cible = request->getParam("cible", true)->value();
+        if (!cible.length()) {
+            CcMap::desarmer();
+            request->send(200, "application/json", "{\"status\":\"ok\",\"arme\":\"\"}");
+            return;
+        }
+        // Bornes de la cible. Un parametre continu de Plaits vit dans 0..1, un
+        // parametre de script dans ce que declare son r("param",…) — c'est
+        // l'app qui sait, elle les envoie. Sans elles on etalerait tout dans
+        // 0..1 et « semitones » ne bougerait jamais que d'un demi-ton.
+        float mn = 0.0f, mx = 1.0f;
+        if (request->hasParam("min", true)) mn = request->getParam("min", true)->value().toFloat();
+        if (request->hasParam("max", true)) mx = request->getParam("max", true)->value().toFloat();
+        CcMap::armer(cible.c_str(), mn, mx);
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"arme\":\"") + cible + "\"}");
+    });
+
+    server.on("/api/midi/cc", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{\"table\":\"" + CcMap::texte() + "\"";
+        json += ",\"arme\":\"" + String(CcMap::cibleArmee()) + "\"";
+        json += ",\"max\":" + String(CcMap::MAX) + "}";
+        request->send(200, "application/json", json);
+    });
+
+    server.on("/api/midi/cc", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("table", true)) {
+            request->send(400, "application/json",
+                          "{\"status\":\"error\",\"message\":\"parametre 'table' manquant\"}");
+            return;
+        }
+        CcMap::setTexte(request->getParam("table", true)->value(), /*persister=*/true);
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"table\":\"") + CcMap::texte() + "\"}");
+    });
+
+    server.on("/api/midi/cc", HTTP_DELETE, [](AsyncWebServerRequest *request){
+        CcMap::vider(/*persister=*/true);
+        request->send(200, "application/json", "{\"status\":\"ok\",\"table\":\"\"}");
     });
 
     server.on("/api/audio/resume", HTTP_POST, [](AsyncWebServerRequest *request){

@@ -4,6 +4,7 @@
 #include "managers/ComponentManager.h"
 #include "utils/PinMapper.h"
 #include "midi/MidiRouter.h"
+#include "midi/CcMap.h"
 #include "network/UsbMidiManager.h"
 #include "server/WebDebugConsole.h"
 #include "Globals.h"
@@ -233,6 +234,9 @@ void nidmi_begin() {
        la condition du headless — une carte deployee n'a pas de navigateur pour
        lui redire quoi faire. Le NOM vient de la NVS, le CONTENU de mapfs. */
     g_midiRouter.restaurerScript();
+    // La table CC -> parametre revient elle aussi de la NVS : sans elle, un
+    // redemarrage rendait muets tous les potentiometres appris.
+    CcMap::monter();
 
     /* MIDI USB ENTRANT -> moteur audio.
        Le port USB de la carte etait uniquement SORTANT : un clavier ou un DAW
@@ -245,9 +249,7 @@ void nidmi_begin() {
     serverCore.usbMidi().setMidiInputHooks(
         [](uint8_t ch, uint8_t note, uint8_t vel) { g_midiRouter.noteEntrante(ch, note, vel, false); },
         [](uint8_t ch, uint8_t note, uint8_t vel) { g_midiRouter.noteEntrante(ch, note, vel, true); },
-        [](uint8_t ch, uint8_t cc, uint8_t val) {
-            g_componentManager.handleMidiControlChange(ch, cc, val);
-        }
+        [](uint8_t ch, uint8_t cc, uint8_t val) { g_midiRouter.ccEntrant(ch, cc, val); }
     );
     NIDMI_WEB_LOG("[MEM] apres MidiRouter: %d\n", (int)ESP.getFreeHeap());
     
@@ -256,7 +258,7 @@ void nidmi_begin() {
     serverCore.rtpMidi().setMidiInputHooks(
         [](uint8_t ch, uint8_t note, uint8_t vel) { g_componentManager.handleMidiNoteOn(ch, note, vel); },
         [](uint8_t ch, uint8_t note, uint8_t vel) { g_componentManager.handleMidiNoteOff(ch, note, vel); },
-        [](uint8_t ch, uint8_t cc,   uint8_t val) { g_componentManager.handleMidiControlChange(ch, cc, val); }
+        [](uint8_t ch, uint8_t cc,   uint8_t val) { g_midiRouter.ccEntrant(ch, cc, val); }
     );
     NIDMI_WEB_LOG("[MEM] apres RTP-MIDI: %d\n", (int)ESP.getFreeHeap());
     
