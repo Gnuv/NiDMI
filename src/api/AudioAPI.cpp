@@ -337,9 +337,15 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     });
 
     server.on("/api/midi/script", HTTP_POST, [](AsyncWebServerRequest *request){
-        String sc;
-        if (request->hasParam("script", true)) sc = request->getParam("script", true)->value();
-        g_midiRouter.setScriptMidi(sc);
+        // `script` ABSENT = on ne touche pas au code. Auparavant l'absence
+        // valait chaine vide et EFFACAIT le script : impossible d'envoyer les
+        // seuls reglages. Or un tour de potentiometre en produit une douzaine,
+        // et les faire porter le .nms entier (jusqu'a 8 ko) noyait une carte
+        // dont le plus grand bloc contigu descend sous 15 ko — elle acceptait
+        // la requete sans plus servir de reponse. Pour EFFACER le script, on
+        // envoie donc `script` explicitement vide.
+        if (request->hasParam("script", true))
+            g_midiRouter.setScriptMidi(request->getParam("script", true)->value());
         // Les REGLAGES du script. Sans eux, r("param","nom",min,max,defaut)
         // retombe sur son defaut et le script parait inerte : c'est ce qui
         // rendait un bloc transpose sans effet alors que son code etait bien
@@ -347,7 +353,8 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         if (request->hasParam("params", true))
             g_midiRouter.setParamsScript(request->getParam("params", true)->value());
         request->send(200, "application/json",
-                      String("{\"status\":\"ok\",\"len\":") + sc.length() + "}");
+                      String("{\"status\":\"ok\",\"len\":")
+                          + g_midiRouter.scriptMidi().length() + "}");
     });
 
     server.on("/api/audio/resume", HTTP_POST, [](AsyncWebServerRequest *request){
