@@ -251,6 +251,10 @@ void MidiRouter::setParamsScript(const String& params) {
 
 void MidiRouter::setScriptMidi(const String& script) {
     scriptEntrant = script;
+    // Un script pousse EN LIGNE n'est plus celui du fichier : laisser
+    // nomScriptActif tel quel faisait annoncer « transpose.nms » alors qu'un
+    // tout autre code tournait. On dit ce qui est vrai.
+    nomScriptActif = script.length() ? String("(en ligne)") : String("");
     Serial.printf("[MidiRouter] script MIDI entrant : %s\n",
                   scriptEntrant.length() ? scriptEntrant.c_str() : "(aucun)");
 }
