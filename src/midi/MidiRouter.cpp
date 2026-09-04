@@ -235,15 +235,30 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
 // sinon la table ne vaudrait que pour celles qu'on aurait pense cabler : c'est
 // exactement l'erreur qui avait ete faite sur les notes.
 void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
-    // 1. Apprentissage. Il precede l'application pour que la cible bouge des
+    uint8_t c = channel, n = control, v = value;
+
+    // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
+    //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
+    //    renumerote un CC doit donc renumeroter aussi ce qu'apprend CcMap.
+    if (scriptEntrant.length()) {
+        MappingEngine::SortieCc sortie;
+        MappingEngine::executeMidiCc(scriptEntrant.c_str(), control, value, channel, sortie);
+        if (sortie.emise) { c = sortie.canal; n = sortie.cc; v = sortie.valeur; }
+        else if (sortie.traite) return;   // le script s'occupe des CC et tait celui-ci
+        // Ni emise ni traite : le script ne parle pas de CC (un transpose.nms,
+        // par exemple). On passe tel quel — sinon charger un script de notes
+        // rendrait muet tout controleur, y compris l'apprentissage ci-dessous.
+    }
+
+    // 2. Apprentissage. Il precede l'application pour que la cible bouge des
     //    le geste qui l'apprend — sans ca il faut toucher le potentiometre une
     //    seconde fois pour entendre quoi que ce soit, et l'apprentissage a
     //    l'air de n'avoir rien fait.
-    CcMap::apprendre(channel, control);
-    // 2. Table CC -> parametre (moteur audio ou parametre de script).
-    CcMap::appliquer(channel, control, value);
-    // 3. Composants : comportement historique, conserve tel quel.
-    g_componentManager.handleMidiControlChange(channel, control, value);
+    CcMap::apprendre(c, n);
+    // 3. Table CC -> parametre (moteur audio ou parametre de script).
+    CcMap::appliquer(c, n, v);
+    // 4. Composants : comportement historique, conserve tel quel.
+    g_componentManager.handleMidiControlChange(c, n, v);
 }
 
 
@@ -289,10 +304,13 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
                                            estNoteOff, sortie)) {
             n = sortie.note; v = sortie.velo; c = sortie.canal;
         }
-        // Script present mais muet (aucun note.out) : on NE JOUE PAS. Un script
-        // qui filtre doit pouvoir bloquer une note — sinon « filtrer » serait
-        // impossible a exprimer.
-        else return;
+        // Script qui PARLE de notes mais n'a rien emis pour celle-ci : on NE
+        // JOUE PAS. Un script qui filtre doit pouvoir bloquer une note — sinon
+        // « filtrer » serait impossible a exprimer.
+        // Mais un script qui ne parle QUE de CC ne doit rien bloquer : sans
+        // cette nuance, charger un mapping de controleurs rendait le clavier
+        // muet. Symetrique de ce que fait ccEntrant pour les CC.
+        else if (sortie.traite) return;
     }
 
     // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
