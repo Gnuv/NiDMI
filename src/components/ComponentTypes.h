@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../mapping/MappingEngine.h"
+
 #include <Arduino.h>
 #include "../midi/MidiMessageType.h"
 #include "../utils/Hysteresis.h"
@@ -166,6 +168,12 @@ struct ComponentState {
     uint32_t last_change_time; // Temps du dernier changement
     uint32_t note_on_time; // Temps où la note a été jouée (pour auto-off)
     bool toggle_state;     // État pour mode toggle (true = note on, false = note off)
+
+    // Etat du script .nms de ce composant (toggle, counter, hysteresis, lp…).
+    // UN pipeline : mappingScript fait 128 octets, il n'en porte guere plus.
+    // Il vit ici plutot que dans le moteur parce qu'il y a jusqu'a 64
+    // composants, chacun avec son script : un tableau global les melangerait.
+    MappingEngine::Etat scriptEtat;
     bool prev_stable_state; // État stable précédent (après debounce) pour détecter Falling/Rising
     
     // Champs pour joystick (réutilise customInt1/customInt2 pour stocker les dernières valeurs normalisées)

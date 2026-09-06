@@ -213,10 +213,12 @@ void ButtonProcessor::process(
                 if (hasNoteOn && hasNoteOff) {
                     String edgeScript = buildEdgeScript(falling);
                     if (edgeScript.length() > 0) {
-                        MappingEngine::execute(edgeScript.c_str(), scriptInput, midi_sender);
+                        MappingEngine::executerCapteur(edgeScript.c_str(), scriptInput,
+                                                      midi_sender, &state.scriptEtat);
                     }
                 } else {
-                    MappingEngine::execute(config.mappingScript, scriptInput, midi_sender);
+                    MappingEngine::executerCapteur(config.mappingScript, scriptInput,
+                                                  midi_sender, &state.scriptEtat);
                 }
             }
         }

@@ -142,7 +142,8 @@ void NoiseSamplerProcessor::process(
             FluxRegistry::update(config.name, (float)stable_midi_value);
         }
         if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-            MappingEngine::execute(config.mappingScript, (float)stable_midi_value, midi_sender);
+            MappingEngine::executerCapteur(config.mappingScript, (float)stable_midi_value,
+                                          midi_sender, &state.scriptEtat);
         }
         return;
     }
@@ -186,7 +187,8 @@ void NoiseSamplerProcessor::process(
     }
     // Mode script : exécuter même sans nom de composant.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-        MappingEngine::execute(config.mappingScript, (float)midi_value, midi_sender);
+        MappingEngine::executerCapteur(config.mappingScript, (float)midi_value,
+                                      midi_sender, &state.scriptEtat);
     }
 }
 

@@ -45,169 +45,6 @@ bool FluxRegistry::has(const char* name) {
     }
     return false;
 }
-#ifndef NMS_BANC_HOTE
-// Helper pour envoyer CC via MIDI
-static void sendMidiControlChange(uint8_t cc, uint8_t value, uint8_t chan, MidiSender* sender) {
-    if (sender) {
-        sender->sendControlChange(chan, cc, value);
-        Serial.printf("[MappingEngine] Sent MIDI CC:%d Chan:%d Val:%d\n", cc, chan, value);
-    } else {
-        Serial.printf("[MappingEngine] WARNING: No MIDI sender available for CC\n");
-    }
-}
-
-// Helper pour envoyer Note On via MIDI
-static void sendMidiNoteOn(uint8_t note, uint8_t channel, uint8_t velocity, MidiSender* sender) {
-    if (sender) {
-        sender->sendNoteOn(channel, note, velocity);
-        Serial.printf("[MappingEngine] Sent MIDI Note On: Note:%d Chan:%d Vel:%d\n", note, channel, velocity);
-    } else {
-        Serial.printf("[MappingEngine] WARNING: No MIDI sender available for Note On\n");
-    }
-}
-
-// Helper pour envoyer Note Off via MIDI
-static void sendMidiNoteOff(uint8_t note, uint8_t channel, uint8_t velocity, MidiSender* sender) {
-    if (sender) {
-        sender->sendNoteOff(channel, note, velocity);
-        Serial.printf("[MappingEngine] Sent MIDI Note Off: Note:%d Chan:%d Vel:%d\n", note, channel, velocity);
-    } else {
-        Serial.printf("[MappingEngine] WARNING: No MIDI sender available for Note Off\n");
-    }
-}
-void MappingEngine::execute(const char* script, float inputVal, MidiSender* midi_sender) {
-    if (!script || script[0] == '\0') return;
-
-    float current = inputVal;
-    String s = String(script);
-    int start = 0;
-    int end = s.indexOf(':');
-
-    Serial.printf("[MappingEngine] execute script='%s' input=%.2f\n", script, inputVal);
-    while (start < (int)s.length()) {
-        int actualEnd = (end == -1) ? s.length() : end;
-        String seg = s.substring(start, actualEnd);
-        seg.trim();
-
-        if (seg.startsWith("r(\"")) { 
-            int closeIdx = seg.indexOf("\")");
-            if (closeIdx != -1) {
-                String target = seg.substring(3, closeIdx);
-                if (FluxRegistry::has(target.c_str())) {
-                    current = FluxRegistry::get(target.c_str());
-                } else {
-                    // Fallback: keep current input value if named source does not exist.
-                    Serial.printf("[MappingEngine] WARNING: source '%s' not found, fallback to input %.2f\n", target.c_str(), current);
-                }
-            }
-        } 
-        else if (seg.startsWith("*(")) { 
-            int closeIdx = seg.indexOf(")");
-            if (closeIdx != -1) {
-                float m = seg.substring(2, closeIdx).toFloat();
-                current *= m;
-            }
-        }
-        else if (seg.startsWith("+(")) { 
-            int closeIdx = seg.indexOf(")");
-            if (closeIdx != -1) {
-                float a = seg.substring(2, closeIdx).toFloat();
-                current += a;
-            }
-        }
-        else if (seg.startsWith("-(")) { 
-            int closeIdx = seg.indexOf(")");
-            if (closeIdx != -1) {
-                float s = seg.substring(2, closeIdx).toFloat();
-                current -= s;
-            }
-        }
-        else if (seg.startsWith("/(")) { 
-            int closeIdx = seg.indexOf(")");
-            if (closeIdx != -1) {
-                float d = seg.substring(2, closeIdx).toFloat();
-                if (d != 0) current /= d;
-            }
-        }
-        else if (seg.startsWith("ctl.out(")) { 
-            int comma = seg.indexOf(',');
-            int closeIdx = seg.indexOf(')');
-            if (comma != -1 && closeIdx != -1) {
-                int cc = seg.substring(8, comma).toInt();
-                int chan = seg.substring(comma + 1, closeIdx).toInt();
-                
-                // Clamp value to MIDI range (0-127)
-                uint8_t midiValue = (uint8_t)constrain(current, 0, 127);
-                
-                // Send via MIDI helper
-                sendMidiControlChange((uint8_t)cc, midiValue, (uint8_t)chan, midi_sender);
-            }
-        }
-        else if (seg.startsWith("note.on(")) {
-            int comma1 = seg.indexOf(',');
-            int closeIdx = seg.indexOf(')');
-            if (comma1 != -1 && closeIdx != -1) {
-                int note = seg.substring(8, comma1).toInt();
-                int chan = seg.substring(comma1 + 1, closeIdx).toInt();
-                note = constrain(note, 0, 127);
-                chan = constrain(chan, 1, 16);
-                uint8_t vel = (uint8_t)constrain((int)current, 0, 127);
-                sendMidiNoteOn((uint8_t)note, (uint8_t)chan, vel, midi_sender);
-            }
-        }
-        // note.off(note, chan) — sends note off with velocity 127
-        else if (seg.startsWith("note.off(")) {
-            int comma1 = seg.indexOf(',');
-            int closeIdx = seg.indexOf(')');
-            if (comma1 != -1 && closeIdx != -1) {
-                int note = seg.substring(9, comma1).toInt();
-                int chan = seg.substring(comma1 + 1, closeIdx).toInt();
-                note = constrain(note, 0, 127);
-                chan = constrain(chan, 1, 16);
-                uint8_t vel = 127;  // Fixed velocity for note off
-                sendMidiNoteOff((uint8_t)note, (uint8_t)chan, vel, midi_sender);
-            }
-        }
-        else if (seg.startsWith("seq.out(")) {
-            int closeIdx = seg.indexOf(')');
-            if (closeIdx != -1) {
-                String source = "seq";
-                int firstQuote = seg.indexOf('"');
-                if (firstQuote != -1 && firstQuote < closeIdx) {
-                    int secondQuote = seg.indexOf('"', firstQuote + 1);
-                    if (secondQuote != -1 && secondQuote < closeIdx) {
-                        source = seg.substring(firstQuote + 1, secondQuote);
-                    }
-                }
-                String json = "{\"type\":\"seq_event\",\"source\":\"" + source + "\",\"value\":" + String(current > 0 ? 1 : 0) + "}";
-                serverCore.websocket().textAll(json);
-                Serial.printf("[MappingEngine] Sent seq event source='%s' value=%d\n", source.c_str(), current > 0 ? 1 : 0);
-            }
-        }
-        // note.out(note, chan) — sends note.on when pressed (>0), note.off with vel 0 when released (<=0)
-        else if (seg.startsWith("note.out(")) {
-            int comma1 = seg.indexOf(',');
-            int closeIdx = seg.indexOf(')');
-            if (comma1 != -1 && closeIdx != -1) {
-                int note = seg.substring(9, comma1).toInt();
-                int chan = seg.substring(comma1 + 1, closeIdx).toInt();
-                note = constrain(note, 0, 127);
-                chan = constrain(chan, 1, 16);
-                if (current > 0) {
-                    uint8_t vel = (uint8_t)constrain((int)current, 1, 127);  // At least 1 for note on
-                    sendMidiNoteOn((uint8_t)note, (uint8_t)chan, vel, midi_sender);
-                } else {
-                    sendMidiNoteOff((uint8_t)note, (uint8_t)chan, 0, midi_sender);
-                }
-            }
-        }
-
-        if (end == -1) break;
-        start = end + 1;
-        end = s.indexOf(':', start);
-    }
-}
-#endif  // NMS_BANC_HOTE
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PIPELINE .nms — portage du moteur web (engines/core/midi-script/web/index.js)
@@ -234,19 +71,11 @@ namespace {
 // toggle, counter, seq, sel/map, lp, drunk, hysteresis, change gardent une
 // memoire d'un evenement au suivant. Le moteur web la range dans une Map
 // indexee par numero de pipeline ; ici un tableau fixe suffit et ne coute rien.
+// Etat du SCRIPT MIDI (celui de MidiRouter). Les composants apportent le leur :
+// un seul tableau pour tout le monde ferait avancer le compteur d'un bouton
+// quand une note arrive.
 constexpr int MAX_PIPELINES = 12;
-
-struct EtatPipeline {
-    int16_t selIdx    = -1;
-    int8_t  toggle    = 0;
-    float   compteur  = NAN;   // NAN = jamais initialise
-    int16_t seq       = -1;
-    float   drunk     = NAN;
-    float   lp        = NAN;
-    int8_t  hyst      = 0;
-    float   change    = NAN;
-};
-EtatPipeline g_etats[MAX_PIPELINES];
+MappingEngine::Etat g_etats[MAX_PIPELINES];
 
 // ── Outils de chaine ───────────────────────────────────────────────────────
 
@@ -380,12 +209,13 @@ int32_t versInt32(float v) {
 }  // namespace
 
 void MappingEngine::reinitialiser() {
-    for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i] = EtatPipeline();
+    for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i].reinitialiser();
 }
 
 namespace {
 
 using Evt    = MappingEngine::Evenement;
+using Etat   = MappingEngine::Etat;
 using Sortie = MappingEngine::Sortie;
 
 struct Source { float valeur = 0; bool declenche = false; };
@@ -547,7 +377,7 @@ uint8_t sept(float v) { return (uint8_t)constrain((int)lroundf(v), 0, 127); }
 // changement) : tout ce qui suit dans ce pipeline est abandonne.
 bool evaluerSegment(const String& seg, float& courant, const Evt& e,
                     Sortie* sorties, int max, int& n,
-                    EtatPipeline& st, bool srcEstCcNum) {
+                    Etat& st, bool srcEstCcNum) {
     String a;
 
     // ── Arithmetique ────────────────────────────────────────────────────────
@@ -878,7 +708,9 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
 }  // namespace
 
 int MappingEngine::executer(const char* script, const Evenement& evt,
-                            Sortie* sorties, int max, bool& traite) {
+                            Sortie* sorties, int max, bool& traite,
+                            Etat* etats, int nEtats) {
+    if (!etats || nEtats <= 0) { etats = g_etats; nEtats = MAX_PIPELINES; }
     traite = false;
     int n = 0;
     if (!script || script[0] == '\0' || !sorties || max <= 0) return 0;
@@ -906,7 +738,9 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
                 // pas la bloquer.
                 if (fEvt != Famille::Aucune && familleSource(src) == fEvt) traite = true;
 
-                EtatPipeline& st = g_etats[(pi < MAX_PIPELINES) ? pi : MAX_PIPELINES - 1];
+                // Au-dela du nombre de slots, les pipelines partagent le dernier : un
+                // script plus long garde un etat *coherent*, faute d'etre separe.
+                Etat& st = etats[(pi < nEtats) ? pi : nEtats - 1];
                 const bool srcCcNum = src.startsWith("ccnum.in");
                 float courant = d.valeur;
 
@@ -987,3 +821,42 @@ bool MappingEngine::executeMidiCc(const char* script,
     }
     return sortie.emise;
 }
+
+// ── Capteurs ───────────────────────────────────────────────────────────────
+// Remplace l'interpreteur d'origine (10 verbes, un flottant, une chaine de ':').
+// Un capteur passe maintenant par LE MEME moteur que le MIDI entrant, donc par
+// le meme vocabulaire : scale, clamp, curve, sel/map, hysteresis, lp, counter…
+// Un script de capteur et un script de mapping disent desormais la meme chose.
+#ifndef NMS_BANC_HOTE
+void MappingEngine::executerCapteur(const char* script, float valeur,
+                                    MidiSender* sender, Etat* etat) {
+    if (!script || script[0] == '\0') return;
+
+    // « in » : la poignee conventionnelle sur la valeur qui vient de declencher
+    // le script. Le composant publie deja sous SON nom quand il en a un ; ceci
+    // garantit qu'un composant sans nom reste scriptable. Ce n'est pas une
+    // extension de la langue — r() existe deja.
+    FluxRegistry::update("in", valeur);
+
+    Evenement e;                       // sans famille : seules r/f/i/litteral tirent
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etat, etat ? 1 : 0);
+    if (!sender) return;
+
+    for (int i = 0; i < n; i++) {
+        const Sortie& s = liste[i];
+        const uint8_t ch = (uint8_t)constrain((int)s.canal, 1, 16);
+        switch (s.type) {
+            case Sortie::Note:      sender->sendNoteOn(ch, s.a, s.b);        break;
+            case Sortie::NoteOff:   sender->sendNoteOff(ch, s.a, s.b);       break;
+            case Sortie::Cc:        sender->sendControlChange(ch, s.a, s.b); break;
+            case Sortie::Bend:      sender->sendPitchBend(ch, s.valeur14);   break;
+            case Sortie::Touch:     sender->sendAftertouch(ch, s.a);         break;
+            case Sortie::PolyTouch: sender->sendKeyPressure(ch, s.a, s.b);   break;
+            case Sortie::Pgm:       sender->sendProgramChange(ch, s.a);      break;
+            case Sortie::Print:     break;                                   // deja au journal
+        }
+    }
+}
+#endif  // NMS_BANC_HOTE

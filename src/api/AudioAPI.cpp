@@ -2,6 +2,7 @@
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
+#include "../mapping/MappingEngine.h"
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
@@ -356,6 +357,108 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"len\":")
                           + g_midiRouter.scriptMidi().length() + "}");
+    });
+
+    /* ── Essai a blanc d'un script .nms ───────────────────────────────────
+     * Execute un script sur un evenement DONNE et rend ce qu'il emettrait,
+     * sans rien jouer ni envoyer. Deux usages :
+     *   - mettre au point un mapping sans cabler de potentiometre ;
+     *   - rejouer sur la CARTE la suite de conformite du banc
+     *     (hardware/bench/nms/), qui ne tournait que sur le poste. C'est ce qui
+     *     transforme « conforme au moteur web » en « conforme SUR LA CIBLE » —
+     *     le banc hote compile avec un ersatz d'Arduino, pas avec le vrai.
+     * L'etat de pipeline est le SIEN : essayer un script ne derange pas celui
+     * qui tourne.                                                            */
+    server.on("/api/mapping/essai", HTTP_POST, [](AsyncWebServerRequest *request){
+        static MappingEngine::Etat etats[8];
+        auto par = [&](const char* n) -> String {
+            return request->hasParam(n, true) ? request->getParam(n, true)->value() : String("");
+        };
+        if (par("reset") == "1")
+            for (auto& e : etats) e.reinitialiser();
+        // genre=reset : on remet a zero et on N'EXECUTE PAS. Sans ce
+        // court-circuit, la requete de remise a zero jouait aussi un evenement
+        // et faisait avancer toggle/seq/counter d'un cran avant meme le premier
+        // cas — decalage constate en rejouant la suite sur la carte.
+        if (par("genre") == "reset") {
+            request->send(200, "application/json", "{\"reset\":true,\"out\":[]}");
+            return;
+        }
+
+        MappingEngine::Evenement ev;
+        const String genre = par("genre");
+        const int a = par("a").toInt(), b = par("b").toInt(), c = par("c").toInt();
+        if      (genre == "note")    { ev.type = MappingEngine::Evenement::NoteOn;    ev.a = a; ev.b = b; }
+        else if (genre == "noteoff") { ev.type = MappingEngine::Evenement::NoteOff;   ev.a = a; ev.b = b; }
+        else if (genre == "cc")      { ev.type = MappingEngine::Evenement::Cc;        ev.a = a; ev.b = b; }
+        else if (genre == "bend")    { ev.type = MappingEngine::Evenement::Bend;      ev.valeur14 = a; }
+        else if (genre == "touch")   { ev.type = MappingEngine::Evenement::Touch;     ev.a = a; }
+        else if (genre == "ptouch")  { ev.type = MappingEngine::Evenement::PolyTouch; ev.a = a; ev.b = b; }
+        else if (genre == "pgm")     { ev.type = MappingEngine::Evenement::Pgm;       ev.a = a; }
+        else if (genre != "capteur") {
+            request->send(400, "application/json",
+                          "{\"status\":\"error\",\"message\":\"genre inconnu\"}");
+            return;
+        }
+        ev.canal = (uint8_t)c;
+        // « capteur » : evenement sans famille, comme executerCapteur.
+        if (genre == "capteur") FluxRegistry::update("in", (float)a);
+
+        MappingEngine::Sortie liste[MappingEngine::MAX_SORTIES];
+        bool traite = false;
+        const int n = MappingEngine::executer(par("script").c_str(), ev, liste,
+                                              MappingEngine::MAX_SORTIES, traite,
+                                              etats, 8);
+        // PASSAGE : quand aucun pipeline n'a pris l'evenement en charge, il
+        // ressort tel quel — c'est ce que fait MidiRouter a partir de `traite`,
+        // et ce que fait le moteur web. La route le montre donc aussi, sans
+        // quoi elle repondrait « rien » la ou la carte laisse passer.
+        // Quirk du moteur web reproduit : pour une note, le canal est omis (0).
+        String passage;
+        if (!traite) {
+            switch (ev.type) {
+                case MappingEngine::Evenement::NoteOn:
+                    passage = String("{\"t\":\"note\",\"a\":") + ev.a + ",\"b\":" + ev.b + ",\"c\":0}"; break;
+                case MappingEngine::Evenement::NoteOff:
+                    passage = String("{\"t\":\"noteoff\",\"a\":") + ev.a + ",\"b\":0,\"c\":0}"; break;
+                case MappingEngine::Evenement::Cc:
+                    passage = String("{\"t\":\"cc\",\"a\":") + ev.a + ",\"b\":" + ev.b + ",\"c\":" + ev.canal + "}"; break;
+                case MappingEngine::Evenement::Bend:
+                    passage = String("{\"t\":\"bend\",\"a\":") + ev.valeur14 + ",\"c\":" + ev.canal + "}"; break;
+                case MappingEngine::Evenement::Touch:
+                    passage = String("{\"t\":\"touch\",\"a\":") + ev.a + ",\"b\":0,\"c\":" + ev.canal + "}"; break;
+                case MappingEngine::Evenement::PolyTouch:
+                    passage = String("{\"t\":\"ptouch\",\"a\":") + ev.a + ",\"b\":" + ev.b + ",\"c\":" + ev.canal + "}"; break;
+                case MappingEngine::Evenement::Pgm:
+                    passage = String("{\"t\":\"pgm\",\"a\":") + ev.a + ",\"b\":0,\"c\":" + ev.canal + "}"; break;
+                default: break;
+            }
+        }
+
+        String j = String("{\"traite\":") + (traite ? "true" : "false") + ",\"out\":[";
+        j += passage;
+        for (int i = 0; i < n; i++) {
+            if (i || passage.length()) j += ",";
+            const MappingEngine::Sortie& o = liste[i];
+            const char* t = "note";
+            switch (o.type) {
+                case MappingEngine::Sortie::Note:      t = "note";    break;
+                case MappingEngine::Sortie::NoteOff:   t = "noteoff"; break;
+                case MappingEngine::Sortie::Cc:        t = "cc";      break;
+                case MappingEngine::Sortie::Bend:      t = "bend";    break;
+                case MappingEngine::Sortie::Touch:     t = "touch";   break;
+                case MappingEngine::Sortie::PolyTouch: t = "ptouch";  break;
+                case MappingEngine::Sortie::Pgm:       t = "pgm";     break;
+                case MappingEngine::Sortie::Print:     t = "print";   break;
+            }
+            if (o.type == MappingEngine::Sortie::Bend)
+                j += String("{\"t\":\"bend\",\"a\":") + o.valeur14 + ",\"c\":" + o.canal + "}";
+            else
+                j += String("{\"t\":\"") + t + "\",\"a\":" + o.a + ",\"b\":" + o.b
+                   + ",\"c\":" + o.canal + "}";
+        }
+        j += "]}";
+        request->send(200, "application/json", j);
     });
 
     /* ── Table CC -> parametre ────────────────────────────────────────────

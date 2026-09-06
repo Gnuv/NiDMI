@@ -23,8 +23,39 @@ public:
 // 2. Le Moteur : Découpe et exécute le script segment par segment
 class MappingEngine {
 public:
-    // Utilisation de const char* pour être plus léger que String
-    static void execute(const char* script, float inputVal, MidiSender* midi_sender = nullptr);
+    // Etat d'UN pipeline, d'un evenement au suivant : toggle, counter, seq,
+    // l'index retenu par sel pour map, lp, drunk, hysteresis, change.
+    //
+    // Il est PUBLIC et fourni par l'appelant parce qu'il n'y a pas un seul
+    // script sur la carte : le script MIDI d'un cote, celui de chaque composant
+    // de l'autre. Un tableau interne unique les ferait se marcher dessus — le
+    // compteur d'un bouton avancerait quand une note arrive.
+    struct Etat {
+        int16_t selIdx   = -1;
+        int8_t  toggle   = 0;
+        int8_t  hyst     = 0;
+        int16_t seq      = -1;
+        float   compteur = NAN;    // NAN = jamais initialise
+        float   drunk    = NAN;
+        float   lp       = NAN;
+        float   change   = NAN;
+        void reinitialiser() { *this = Etat(); }
+    };
+
+    // ── Capteurs ────────────────────────────────────────────────────────────
+    // Un potentiometre, un bouton, un joystick. Le script n'y est PAS declenche
+    // par un message MIDI : on execute avec un evenement SANS famille, si bien
+    // que seules les sources qui repondent a tout — r("nom"), f(x), i(x), un
+    // litteral — tirent. C'est exactement le modele du moteur web, ou un
+    // capteur publie dans le registre et le script le lit.
+    //
+    // La valeur est publiee sous le nom du composant ET sous « in », pour qu'un
+    // composant sans nom reste scriptable :  r("in") : *(2) : ctl.out(1,74) ;
+    //
+    // Ici, contrairement au MIDI entrant, un verbe .out EMET vraiment : un
+    // capteur produit du MIDI, il n'en transforme pas.
+    static void executerCapteur(const char* script, float valeur,
+                                MidiSender* midi_sender, Etat* etat = nullptr);
 
     // ── Traitement d'un EVENEMENT MIDI ENTRANT ──────────────────────────────
     // execute() ci-dessus prend une seule valeur flottante : c'est le modele des
@@ -59,6 +90,7 @@ public:
     // erreur d'ecriture, pas un cas a servir.
     static const int MAX_SORTIES = 16;
 
+
     // Execute le script sur un evenement.
     //   sorties/max : la liste a remplir ; renvoie le NOMBRE d'evenements emis.
     //   traite      : vrai si au moins un pipeline dont la SOURCE correspond au
@@ -69,8 +101,11 @@ public:
     //                 Meme regle que le moteur web (noteHandled/ccHandled) : un
     //                 filtre qui ne correspond PAS (ctl.in(5) sur le canal 1) ne
     //                 prend rien en charge, l'evenement passe.
+    // etats/nEtats : l'etat par pipeline. nullptr = le tableau interne, celui du
+    // script MIDI. Un composant passe le sien.
     static int executer(const char* script, const Evenement& evt,
-                        Sortie* sorties, int max, bool& traite);
+                        Sortie* sorties, int max, bool& traite,
+                        Etat* etats = nullptr, int nEtats = 0);
 
     // Efface l'etat par pipeline (toggle, counter, seq, sel/map, lp, drunk...).
     // A appeler quand le SCRIPT change : sinon un compteur repart d'ou en etait

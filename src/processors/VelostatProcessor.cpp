@@ -172,7 +172,8 @@ void VelostatProcessor::process(
     }
     // Script mode must run even without a component name.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-        MappingEngine::execute(config.mappingScript, (float)state.last_value, midi_sender);
+        MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
+                                      midi_sender, &state.scriptEtat);
     }
 }
 
