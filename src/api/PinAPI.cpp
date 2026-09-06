@@ -397,36 +397,67 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
         
+        /* Echappement JSON COMPLET.
+         *
+         * L'ancien ne traitait que « \ » et « " ». Un script de mapping tient
+         * desormais sur plusieurs lignes — les pipelines sont separes par « ; »
+         * et on les ecrit l'un sous l'autre — et un saut de ligne BRUT dans une
+         * chaine JSON est invalide. La config partait telle quelle en NVS, puis
+         * /api/pins/list la recrachait : JSON.parse echouait cote app et TOUTE
+         * la zone d'inventaire I/O restait vide. Une ligne de trop dans un
+         * script, et plus aucune broche ne s'affichait.
+         *
+         * On echappe donc aussi les caracteres de controle. */
+        auto jsonChaine = [](const String& v) -> String {
+            String out;
+            out.reserve(v.length() + 8);
+            for (unsigned i = 0; i < v.length(); i++) {
+                const char c = v[i];
+                switch (c) {
+                    case '\\': out += "\\\\"; break;
+                    case '"':  out += "\\\""; break;
+                    case '\n': out += "\\n";  break;
+                    case '\r': out += "\\r";  break;
+                    case '\t': out += "\\t";  break;
+                    case '\b': out += "\\b";  break;
+                    case '\f': out += "\\f";  break;
+                    default:
+                        if ((unsigned char)c < 0x20) {
+                            char u[8];
+                            snprintf(u, sizeof u, "\\u%04x", (unsigned)(unsigned char)c);
+                            out += u;
+                        } else out += c;
+                }
+            }
+            return out;
+        };
+
         /* Construire le JSON à partir des paramètres */
         String json = "{";
         json += "\"pinLabel\":\"" + pinLabel + "\",";
         json += "\"role\":\"" + role + "\"";
         
-        auto addParam = [&](const char* name) {
+        /* forcerChaine : le champ est du TEXTE, quoi qu'il ressemble. Sans ca,
+         * un script commencant par un chiffre — « 60 : note.out(1) ; » est un
+         * .nms parfaitement valide — passait par la branche « nombre » et
+         * sortait sans guillemets, donc en JSON invalide. L'heuristique ne peut
+         * pas deviner : c'est au champ de dire ce qu'il est. */
+        auto addParamEx = [&](const char* name, bool forcerChaine) {
             String keyCheck = String("\"") + name + "\":";
             if(json.indexOf(keyCheck) >= 0) return;
-            if(request->hasParam(name, true)) {
-                String val = request->getParam(name, true)->value();
-                if(val == "true" || val == "false") {
-                    json += ",\"" + String(name) + "\":" + val;
-                } else if(val.indexOf(',') >= 0) {
-                    /* Valeur avec virgule (ex. "0,0" ou "2000,500") → toujours chaîne JSON échappée */
-                    String escaped = val;
-                    escaped.replace("\\", "\\\\");
-                    escaped.replace("\"", "\\\"");
-                    json += ",\"" + String(name) + "\":\"" + escaped + "\"";
-                } else if(val.length() > 0 && (val[0] >= '0' && val[0] <= '9')) {
-                    json += ",\"" + String(name) + "\":" + val;
-                } else if(val.length() > 1 && val[0] == '-' && (val[1] >= '0' && val[1] <= '9')) {
-                    json += ",\"" + String(name) + "\":" + val;
-                } else {
-                    String escaped = val;
-                    escaped.replace("\\", "\\\\");
-                    escaped.replace("\"", "\\\"");
-                    json += ",\"" + String(name) + "\":\"" + escaped + "\"";
-                }
-            }
+            if(!request->hasParam(name, true)) return;
+            String val = request->getParam(name, true)->value();
+            const bool nombre = !forcerChaine && val.indexOf(',') < 0 &&
+                ((val.length() > 0 && val[0] >= '0' && val[0] <= '9') ||
+                 (val.length() > 1 && val[0] == '-' && val[1] >= '0' && val[1] <= '9'));
+            if(!forcerChaine && (val == "true" || val == "false"))
+                json += ",\"" + String(name) + "\":" + val;
+            else if(nombre)
+                json += ",\"" + String(name) + "\":" + val;
+            else
+                json += ",\"" + String(name) + "\":\"" + jsonChaine(val) + "\"";
         };
+        auto addParam = [&](const char* name) { addParamEx(name, false); };
         
         /* Paramètres MIDI communs (toujours présents) */
         addParam("rtpMidiEnabled"); // Compatibilité: accepter aussi rtpEnabled
@@ -434,7 +465,7 @@ void setupPinAPI(AsyncWebServer& server) {
         addParam("midiMessageType"); // Nouveau format
         addParam("rtpType"); // Ancien format pour compatibilité
         /* Champs personnalisés de mapping script */
-        addParam("mappingScript");
+        addParamEx("mappingScript", /*forcerChaine=*/true);
         /* Mode MIDI: RTP vs Mapping Script */
         addParam("midiMode");
         /* Pour composants avec axes (joystick, IMU), sauvegarder les types MIDI par axe */
