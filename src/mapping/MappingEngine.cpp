@@ -512,6 +512,30 @@ Source evaluerSource(const String& seg, const Evt& e) {
 
 namespace {
 
+// Les verbes de SORTIE du moteur web n'acceptent leurs arguments que sous forme
+// de CHIFFRES NUS (regex \d*). « ctl.out(r("fader1"),r("fader2")) » — pourtant
+// present dans toto.nms — ne correspond donc a rien cote web : le verbe y est
+// ignore et la valeur passe. Et « note.out(60,1) », la forme du moteur de
+// Patrice, n'y correspond pas davantage.
+// En etre plus permissif ici ferait dire a un meme script DEUX choses
+// differentes selon qu'il tourne dans l'app ou sur la carte — le pire des
+// resultats. On refuse donc exactement ce que le web refuse ; le segment
+// retombe alors sur « verbe inconnu = passage transparent ».
+bool chiffresNus(const String& a) {
+    if (!a.length()) return false;
+    for (int i = 0; i < (int)a.length(); i++)
+        if (a[i] < '0' || a[i] > '9') return false;
+    return true;
+}
+// Un seul argument : vide (→ defaut) ou chiffres nus. false = pas la forme web.
+bool canalSeul(const String& a, int defaut, int& ch) {
+    String t = a; t.trim();
+    if (!t.length()) { ch = defaut; return true; }
+    if (!chiffresNus(t)) return false;
+    ch = (int)t.toInt();
+    return true;
+}
+
 void emettre(Sortie* sorties, int max, int& n, const Sortie& s) {
     if (n < max) sorties[n++] = s;   // au-dela, on ecrete plutot que deborder
 }
@@ -767,8 +791,9 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
     // ne porte pas les champs attendus (source counter, seq, f...). Defauts :
     // velocite 127, canal 1 — comme le moteur web.
     if (verbe(seg, "note.out.vel", a)) {
+        int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s;
-        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.canal = (uint8_t)ch;
         s.a = (e.type == Evt::NoteOn || e.type == Evt::NoteOff || e.type == Evt::PolyTouch)
               ? e.a : 60;
         if (e.type == Evt::NoteOff) { s.type = Sortie::NoteOff; s.b = 0; }
@@ -777,8 +802,9 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         return true;
     }
     if (verbe(seg, "note.out", a)) {
+        int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s;
-        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.canal = (uint8_t)ch;
         s.a = sept(courant);
         if (e.type == Evt::NoteOff) { s.type = Sortie::NoteOff; s.b = 0; }
         else {
@@ -789,7 +815,8 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         return true;
     }
     if (verbe(seg, "noteoff.out", a)) {
-        const uint8_t ch = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        int chn; if (!canalSeul(a, 1, chn)) return true;
+        const uint8_t ch = (uint8_t)chn;
         const int v = (int)lroundf(courant);
         if (v == 128) {                       // 128 = toutes les notes
             for (int i = 0; i < 128; i++) {
@@ -803,11 +830,14 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         return true;
     }
     if (verbe(seg, "ctl.out", a)) {
-        String m[2];
-        const int k = decouperArgs(a, m, 2);
+        String m[3];
+        const int k = decouperArgs(a, m, 3);
+        if (k > 2) return true;                                  // pas la forme web
+        if (k >= 1 && !chiffresNus(m[0])) return true;
+        if (k >= 2 && !chiffresNus(m[1])) return true;
         Sortie s; s.type = Sortie::Cc;
-        s.canal = (k >= 1 && m[0].length()) ? (uint8_t)constrain((int)m[0].toInt(), 1, 16)
-                                            : (uint8_t)(e.canal ? e.canal : 1);
+        s.canal = (k >= 1) ? (uint8_t)m[0].toInt()
+                           : (uint8_t)(e.canal ? e.canal : 1);
         if (k >= 2)          { s.a = sept((float)m[1].toInt()); s.b = sept(courant); }
         else if (srcEstCcNum){ s.a = sept(courant);             s.b = (e.type == Evt::Cc) ? e.b : 0; }
         else                 { s.a = (e.type == Evt::Cc) ? e.a : 0; s.b = sept(courant); }
@@ -815,22 +845,25 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         return true;
     }
     if (verbe(seg, "bend.out", a)) {
+        int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s; s.type = Sortie::Bend;
-        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.canal = (uint8_t)ch;
         s.valeur14 = (int16_t)constrain((int)lroundf(courant), -8192, 8191);
         emettre(sorties, max, n, s);
         return true;
     }
     if (verbe(seg, "touch.out", a)) {
+        int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s; s.type = Sortie::Touch;
-        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.canal = (uint8_t)ch;
         s.a = sept(courant);
         emettre(sorties, max, n, s);
         return true;
     }
     if (verbe(seg, "pgm.out", a)) {
+        int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s; s.type = Sortie::Pgm;
-        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.canal = (uint8_t)ch;
         s.a = sept(courant);
         emettre(sorties, max, n, s);
         return true;
@@ -898,6 +931,12 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
     return n;
 }
 
+// Canal MIDI valide. Le PIPELINE ne borne rien — le moteur web ne borne pas
+// non plus, et s'en ecarter ferait diverger les deux sur « ctl.out(74,1) ».
+// Mais un canal hors 1..16 ne doit jamais atteindre un octet de statut : la
+// garde vit donc ICI, au bord, la ou le MIDI est reellement ecrit.
+static uint8_t canalValide(uint8_t c) { return (uint8_t)constrain((int)c, 1, 16); }
+
 // ── Enveloppes historiques ─────────────────────────────────────────────────
 // MidiRouter parle encore en « une note » / « un CC ». Elles prennent le
 // PREMIER evenement de leur genre dans la liste. Les garder evite de reecrire
@@ -919,7 +958,7 @@ bool MappingEngine::executeMidiNote(const char* script,
         if (liste[i].type != Sortie::Note && liste[i].type != Sortie::NoteOff) continue;
         sortie.note  = liste[i].a;
         sortie.velo  = (liste[i].type == Sortie::NoteOff) ? 0 : liste[i].b;
-        sortie.canal = liste[i].canal;
+        sortie.canal = canalValide(liste[i].canal);
         sortie.emise = true;
         break;
     }
@@ -942,7 +981,7 @@ bool MappingEngine::executeMidiCc(const char* script,
         if (liste[i].type != Sortie::Cc) continue;
         sortie.cc     = liste[i].a;
         sortie.valeur = liste[i].b;
-        sortie.canal  = liste[i].canal;
+        sortie.canal  = canalValide(liste[i].canal);
         sortie.emise  = true;
         break;
     }
