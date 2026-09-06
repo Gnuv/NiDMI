@@ -112,6 +112,14 @@ public:
     // le script precedent, a une position qui n'a plus de sens.
     static void reinitialiser();
 
+    // ── print() ─────────────────────────────────────────────────────────────
+    // Le pipeline ne connait ni Serial ni WebSocket : c'est du calcul pur, et
+    // c'est ce qui le rend eprouvable hors carte. print() delegue donc a un
+    // rappel que l'appelant installe. Sur la carte il ecrit au journal et
+    // pousse une trame vers l'app ; au banc, il n'y a rien a installer.
+    typedef void (*Impression)(const char* etiquette, float valeur);
+    static void surImpression(Impression fn);
+
     // ── Enveloppes historiques ──────────────────────────────────────────────
     // executeMidiNote / executeMidiCc restent l'interface de MidiRouter : elles
     // appellent executer() et n'en gardent que le PREMIER evenement de leur

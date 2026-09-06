@@ -76,6 +76,7 @@ namespace {
 // quand une note arrive.
 constexpr int MAX_PIPELINES = 12;
 MappingEngine::Etat g_etats[MAX_PIPELINES];
+MappingEngine::Impression g_impression = nullptr;
 
 // ── Outils de chaine ───────────────────────────────────────────────────────
 
@@ -207,6 +208,8 @@ int32_t versInt32(float v) {
 }
 
 }  // namespace
+
+void MappingEngine::surImpression(Impression fn) { g_impression = fn; }
 
 void MappingEngine::reinitialiser() {
     for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i].reinitialiser();
@@ -609,8 +612,8 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         String etiquette = a; etiquette.trim();
         if (etiquette.length() >= 2 && etiquette[0] == '"')
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
-        Serial.printf("[nms] %s : %.4f\n",
-                      etiquette.length() ? etiquette.c_str() : "out", courant);
+        if (g_impression)
+            g_impression(etiquette.length() ? etiquette.c_str() : "out", courant);
         return true;
     }
     if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) return true;

@@ -5,6 +5,7 @@
 #include "utils/PinMapper.h"
 #include "midi/MidiRouter.h"
 #include "midi/CcMap.h"
+#include "mapping/MappingEngine.h"
 #include "network/UsbMidiManager.h"
 #include "server/WebDebugConsole.h"
 #include "Globals.h"
@@ -237,6 +238,19 @@ void nidmi_begin() {
     // La table CC -> parametre revient elle aussi de la NVS : sans elle, un
     // redemarrage rendait muets tous les potentiometres appris.
     CcMap::monter();
+
+    /* print() d'un .nms : au journal ET vers l'app.
+     * En headless, le moteur du navigateur n'execute plus rien — son
+     * _msePrintLog n'est donc jamais appele, et la console de la zone I/O
+     * restait vide alors que le script tournait tres bien. La carte pousse
+     * maintenant une trame « NMS_PRINT:<etiquette>\x1f<valeur> » que l'app
+     * affiche dans la console du bloc concerne. */
+    MappingEngine::surImpression([](const char* etiquette, float valeur) {
+        NIDMI_WEB_LOG("[nms] %s : %.4f\n", etiquette, valeur);
+        char trame[96];
+        snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%.4f", etiquette, valeur);
+        serverCore.websocket().textAll(trame);
+    });
 
     /* MIDI USB ENTRANT -> moteur audio.
        Le port USB de la carte etait uniquement SORTANT : un clavier ou un DAW

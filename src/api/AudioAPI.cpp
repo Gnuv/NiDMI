@@ -432,9 +432,15 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
 
         MappingEngine::Sortie liste[MappingEngine::MAX_SORTIES];
         bool traite = false;
+        // Un COMPOSANT n'a qu'UN slot d'etat pour tous ses pipelines (il vit
+        // dans ComponentState, et il y a jusqu'a 64 composants). L'essai doit
+        // donc en donner un seul lui aussi, sinon il repondrait mieux que la
+        // realite et un script a deux « toggle() » paraitrait correct ici tout
+        // en se marchant dessus sur la carte.
+        const int slots = (genre == "capteur") ? 1 : 8;
         const int n = MappingEngine::executer(par("script").c_str(), ev, liste,
                                               MappingEngine::MAX_SORTIES, traite,
-                                              etats, 8);
+                                              etats, slots);
         // PASSAGE : quand aucun pipeline n'a pris l'evenement en charge, il
         // ressort tel quel — c'est ce que fait MidiRouter a partir de `traite`,
         // et ce que fait le moteur web. La route le montre donc aussi, sans
