@@ -283,6 +283,11 @@ void MidiRouter::setParamsScript(const String& params) {
 
 void MidiRouter::setScriptMidi(const String& script) {
     scriptEntrant = script;
+    // Le script change : l'etat par pipeline (compteur, seq, toggle, sel/map,
+    // lp...) n'a plus de sens. Sans cet effacement, un counter reprend a la
+    // position ou en etait le script PRECEDENT — un decalage silencieux, et
+    // d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note.
+    MappingEngine::reinitialiser();
     // Un script pousse EN LIGNE n'est plus celui du fichier : laisser
     // nomScriptActif tel quel faisait annoncer « transpose.nms » alors qu'un
     // tout autre code tournait. On dit ce qui est vrai.
@@ -334,6 +339,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister) {
     if (!nom || !*nom) {                       // "" = plus de script du tout
         scriptEntrant = "";
         nomScriptActif = "";
+        MappingEngine::reinitialiser();
         if (persister) {
             Preferences p;
             if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(NVS_CLE_SCRIPT); p.end(); }
@@ -348,6 +354,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister) {
     }
     scriptEntrant  = contenu;
     nomScriptActif = nom;
+    MappingEngine::reinitialiser();   // meme raison que dans setScriptMidi
     if (persister) {
         Preferences p;
         if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(NVS_CLE_SCRIPT, nomScriptActif); p.end(); }

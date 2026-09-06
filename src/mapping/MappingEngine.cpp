@@ -1,7 +1,16 @@
 #include "MappingEngine.h"
+
+/* NMS_BANC_HOTE : compilation sur le poste de developpement, pour le banc de
+ * conformite (hardware/bench/nms/ du depot nidmi). Le pipeline .nms est du
+ * calcul pur — il ne demande ni WiFi, ni I2S, ni MidiSender. L'isoler derriere
+ * cette garde permet de le compiler et de l'EPROUVER sans carte, en comparant
+ * ses sorties a celles du moteur web qui fait reference. Sans ca, la seule
+ * verification possible etait de flasher. */
+#ifndef NMS_BANC_HOTE
 #include "../Globals.h"
 #include "../midi/MidiSender.h"
 #include "../server/ServerCore.h"
+#endif
 
 // INITIALISATION DES STATICS (Obligatoire dans le .cpp)
 FluxRegistry::Entry FluxRegistry::entries[32];
@@ -36,6 +45,7 @@ bool FluxRegistry::has(const char* name) {
     }
     return false;
 }
+#ifndef NMS_BANC_HOTE
 // Helper pour envoyer CC via MIDI
 static void sendMidiControlChange(uint8_t cc, uint8_t value, uint8_t chan, MidiSender* sender) {
     if (sender) {
@@ -197,76 +207,83 @@ void MappingEngine::execute(const char* script, float inputVal, MidiSender* midi
         end = s.indexOf(':', start);
     }
 }
+#endif  // NMS_BANC_HOTE
 
-// ── Rouages communs aux deux pipelines MIDI ────────────────────────────────
-// executeMidiNote et executeMidiCc partagent tout sauf leurs verbes d'entree et
-// de sortie. Ces trois fonctions etaient des lambdas locales a la premiere ; les
-// sortir evite de les recopier dans la seconde — et donc de les corriger deux
-// fois, ce qui est exactement comme naissent deux comportements divergents.
+// ═══════════════════════════════════════════════════════════════════════════
+// PIPELINE .nms — portage du moteur web (engines/core/midi-script/web/index.js)
+//
+// La reference est le moteur web : c'est lui qui DEFINIT la langue. Tout ecart
+// ici est un bug, pas un choix. Le banc hardware/bench/nms/ fait passer les
+// memes cas aux deux et diffe les sorties.
+//
+// Ce qui n'est PAS porte, et pourquoi :
+//   - tout ce qui demande une horloge (lag, ramp, del, debounce, makenote,
+//     metro, loadbang) : il faut un tick regulier depuis nidmi_loop, plus une
+//     file d'attente. C'est une seconde vague, pas un oubli ;
+//   - osc.in / osc.out : la couche OSC vit dans ServerCore, hors de ce calcul
+//     pur — les brancher ici ferait rentrer le reseau dans le pipeline ;
+//   - le bus inter-blocs r("plugin.x") : il n'a pas de sens sur une carte qui
+//     n'heberge qu'un script.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include <math.h>
+
 namespace {
 
-// Un .nms de FICHIER n'est pas une ligne de l'editeur de broche : il porte des
-// commentaires « // … », des retours a la ligne et un « ; » final. Sans ce
-// nettoyage, le premier segment valait « // Transpose …\nnote.in() » et
-// note.in() passait inapercu.
+// ── Etat par pipeline ──────────────────────────────────────────────────────
+// toggle, counter, seq, sel/map, lp, drunk, hysteresis, change gardent une
+// memoire d'un evenement au suivant. Le moteur web la range dans une Map
+// indexee par numero de pipeline ; ici un tableau fixe suffit et ne coute rien.
+constexpr int MAX_PIPELINES = 12;
+
+struct EtatPipeline {
+    int16_t selIdx    = -1;
+    int8_t  toggle    = 0;
+    float   compteur  = NAN;   // NAN = jamais initialise
+    int16_t seq       = -1;
+    float   drunk     = NAN;
+    float   lp        = NAN;
+    int8_t  hyst      = 0;
+    float   change    = NAN;
+};
+EtatPipeline g_etats[MAX_PIPELINES];
+
+// ── Outils de chaine ───────────────────────────────────────────────────────
+
+// Retire les commentaires « // … » et normalise les blancs. Le moteur web fait
+// exactement ceci (script.replace(/\/\/[^\n]*/g,'')) avant de decouper.
 String nettoyer(const char* script) {
     String s;
-    String brut = String(script);
+    const String brut = String(script);
     bool enCommentaire = false;
     for (unsigned i = 0; i < brut.length(); i++) {
         const char c = brut[i];
         if (enCommentaire) { if (c == '\n') enCommentaire = false; continue; }
-        if (c == '/' && i + 1 < brut.length() && brut[i+1] == '/') { enCommentaire = true; i++; continue; }
+        if (c == '/' && i + 1 < brut.length() && brut[i + 1] == '/') { enCommentaire = true; i++; continue; }
         if (c == '\n' || c == '\r' || c == '\t') { s += ' '; continue; }
         s += c;
     }
-    s.trim();
-    while (s.endsWith(";")) { s.remove(s.length() - 1); s.trim(); }
     return s;
 }
 
-// Position du prochain separateur AU NIVEAU ZERO de parentheses, ou -1.
-// Un ':' dans « r("param","x",0,1) » ne separe pas deux segments, et un ';'
-// dans un argument ne separe pas deux pipelines.
-int prochainSeparateur(const String& s, int depuis, char sep) {
+// Position du prochain separateur au niveau ZERO de parentheses et HORS chaine.
+// Les guillemets comptent : sans eux, osc.out("/a:b") se couperait en deux
+// segments. Le moteur web fait la meme chose (_splitSegs / _splitArgs).
+int prochainSep(const String& s, int depuis, char sep) {
     int prof = 0;
+    bool chaine = false;
     for (int i = depuis; i < (int)s.length(); i++) {
-        if (s[i] == '(') prof++;
-        else if (s[i] == ')') prof--;
-        else if (s[i] == sep && prof == 0) return i;
+        const char c = s[i];
+        if (c == '"') { chaine = !chaine; continue; }
+        if (chaine) continue;
+        if (c == '(' || c == '[') prof++;
+        else if (c == ')' || c == ']') prof--;
+        else if (c == sep && prof == 0) return i;
     }
     return -1;
 }
 
-// Argument d'un operateur : soit un nombre litteral, soit une LECTURE r(...).
-// « +(r("param","semitones",-24,24,0)) » est la forme normale d'un .nms — un
-// operateur dont l'argument est lui-meme une lecture. Une version precedente
-// coupait a la premiere « ) », donc au milieu du r(), et lisait 0.
-float valeurArg(const String& arg) {
-    String a = arg; a.trim();
-    if (!a.startsWith("r(")) return a.toFloat();
-    // r("nom")  ou  r("param","nom",min,max,defaut)
-    int q1 = a.indexOf('"');
-    int q2 = (q1 >= 0) ? a.indexOf('"', q1 + 1) : -1;
-    if (q1 < 0 || q2 < 0) return 0.0f;
-    String cible = a.substring(q1 + 1, q2);
-    if (cible == "param") {
-        const int q3 = a.indexOf('"', q2 + 1);
-        const int q4 = (q3 >= 0) ? a.indexOf('"', q3 + 1) : -1;
-        if (q3 >= 0 && q4 >= 0) cible = a.substring(q3 + 1, q4);
-    }
-    if (cible.length() && FluxRegistry::has(cible.c_str()))
-        return FluxRegistry::get(cible.c_str());
-    // Absent du registre : on prend le DEFAUT declare en dernier argument, ce
-    // qui rend un script exploitable meme sans reglage pousse.
-    const int derniere = a.lastIndexOf(',');
-    const int par = a.lastIndexOf(')');
-    if (derniere >= 0 && par > derniere) return a.substring(derniere + 1, par).toFloat();
-    return 0.0f;
-}
-
-// Contenu de « op(...) », en comptant les parentheses pour ne pas s'arreter sur
-// celle d'un r() imbrique.
+// Contenu de « verbe(...) », parentheses equilibrees.
 String contenuParentheses(const String& seg, int depuis) {
     int prof = 0, debut = -1;
     for (int i = depuis; i < (int)seg.length(); i++) {
@@ -276,143 +293,658 @@ String contenuParentheses(const String& seg, int depuis) {
     return String("");
 }
 
-// Les quatre operateurs arithmetiques, communs aux deux pipelines. Renvoie
-// false si le segment n'en est pas un — a l'appelant de continuer son analyse.
-bool operateur(const String& seg, float& courant) {
-    if (seg.startsWith("+(")) { courant += valeurArg(contenuParentheses(seg, 1)); return true; }
-    if (seg.startsWith("-(")) { courant -= valeurArg(contenuParentheses(seg, 1)); return true; }
-    if (seg.startsWith("*(")) { courant *= valeurArg(contenuParentheses(seg, 1)); return true; }
-    if (seg.startsWith("/(")) { const float d = valeurArg(contenuParentheses(seg, 1));
-                                if (d != 0) courant /= d; return true; }
-    if (seg.startsWith("r("))  { courant = valeurArg(seg); return true; }
-    return false;
+// Le segment est-il « nom(...) » ? Si oui, args recoit le contenu.
+// Compare le NOM EXACT : sans ca « note.out » repondrait a « note.out.vel ».
+bool verbe(const String& seg, const char* nom, String& args) {
+    const int n = (int)strlen(nom);
+    if ((int)seg.length() < n + 2) return false;
+    for (int i = 0; i < n; i++) if (seg[i] != nom[i]) return false;
+    if (seg[n] != '(' || seg[(int)seg.length() - 1] != ')') return false;
+    args = contenuParentheses(seg, n);
+    return true;
+}
+
+// Decoupe une liste d'arguments sur les virgules de niveau zero.
+int decouperArgs(const String& s, String* sortie, int max) {
+    int n = 0, debut = 0;
+    while (n < max) {
+        const int fin = prochainSep(s, debut, ',');
+        String a = s.substring(debut, (fin == -1) ? s.length() : fin);
+        a.trim();
+        if (a.length()) sortie[n++] = a;
+        if (fin == -1) break;
+        debut = fin + 1;
+    }
+    return n;
+}
+
+bool estNombre(const String& s) {
+    if (!s.length()) return false;
+    int i = (s[0] == '-') ? 1 : 0;
+    if (i >= (int)s.length()) return false;
+    bool point = false, chiffre = false;
+    for (; i < (int)s.length(); i++) {
+        const char c = s[i];
+        if (c >= '0' && c <= '9') { chiffre = true; continue; }
+        if (c == '.' && !point) { point = true; continue; }
+        return false;
+    }
+    return chiffre;
+}
+
+// Valeur d'un argument : un litteral, ou une lecture r(...).
+// « +(r("param","semitones",-24,24,0)) » est la forme normale d'un .nms.
+float valeurArg(const String& arg) {
+    String a = arg; a.trim();
+    if (!a.length()) return 0.0f;
+    if (estNombre(a)) return a.toFloat();
+    String dedans;
+    if (verbe(a, "r", dedans) || verbe(a, "receive", dedans)) {
+        String morceaux[6];
+        const int n = decouperArgs(dedans, morceaux, 6);
+        if (n == 0) return 0.0f;
+        // r("nom")  ou  r("param","nom",min,max[,defaut])
+        auto sansGuillemets = [](String x) {
+            x.trim();
+            if (x.length() >= 2 && x[0] == '"' && x[(int)x.length() - 1] == '"')
+                return x.substring(1, (int)x.length() - 1);
+            return x;
+        };
+        String cible = sansGuillemets(morceaux[0]);
+        int    iDefaut = -1;
+        if (cible == "param" && n >= 2) { cible = sansGuillemets(morceaux[1]); iDefaut = (n >= 5) ? 4 : -1; }
+        if (cible.length() && FluxRegistry::has(cible.c_str()))
+            return FluxRegistry::get(cible.c_str());
+        // Absent du registre : le DEFAUT declare, ce qui rend un script
+        // exploitable meme sans reglage pousse. (Le moteur web rend 0 ; ici on
+        // est plus utile sans etre incompatible — un registre alimente donne le
+        // meme resultat des deux cotes.)
+        if (iDefaut >= 0) return morceaux[iDefaut].toFloat();
+        return 0.0f;
+    }
+    return a.toFloat();
+}
+
+// ToInt32 de JavaScript : troncature vers zero puis repliement sur 32 bits.
+// Les operateurs binaires du moteur web passent par « current|0 » ; sans cette
+// conversion, &(255) sur une valeur fractionnaire divergerait.
+int32_t versInt32(float v) {
+    if (!isfinite(v)) return 0;
+    const double t = trunc((double)v);
+    const double m = fmod(t, 4294967296.0);
+    double u = (m < 0) ? m + 4294967296.0 : m;
+    if (u >= 2147483648.0) u -= 4294967296.0;
+    return (int32_t)u;
 }
 
 }  // namespace
 
-// ── Traitement d'un evenement MIDI entrant ─────────────────────────────────
-// Meme pipeline que execute(), mais la valeur courante part de la NOTE et peut
-// etre republiee comme note. C'est ce qui permet a un .nms de mapping de
-// transformer le MIDI ENTRANT — transposition, filtrage de canal, remappage —
-// SUR LA CARTE, sans qu'un navigateur soit dans le chemin du son.
-//
-// Un .nms peut porter PLUSIEURS pipelines separes par ';'. On les parcourt
-// tous ; le dernier a emettre l'emporte, puisque la sortie est unique.
-bool MappingEngine::executeMidiNote(const char* script,
-                                    uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
-                                    bool estNoteOff, SortieNote& sortie) {
-    sortie.emise = sortie.traite = false;
-    if (!script || script[0] == '\0') return false;
+void MappingEngine::reinitialiser() {
+    for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i] = EtatPipeline();
+}
+
+namespace {
+
+using Evt    = MappingEngine::Evenement;
+using Sortie = MappingEngine::Sortie;
+
+struct Source { float valeur = 0; bool declenche = false; };
+
+// Le genre d'evenement auquel une SOURCE repond. Sert a `traite` : un pipeline
+// pilote par f(), counter() ou une lecture de registre n'a pas « pris en
+// charge » la note qui l'a fait tourner, et ne doit donc pas la bloquer.
+enum class Famille { Aucune, Note, Cc, Bend, Touch, PolyTouch, Pgm };
+
+Famille familleSource(const String& seg) {
+    if (seg.startsWith("note.in") || seg.startsWith("note.on") ||
+        seg.startsWith("note.off") || seg.startsWith("vel.in") ||
+        seg.startsWith("notechan.in"))                          return Famille::Note;
+    if (seg.startsWith("ctl.in") || seg.startsWith("ccnum.in") ||
+        seg.startsWith("ctlchan.in"))                           return Famille::Cc;
+    if (seg.startsWith("bend.in"))                              return Famille::Bend;
+    if (seg.startsWith("touch.in"))                             return Famille::Touch;
+    if (seg.startsWith("polytouch.in"))                         return Famille::PolyTouch;
+    if (seg.startsWith("pgm.in"))                               return Famille::Pgm;
+    return Famille::Aucune;
+}
+
+Famille familleEvenement(const Evt& e) {
+    switch (e.type) {
+        case Evt::NoteOn: case Evt::NoteOff: return Famille::Note;
+        case Evt::Cc:        return Famille::Cc;
+        case Evt::Bend:      return Famille::Bend;
+        case Evt::Touch:     return Famille::Touch;
+        case Evt::PolyTouch: return Famille::PolyTouch;
+        case Evt::Pgm:       return Famille::Pgm;
+        default:             return Famille::Aucune;
+    }
+}
+
+// Deux filtres optionnels « verbe(a,b) » : a vide ou 0 = tous, b absent = tous.
+void lireDeuxFiltres(const String& args, int& a, int& b) {
+    String m[2];
+    const int n = decouperArgs(args, m, 2);
+    a = (n >= 1 && m[0].length()) ? (int)m[0].toInt() : 0;
+    b = (n >= 2 && m[1].length()) ? (int)m[1].toInt() : -1;
+}
+
+Source evaluerSource(const String& seg, const Evt& e) {
+    Source non;
+    if (estNombre(seg)) return { seg.toFloat(), true };
+
+    String args;
+    // f(x) / i(x) — une constante, ou une lecture. Se declenche sur tout.
+    if (verbe(seg, "f", args)) return { valeurArg(args.length() ? args : String("0")), true };
+    if (verbe(seg, "i", args)) return { roundf(valeurArg(args.length() ? args : String("0"))), true };
+    // r(...) / receive(...) — lecture du registre, se declenche sur tout.
+    if (verbe(seg, "r", args) || verbe(seg, "receive", args)) return { valeurArg(seg), true };
+
+    const bool note = (e.type == Evt::NoteOn || e.type == Evt::NoteOff);
+    int f1, f2;
+
+    if (verbe(seg, "note.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (note && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    if (verbe(seg, "note.on", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::NoteOn && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    if (verbe(seg, "note.off", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::NoteOff && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    // vel.in([ch[,note]]) — canal d'abord, filtre de note ensuite.
+    if (verbe(seg, "vel.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::NoteOn && (f1 == 0 || f1 == (int)e.canal)
+            && (f2 < 0 || f2 == (int)e.a)) return { (float)e.b, true };
+        return non;
+    }
+    if (verbe(seg, "notechan.in", args)) {
+        if (e.type == Evt::NoteOn && args.toInt() == (long)e.a) return { (float)e.canal, true };
+        return non;
+    }
+    if (verbe(seg, "ctl.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::Cc && (f1 == 0 || f1 == (int)e.canal)
+            && (f2 < 0 || f2 == (int)e.a)) return { (float)e.b, true };
+        return non;
+    }
+    // ccnum.in([ch]) — la valeur courante est le NUMERO, pas la valeur.
+    if (verbe(seg, "ccnum.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::Cc && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    if (verbe(seg, "ctlchan.in", args)) {
+        if (e.type == Evt::Cc && args.toInt() == (long)e.a) return { (float)e.canal, true };
+        return non;
+    }
+    if (verbe(seg, "bend.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::Bend && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.valeur14, true };
+        return non;
+    }
+    if (verbe(seg, "touch.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::Touch && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    if (verbe(seg, "polytouch.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::PolyTouch && (f1 == 0 || f1 == (int)e.canal)
+            && (f2 < 0 || f2 == (int)e.a)) return { (float)e.b, true };
+        return non;
+    }
+    if (verbe(seg, "pgm.in", args)) {
+        lireDeuxFiltres(args, f1, f2);
+        if (e.type == Evt::Pgm && (f1 == 0 || f1 == (int)e.canal)) return { (float)e.a, true };
+        return non;
+    }
+    return non;
+}
+
+}  // namespace
+
+namespace {
+
+void emettre(Sortie* sorties, int max, int& n, const Sortie& s) {
+    if (n < max) sorties[n++] = s;   // au-dela, on ecrete plutot que deborder
+}
+
+uint8_t sept(float v) { return (uint8_t)constrain((int)lroundf(v), 0, 127); }
+
+// Evalue UN segment. Renvoie false si le segment bloque le pipeline — c'est le
+// `null` du moteur web (sel qui ne trouve pas, block, spigot ferme, change sans
+// changement) : tout ce qui suit dans ce pipeline est abandonne.
+bool evaluerSegment(const String& seg, float& courant, const Evt& e,
+                    Sortie* sorties, int max, int& n,
+                    EtatPipeline& st, bool srcEstCcNum) {
+    String a;
+
+    // ── Arithmetique ────────────────────────────────────────────────────────
+    if (verbe(seg, "*", a))   { courant *= valeurArg(a); return true; }
+    if (verbe(seg, "+", a))   { courant += valeurArg(a); return true; }
+    if (verbe(seg, "-", a))   { courant -= valeurArg(a); return true; }
+    if (verbe(seg, "/", a))   { const float v = valeurArg(a); if (v) courant /= v; return true; }
+    if (verbe(seg, "%", a))   { const float v = valeurArg(a); if (v) courant = fmodf(courant, v); return true; }
+    if (verbe(seg, "div", a)) { const float v = valeurArg(a); if (v) courant = truncf(courant / v); return true; }
+    if (verbe(seg, "mod", a)) { const float v = valeurArg(a); if (v) courant = fmodf(courant, v); return true; }
+    if (verbe(seg, "pow", a)) { courant = powf(courant, valeurArg(a)); return true; }
+    if (verbe(seg, "min", a)) { const float v = valeurArg(a); if (v < courant) courant = v; return true; }
+    if (verbe(seg, "max", a)) { const float v = valeurArg(a); if (v > courant) courant = v; return true; }
+    if (verbe(seg, "wrap", a)) {
+        const float nn = a.length() ? valeurArg(a) : 1.0f;
+        courant = nn ? fmodf(fmodf(courant, nn) + nn, nn) : 0.0f;
+        return true;
+    }
+    if (verbe(seg, "atan2", a)) { courant = atan2f(courant, valeurArg(a)); return true; }
+
+    // ── Binaire (sur des entiers 32 bits, comme « current|0 » cote web) ─────
+    if (verbe(seg, "&", a))  { courant = (float)(versInt32(courant) &  versInt32(valeurArg(a))); return true; }
+    if (verbe(seg, "|", a))  { courant = (float)(versInt32(courant) |  versInt32(valeurArg(a))); return true; }
+    if (verbe(seg, "^", a))  { courant = (float)(versInt32(courant) ^  versInt32(valeurArg(a))); return true; }
+    if (verbe(seg, "<<", a)) { courant = (float)(versInt32(courant) << (versInt32(valeurArg(a)) & 31)); return true; }
+    if (verbe(seg, ">>", a)) { courant = (float)(versInt32(courant) >> (versInt32(valeurArg(a)) & 31)); return true; }
+
+    // ── Comparaisons — rendent 1 ou 0 ───────────────────────────────────────
+    if (verbe(seg, ">=", a)) { courant = (courant >= valeurArg(a)) ? 1.f : 0.f; return true; }
+    if (verbe(seg, "<=", a)) { courant = (courant <= valeurArg(a)) ? 1.f : 0.f; return true; }
+    if (verbe(seg, "==", a)) { courant = (courant == valeurArg(a)) ? 1.f : 0.f; return true; }
+    if (verbe(seg, "!=", a)) { courant = (courant != valeurArg(a)) ? 1.f : 0.f; return true; }
+    if (verbe(seg, ">", a))  { courant = (courant >  valeurArg(a)) ? 1.f : 0.f; return true; }
+    if (verbe(seg, "<", a))  { courant = (courant <  valeurArg(a)) ? 1.f : 0.f; return true; }
+
+    // ── Logique ─────────────────────────────────────────────────────────────
+    if (verbe(seg, "and", a) || verbe(seg, "or", a)) {
+        const bool et = seg.startsWith("and(");
+        String m[2];
+        if (decouperArgs(a, m, 2) == 2) {
+            const float x = valeurArg(m[0]), y = valeurArg(m[1]);
+            courant = et ? (((courant != 0) && (x != 0) && (y != 0)) ? 1.f : 0.f)
+                         : (((courant != 0) || (x != 0) || (y != 0)) ? 1.f : 0.f);
+        }
+        return true;
+    }
+
+    // ── Unaires ─────────────────────────────────────────────────────────────
+    if (seg == "not()")   { courant = (courant == 0) ? 1.f : 0.f; return true; }
+    if (seg == "abs()")   { courant = fabsf(courant); return true; }
+    if (seg == "round()") { courant = roundf(courant); return true; }
+    if (seg == "floor()") { courant = floorf(courant); return true; }
+    if (seg == "ceil()")  { courant = ceilf(courant);  return true; }
+    if (seg == "inv()")   { courant = 1.0f - courant;  return true; }
+    if (seg == "neg()")   { courant = -courant;        return true; }
+    if (seg == "sqrt()")  { courant = sqrtf(fabsf(courant)); return true; }
+    if (seg == "sin()")   { courant = sinf(courant);   return true; }
+    if (seg == "cos()")   { courant = cosf(courant);   return true; }
+    if (seg == "tan()")   { courant = tanf(courant);   return true; }
+    if (seg == "atan()")  { courant = atanf(courant);  return true; }
+    if (seg == "log()")   { courant = (courant > 0) ? logf(courant) : 0.f; return true; }
+    if (seg == "exp()")   { courant = expf(courant);   return true; }
+    if (seg == "int()")   { courant = truncf(courant); return true; }
+    if (seg == "float()") { return true; }
+
+    // ── Conversions musicales (formules de Pd, comme le moteur web) ─────────
+    if (seg == "mtof()")    { courant = 440.f * powf(2.f, (courant - 69.f) / 12.f); return true; }
+    if (seg == "ftom()")    { courant = 69.f + 12.f * log2f(fmaxf(1e-10f, courant) / 440.f); return true; }
+    if (seg == "dbtopow()") { courant = powf(10.f, courant / 10.f); return true; }
+    if (seg == "powtodb()") { courant = 10.f * log10f(fmaxf(1e-10f, courant)); return true; }
+    if (seg == "dbtorms()") { courant = powf(10.f, courant / 20.f); return true; }
+    if (seg == "rmstodb()") { courant = 20.f * log10f(fmaxf(1e-10f, courant)); return true; }
+
+    // ── Mise a l'echelle ────────────────────────────────────────────────────
+    if (verbe(seg, "scale", a)) {
+        String m[4];
+        if (decouperArgs(a, m, 4) == 4) {
+            const float imin = valeurArg(m[0]), imax = valeurArg(m[1]);
+            const float omin = valeurArg(m[2]), omax = valeurArg(m[3]);
+            courant = (imax == imin) ? omin : omin + (courant - imin) / (imax - imin) * (omax - omin);
+        }
+        return true;
+    }
+    if (verbe(seg, "clamp", a)) {
+        String m[2];
+        if (decouperArgs(a, m, 2) == 2) {
+            const float lo = valeurArg(m[0]), hi = valeurArg(m[1]);
+            courant = fmaxf(lo, fminf(hi, courant));
+        }
+        return true;
+    }
+    // curve(exp) — courbe de puissance sur la plage 0..127.
+    if (verbe(seg, "curve", a)) {
+        const float ex = valeurArg(a);
+        const float norme = fmaxf(0.f, fminf(1.f, courant / 127.f));
+        courant = powf(norme, ex) * 127.f;
+        return true;
+    }
+
+    // ── Aiguillage : sel / map / block ──────────────────────────────────────
+    if (verbe(seg, "sel", a)) {
+        String m[12];
+        const int k = decouperArgs(a, m, 12);
+        for (int i = 0; i < k; i++)
+            if (valeurArg(m[i]) == courant) { st.selIdx = (int16_t)i; return true; }
+        return false;                       // non selectionne : on bloque
+    }
+    if (verbe(seg, "map", a)) {
+        String m[12];
+        const int k = decouperArgs(a, m, 12);
+        if (st.selIdx < 0 || st.selIdx >= k) return false;
+        courant = valeurArg(m[st.selIdx]);
+        return true;
+    }
+    if (verbe(seg, "block", a)) {
+        String m[12];
+        const int k = decouperArgs(a, m, 12);
+        for (int i = 0; i < k; i++) if (valeurArg(m[i]) == courant) return false;
+        return true;
+    }
+    if (seg == "stripnote()") {
+        if (e.type == Evt::NoteOff) return false;
+        if (e.type == Evt::NoteOn && e.b == 0) return false;
+        return true;
+    }
+
+    // ── Registre ────────────────────────────────────────────────────────────
+    // s("param","f",min,max) est un afficheur : passage transparent. Teste
+    // AVANT s("x"), qui l'avalerait.
+    if (verbe(seg, "s", a) || verbe(seg, "send", a)) {
+        String m[6];
+        const int k = decouperArgs(a, m, 6);
+        if (k == 0) return true;
+        String nom = m[0]; nom.trim();
+        if (nom.length() >= 2 && nom[0] == '"' && nom[(int)nom.length() - 1] == '"')
+            nom = nom.substring(1, (int)nom.length() - 1);
+        if (nom == "param") {
+            if (k >= 2) {                    // s("param","fader",min,max) : affichage
+                String f = m[1]; f.trim();
+                if (f.length() >= 2 && f[0] == '"' && f[(int)f.length() - 1] == '"')
+                    f = f.substring(1, (int)f.length() - 1);
+                // Rien a afficher sur une carte sans ecran, mais on PUBLIE la
+                // valeur : c'est ce qui permet a l'app de la lire, et a un
+                // autre pipeline de la relire par r("fader").
+                FluxRegistry::update(f.c_str(), courant);
+            }
+            return true;
+        }
+        FluxRegistry::update(nom.c_str(), courant);
+        return true;
+    }
+    if (verbe(seg, "r", a) || verbe(seg, "receive", a)) { courant = valeurArg(seg); return true; }
+
+    // ── Etat ────────────────────────────────────────────────────────────────
+    if (seg == "toggle()") { st.toggle = st.toggle ? 0 : 1; courant = (float)st.toggle; return true; }
+    if (verbe(seg, "counter", a)) {
+        String m[3];
+        const int k = decouperArgs(a, m, 3);
+        if (k >= 2) {
+            const float mn = valeurArg(m[0]), mx = valeurArg(m[1]);
+            const float pas = (k >= 3) ? valeurArg(m[2]) : 1.0f;
+            float v = isnan(st.compteur) ? mn : st.compteur;
+            v += pas;
+            if (v > mx) v = mn;
+            st.compteur = v;
+            courant = v;
+        }
+        return true;
+    }
+    if (verbe(seg, "seq", a)) {
+        String m[16];
+        const int k = decouperArgs(a, m, 16);
+        if (k > 0) {
+            st.seq = (int16_t)((st.seq + 1) % k);
+            courant = valeurArg(m[st.seq]);
+        }
+        return true;
+    }
+    if (seg == "rand()") { courant = (float)rand() / (float)RAND_MAX; return true; }
+    if (verbe(seg, "rand", a)) {
+        String m[2];
+        if (decouperArgs(a, m, 2) == 2) {
+            const float mn = valeurArg(m[0]), mx = valeurArg(m[1]);
+            courant = mn + ((float)rand() / (float)RAND_MAX) * (mx - mn);
+        }
+        return true;
+    }
+    if (verbe(seg, "drunk", a)) {
+        String m[3];
+        if (decouperArgs(a, m, 3) == 3) {
+            const float pas = valeurArg(m[0]), mn = valeurArg(m[1]), mx = valeurArg(m[2]);
+            float v = isnan(st.drunk) ? (mn + mx) / 2.f : st.drunk;
+            v += ((float)rand() / (float)RAND_MAX * 2.f - 1.f) * pas;
+            v = fmaxf(mn, fminf(mx, v));
+            st.drunk = v;
+            courant = v;
+        }
+        return true;
+    }
+    if (seg == "change()") {
+        if (!isnan(st.change) && st.change == courant) return false;
+        st.change = courant;
+        return true;
+    }
+    if (verbe(seg, "spigot", a) || verbe(seg, "gate", a)) return valeurArg(a) != 0;
+    if (verbe(seg, "lp", a)) {
+        const float c = fmaxf(0.f, fminf(1.f, valeurArg(a)));
+        const float prec = isnan(st.lp) ? courant : st.lp;
+        st.lp = prec + c * (courant - prec);
+        courant = st.lp;
+        return true;
+    }
+    if (verbe(seg, "hysteresis", a)) {
+        String m[2];
+        if (decouperArgs(a, m, 2) == 2) {
+            const float lo = valeurArg(m[0]), hi = valeurArg(m[1]);
+            if (courant >= hi) st.hyst = 1;
+            else if (courant <= lo) st.hyst = 0;
+            courant = (float)st.hyst;
+        }
+        return true;
+    }
+
+    // ── Affichage — passage transparent ─────────────────────────────────────
+    // print() va au JOURNAL, pas dans la liste des sorties : cote web il
+    // n'engendre aucun outEvent, et en faire un ici consommerait une place et
+    // ferait diverger les deux moteurs.
+    if (verbe(seg, "print", a)) {
+        String etiquette = a; etiquette.trim();
+        if (etiquette.length() >= 2 && etiquette[0] == '"')
+            etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
+        Serial.printf("[nms] %s : %.4f\n",
+                      etiquette.length() ? etiquette.c_str() : "out", courant);
+        return true;
+    }
+    if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) return true;
+    if (verbe(seg, "bang", a) || verbe(seg, "b", a)) return true;
+
+    // ── Sorties ─────────────────────────────────────────────────────────────
+    // Toutes reconstruisent un message complet meme quand l'evenement d'entree
+    // ne porte pas les champs attendus (source counter, seq, f...). Defauts :
+    // velocite 127, canal 1 — comme le moteur web.
+    if (verbe(seg, "note.out.vel", a)) {
+        Sortie s;
+        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.a = (e.type == Evt::NoteOn || e.type == Evt::NoteOff || e.type == Evt::PolyTouch)
+              ? e.a : 60;
+        if (e.type == Evt::NoteOff) { s.type = Sortie::NoteOff; s.b = 0; }
+        else                        { s.type = Sortie::Note;    s.b = sept(courant); }
+        emettre(sorties, max, n, s);
+        return true;
+    }
+    if (verbe(seg, "note.out", a)) {
+        Sortie s;
+        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.a = sept(courant);
+        if (e.type == Evt::NoteOff) { s.type = Sortie::NoteOff; s.b = 0; }
+        else {
+            s.type = Sortie::Note;
+            s.b = (e.type == Evt::NoteOn) ? e.b : 127;
+        }
+        emettre(sorties, max, n, s);
+        return true;
+    }
+    if (verbe(seg, "noteoff.out", a)) {
+        const uint8_t ch = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        const int v = (int)lroundf(courant);
+        if (v == 128) {                       // 128 = toutes les notes
+            for (int i = 0; i < 128; i++) {
+                Sortie s; s.type = Sortie::NoteOff; s.canal = ch; s.a = (uint8_t)i; s.b = 0;
+                emettre(sorties, max, n, s);
+            }
+        } else {
+            Sortie s; s.type = Sortie::NoteOff; s.canal = ch; s.a = sept((float)v); s.b = 0;
+            emettre(sorties, max, n, s);
+        }
+        return true;
+    }
+    if (verbe(seg, "ctl.out", a)) {
+        String m[2];
+        const int k = decouperArgs(a, m, 2);
+        Sortie s; s.type = Sortie::Cc;
+        s.canal = (k >= 1 && m[0].length()) ? (uint8_t)constrain((int)m[0].toInt(), 1, 16)
+                                            : (uint8_t)(e.canal ? e.canal : 1);
+        if (k >= 2)          { s.a = sept((float)m[1].toInt()); s.b = sept(courant); }
+        else if (srcEstCcNum){ s.a = sept(courant);             s.b = (e.type == Evt::Cc) ? e.b : 0; }
+        else                 { s.a = (e.type == Evt::Cc) ? e.a : 0; s.b = sept(courant); }
+        emettre(sorties, max, n, s);
+        return true;
+    }
+    if (verbe(seg, "bend.out", a)) {
+        Sortie s; s.type = Sortie::Bend;
+        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.valeur14 = (int16_t)constrain((int)lroundf(courant), -8192, 8191);
+        emettre(sorties, max, n, s);
+        return true;
+    }
+    if (verbe(seg, "touch.out", a)) {
+        Sortie s; s.type = Sortie::Touch;
+        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.a = sept(courant);
+        emettre(sorties, max, n, s);
+        return true;
+    }
+    if (verbe(seg, "pgm.out", a)) {
+        Sortie s; s.type = Sortie::Pgm;
+        s.canal = (uint8_t)(a.length() ? constrain((int)a.toInt(), 1, 16) : 1);
+        s.a = sept(courant);
+        emettre(sorties, max, n, s);
+        return true;
+    }
+
+    // Verbe inconnu : passage transparent, comme le moteur web (qui rend
+    // `current` a la fin). Un .nms ecrit pour le web ne casse donc pas sur la
+    // carte — il fait seulement moins.
+    return true;
+}
+
+}  // namespace
+
+int MappingEngine::executer(const char* script, const Evenement& evt,
+                            Sortie* sorties, int max, bool& traite) {
+    traite = false;
+    int n = 0;
+    if (!script || script[0] == '\0' || !sorties || max <= 0) return 0;
 
     const String s = nettoyer(script);
+    const Famille fEvt = familleEvenement(evt);
 
-    int debutPipe = 0;
+    int pi = 0, debutPipe = 0;
     while (debutPipe <= (int)s.length()) {
-        const int finPipe = prochainSeparateur(s, debutPipe, ';');
+        const int finPipe = prochainSep(s, debutPipe, ';');
         const String pipe = s.substring(debutPipe, (finPipe == -1) ? s.length() : finPipe);
 
-        float courant = (float)noteIn;
-        int debut = 0;
-        while (debut <= (int)pipe.length()) {
-            const int fin = prochainSeparateur(pipe, debut, ':');
-            String seg = pipe.substring(debut, (fin == -1) ? pipe.length() : fin);
-            seg.trim();
+        // Le premier segment est la SOURCE : c'est lui qui decide si le
+        // pipeline tourne pour cet evenement.
+        int finSrc = prochainSep(pipe, 0, ':');
+        String src = pipe.substring(0, (finSrc == -1) ? pipe.length() : finSrc);
+        src.trim();
 
-            // Des qu'un verbe de NOTE apparait, le script declare s'occuper
-            // des notes — c'est ce qui rend son silence significatif.
-            if (seg.startsWith("note.in"))        { sortie.traite = true; courant = (float)noteIn; }
-            else if (seg.startsWith("vel.in") || seg.startsWith("velo.in")) courant = (float)veloIn;
-            else if (seg.startsWith("chan.in") || seg.startsWith("ch.in"))  courant = (float)canalIn;
-            else if (operateur(seg, courant))     { /* traite */ }
-            else if (seg.startsWith("note.out(")) {
-                sortie.traite = true;
-                const String args = contenuParentheses(seg, 8);
-                const int virgule = args.indexOf(',');
-                if (virgule == -1) {
-                    // note.out(ch) — forme MIDI : la valeur courante EST la note.
-                    sortie.note  = (uint8_t)constrain((int)lroundf(courant), 0, 127);
-                    sortie.canal = (uint8_t)constrain(args.toInt(), 1, 16);
-                } else {
-                    // note.out(note, ch) — forme CAPTEUR : note litterale.
-                    sortie.note  = (uint8_t)constrain(args.substring(0, virgule).toInt(), 0, 127);
-                    sortie.canal = (uint8_t)constrain(args.substring(virgule + 1).toInt(), 1, 16);
+        if (src.length()) {
+            const Source d = evaluerSource(src, evt);
+            if (d.declenche) {
+                // « Pris en charge » seulement si la source repond au GENRE de
+                // l'evenement. Un pipeline pilote par f() ou counter() tourne
+                // aussi, mais n'a pas pris la note en charge et ne doit donc
+                // pas la bloquer.
+                if (fEvt != Famille::Aucune && familleSource(src) == fEvt) traite = true;
+
+                EtatPipeline& st = g_etats[(pi < MAX_PIPELINES) ? pi : MAX_PIPELINES - 1];
+                const bool srcCcNum = src.startsWith("ccnum.in");
+                float courant = d.valeur;
+
+                int debut = (finSrc == -1) ? (int)pipe.length() + 1 : finSrc + 1;
+                while (debut <= (int)pipe.length()) {
+                    const int fin = prochainSep(pipe, debut, ':');
+                    String seg = pipe.substring(debut, (fin == -1) ? pipe.length() : fin);
+                    seg.trim();
+                    if (seg.length() &&
+                        !evaluerSegment(seg, courant, evt, sorties, max, n, st, srcCcNum))
+                        break;                      // segment bloquant
+                    if (fin == -1) break;
+                    debut = fin + 1;
                 }
-                sortie.velo  = estNoteOff ? 0 : veloIn;
-                sortie.emise = true;
             }
-
-            if (fin == -1) break;
-            debut = fin + 1;
+            pi++;
         }
 
         if (finPipe == -1) break;
         debutPipe = finPipe + 1;
     }
+    return n;
+}
+
+// ── Enveloppes historiques ─────────────────────────────────────────────────
+// MidiRouter parle encore en « une note » / « un CC ». Elles prennent le
+// PREMIER evenement de leur genre dans la liste. Les garder evite de reecrire
+// les appelants dans le meme mouvement que le moteur — et le jour ou la carte
+// saura emettre plusieurs notes, c'est ici qu'on regardera.
+bool MappingEngine::executeMidiNote(const char* script,
+                                    uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
+                                    bool estNoteOff, SortieNote& sortie) {
+    sortie.emise = sortie.traite = false;
+    Evenement e;
+    e.type  = estNoteOff ? Evenement::NoteOff : Evenement::NoteOn;
+    e.canal = canalIn; e.a = noteIn; e.b = veloIn;
+
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite);
+    sortie.traite = traite;
+    for (int i = 0; i < n; i++) {
+        if (liste[i].type != Sortie::Note && liste[i].type != Sortie::NoteOff) continue;
+        sortie.note  = liste[i].a;
+        sortie.velo  = (liste[i].type == Sortie::NoteOff) ? 0 : liste[i].b;
+        sortie.canal = liste[i].canal;
+        sortie.emise = true;
+        break;
+    }
     return sortie.emise;
 }
 
-// ── Traitement d'un CC entrant ─────────────────────────────────────────────
-// Pendant du precedent. Voir MappingEngine.h pour les verbes servis et pour
-// l'asymetrie voulue avec les notes (un script de notes ne doit pas rendre
-// muets les controleurs).
 bool MappingEngine::executeMidiCc(const char* script,
                                   uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
                                   SortieCc& sortie) {
     sortie.emise = sortie.traite = false;
-    if (!script || script[0] == '\0') return false;
+    Evenement e;
+    e.type = Evenement::Cc;
+    e.canal = canalIn; e.a = ccIn; e.b = valeurIn;
 
-    const String s = nettoyer(script);
-
-    int debutPipe = 0;
-    while (debutPipe <= (int)s.length()) {
-        const int finPipe = prochainSeparateur(s, debutPipe, ';');
-        const String pipe = s.substring(debutPipe, (finPipe == -1) ? s.length() : finPipe);
-
-        float courant = (float)valeurIn;
-        bool  filtre  = false;     // un ctl.in de ce pipeline a refuse l'evenement
-        int   debut   = 0;
-        while (debut <= (int)pipe.length() && !filtre) {
-            const int fin = prochainSeparateur(pipe, debut, ':');
-            String seg = pipe.substring(debut, (fin == -1) ? pipe.length() : fin);
-            seg.trim();
-
-            if (seg.startsWith("ctl.in(")) {
-                // Des qu'un ctl.in existe, le script DECLARE traiter les CC —
-                // meme si ce pipeline-ci filtre l'evenement en cours.
-                sortie.traite = true;
-                const String args = contenuParentheses(seg, 6);
-                const int virgule = args.indexOf(',');
-                const String aCh = (virgule == -1) ? args : args.substring(0, virgule);
-                const String aCc = (virgule == -1) ? String("") : args.substring(virgule + 1);
-                // Argument vide ou 0 = pas de filtre, comme dans le moteur web.
-                const int fCh = aCh.length() ? aCh.toInt() : 0;
-                if (fCh != 0 && fCh != (int)canalIn) { filtre = true; break; }
-                if (aCc.length()) {
-                    const int fCc = aCc.toInt();
-                    if (fCc != (int)ccIn) { filtre = true; break; }
-                }
-                courant = (float)valeurIn;
-            }
-            else if (seg.startsWith("chan.in") || seg.startsWith("ch.in")) courant = (float)canalIn;
-            else if (operateur(seg, courant)) { /* traite */ }
-            else if (seg.startsWith("ctl.out(")) {
-                const String args = contenuParentheses(seg, 7);
-                const int virgule = args.indexOf(',');
-                const String aCh = (virgule == -1) ? args : args.substring(0, virgule);
-                const String aCc = (virgule == -1) ? String("") : args.substring(virgule + 1);
-                sortie.canal  = aCh.length() ? (uint8_t)constrain(aCh.toInt(), 1, 16)
-                                             : (uint8_t)(canalIn ? canalIn : 1);
-                sortie.cc     = aCc.length() ? (uint8_t)constrain(aCc.toInt(), 0, 127) : ccIn;
-                sortie.valeur = (uint8_t)constrain((int)lroundf(courant), 0, 127);
-                sortie.emise  = true;
-            }
-
-            if (fin == -1) break;
-            debut = fin + 1;
-        }
-
-        if (finPipe == -1) break;
-        debutPipe = finPipe + 1;
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite);
+    sortie.traite = traite;
+    for (int i = 0; i < n; i++) {
+        if (liste[i].type != Sortie::Cc) continue;
+        sortie.cc     = liste[i].a;
+        sortie.valeur = liste[i].b;
+        sortie.canal  = liste[i].canal;
+        sortie.emise  = true;
+        break;
     }
     return sortie.emise;
 }
