@@ -1,4 +1,5 @@
 #include "APICommon.h"
+#include "../components/basic/ButtonDef.h"   // ButtonConfig, pour retablir le pull
 #include "../utils/PinMapper.h"
 #include "../utils/JSONParser.h"
 #include "../managers/ComponentManager.h"
@@ -167,6 +168,29 @@ void setupPinAPI(AsyncWebServer& server) {
             if (last > vmax) vmax = last;
         }
         uint16_t avg = (uint16_t)(sum / SAMPLES);
+
+        /* RETABLIR LE MODE DE LA BROCHE. analogRead() reconfigure le pad en
+         * entree ADC et SUPPRIME le pull interne. Sur une broche portant un
+         * composant configure — un bouton en INPUT_PULLUP, typiquement — lire
+         * son etat depuis le moniteur le laissait FLOTTANT jusqu'au
+         * redemarrage : le bouton cessait de fonctionner, et la lecture
+         * suivante montrait un bruit qu'on prenait pour un defaut de cablage.
+         * Piege vecu : j'ai diagnostique une « broche flottante » que ma
+         * propre mesure venait de creer. */
+        {
+            for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
+                const ComponentConfig* cfg = g_componentManager.getConfig(i);
+                if (!cfg || cfg->gpio != gpio) continue;
+                if (cfg->type != ComponentType::BUTTON) break;
+                String pull = "pullup";
+                if (cfg->specificConfig.button && strlen(cfg->specificConfig.button->btnPullMode) > 0)
+                    pull = String(cfg->specificConfig.button->btnPullMode);
+                if      (pull == "pullup")   pinMode(gpio, INPUT_PULLUP);
+                else if (pull == "pulldown") pinMode(gpio, INPUT_PULLDOWN);
+                else                          pinMode(gpio, INPUT);
+                break;
+            }
+        }
 
         String json = "{";
         json += "\"gpio\":" + String(gpio) + ",";

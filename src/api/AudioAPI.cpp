@@ -359,6 +359,32 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
                           + g_midiRouter.scriptMidi().length() + "}");
     });
 
+    /* ── Essai de SORTIE MIDI ─────────────────────────────────────────────
+     * Emet un message par les sorties reelles (USB, RTP, BLE). Sert a separer
+     * deux pannes qui se ressemblent : « le script ne tourne pas » et « le MIDI
+     * ne sort pas ». Sans elle, un bouton muet laisse les deux hypotheses
+     * ouvertes et on cherche au mauvais endroit.
+     *   POST /api/midi/sortie   genre=note|noteoff|cc  a=<note|cc>  b=<velo|valeur>  c=<canal>
+     */
+    server.on("/api/midi/sortie", HTTP_POST, [](AsyncWebServerRequest *request){
+        auto par = [&](const char* n, int d) {
+            return request->hasParam(n, true) ? request->getParam(n, true)->value().toInt() : d;
+        };
+        const String genre = request->hasParam("genre", true)
+                           ? request->getParam("genre", true)->value() : String("note");
+        const uint8_t a  = (uint8_t)constrain((int)par("a", 60), 0, 127);
+        const uint8_t b  = (uint8_t)constrain((int)par("b", 100), 0, 127);
+        const uint8_t ch = (uint8_t)constrain((int)par("c", 1), 1, 16);
+        if      (genre == "note")    g_midiRouter.sendNoteOn(ch, a, b);
+        else if (genre == "noteoff") g_midiRouter.sendNoteOff(ch, a, b);
+        else if (genre == "cc")      g_midiRouter.sendControlChange(ch, a, b);
+        else { request->send(400, "application/json",
+                             "{\"status\":\"error\",\"message\":\"genre inconnu\"}"); return; }
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"genre\":\"") + genre + "\",\"a\":" + a +
+                      ",\"b\":" + b + ",\"c\":" + ch + "}");
+    });
+
     /* ── Essai a blanc d'un script .nms ───────────────────────────────────
      * Execute un script sur un evenement DONNE et rend ce qu'il emettrait,
      * sans rien jouer ni envoyer. Deux usages :

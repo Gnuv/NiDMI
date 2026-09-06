@@ -161,66 +161,28 @@ void ButtonProcessor::process(
             FluxRegistry::update(config.name, currentStableState ? 1.0f : 0.0f);
         }
 
+        /* Le script decide, pas nous.
+         *
+         * Ici vivait un echafaudage du moteur d'origine : on cherchait
+         * « note.on( », « note.off( », « note.out( », « seq.out( », « ctl.out( »
+         * dans le texte du script pour decider s'il fallait l'executer, et on
+         * le DECOUPAIT en deux versions (appui / relachement) en retirant des
+         * segments. Deux defauts, du meme genre que ceux du §22 :
+         *   - la garde ne connaissait que cinq verbes : un script en
+         *     « bend.out » ou « noteoff.out » ne s'executait tout simplement
+         *     pas, sans rien signaler ;
+         *   - le decoupeur recollait les segments avec « : », ce qui detruisait
+         *     un script a PLUSIEURS pipelines separes par « ; ».
+         * Le moteur web n'a pas besoin de ca : la valeur du bouton est dans le
+         * registre, et le script choisit lui-meme quoi faire de chaque front —
+         *     r("bouton") : sel(1) : map(60) : note.out(1) ;
+         *     r("bouton") : sel(0) : map(60) : noteoff.out(1) ;
+         * On execute donc a chaque changement d'etat stable, sans rien lire du
+         * texte. */
         if (config.mappingScript[0] != '\0') {
-            const bool hasNoteOn = strstr(config.mappingScript, "note.on(") != nullptr;
-            const bool hasNoteOff = strstr(config.mappingScript, "note.off(") != nullptr;
-            const bool hasNoteOut = strstr(config.mappingScript, "note.out(") != nullptr;
-            const bool hasSeqOut = strstr(config.mappingScript, "seq.out(") != nullptr;
-            const bool hasCtlOut = strstr(config.mappingScript, "ctl.out(") != nullptr;
-            float scriptInput = currentStableState ? 1.0f : 0.0f;
-
-            auto buildEdgeScript = [&](bool onPress) -> String {
-                String src = String(config.mappingScript);
-                String out = "";
-                int start = 0;
-                int end = src.indexOf(':');
-                while (start < (int)src.length()) {
-                    int actualEnd = (end == -1) ? src.length() : end;
-                    String seg = src.substring(start, actualEnd);
-                    seg.trim();
-
-                    bool isNoteOnSeg = seg.startsWith("note.on(");
-                    bool isNoteOffSeg = seg.startsWith("note.off(");
-                    bool keep = true;
-                    if (onPress && isNoteOffSeg) keep = false;
-                    if (!onPress && isNoteOnSeg) keep = false;
-
-                    if (keep && seg.length() > 0) {
-                        if (out.length() > 0) out += ":";
-                        out += seg;
-                    }
-
-                    if (end == -1) break;
-                    start = end + 1;
-                    end = src.indexOf(':', start);
-                }
-                return out;
-            };
-
-            bool shouldExecute = false;
-            if (falling) {
-                // Press: execute any output-capable script, including seq.out and ctl.out.
-                shouldExecute = hasNoteOn || hasNoteOff || hasNoteOut || hasSeqOut || hasCtlOut;
-                if ((hasNoteOff || hasNoteOut || hasSeqOut || hasCtlOut) && !hasNoteOn) {
-                    scriptInput = 1.0f;
-                }
-            } else {
-                // Release: execute note.off, note.out, seq.out, or ctl.out scripts.
-                shouldExecute = hasNoteOff || hasNoteOut || hasSeqOut || hasCtlOut;
-            }
-
-            if (shouldExecute) {
-                if (hasNoteOn && hasNoteOff) {
-                    String edgeScript = buildEdgeScript(falling);
-                    if (edgeScript.length() > 0) {
-                        MappingEngine::executerCapteur(edgeScript.c_str(), scriptInput,
-                                                      midi_sender, &state.scriptEtat);
-                    }
-                } else {
-                    MappingEngine::executerCapteur(config.mappingScript, scriptInput,
-                                                  midi_sender, &state.scriptEtat);
-                }
-            }
+            MappingEngine::executerCapteur(config.mappingScript,
+                                           currentStableState ? 1.0f : 0.0f,
+                                           midi_sender, &state.scriptEtat);
         }
 
         state.last_time = now;
