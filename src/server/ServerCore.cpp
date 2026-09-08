@@ -67,6 +67,19 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
     // Serial.print("[ServerCore] Starting mDNS with hostname: "); Serial.println(hostname);
     
     // Essayer plusieurs noms mDNS
+    /* IPv6 sur la STA, AVANT de demarrer mDNS.
+     *
+     * Sans adresse IPv6, le repondeur mDNS repond a la question A et reste
+     * MUET sur la question AAAA. macOS attend alors son delai complet — CINQ
+     * SECONDES, mesurees — avant chaque connexion par le nom : « nidmi.local »
+     * devient inutilisable dans un navigateur (page de 559 ko, des dizaines de
+     * requetes), alors que la meme carte repond en 18 ms par son adresse IP.
+     * Un silence coute plus cher qu'un refus : avec une adresse lien-local, la
+     * question AAAA obtient une reponse immediate.
+     * Mesure : dns 5,003 s par le nom, 0,002 s par le nom en -4, 0,0015 s par
+     * l'IP. Tout le delai etait la. */
+    WiFi.enableIPv6(true);
+
     // Réduire le nombre de String simultanées - utiliser const char* au lieu de tableau String
     const char* mdnsNames[] = {hostname, "nidmi"};
     bool mdnsOk = false;
