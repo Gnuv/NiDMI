@@ -770,17 +770,12 @@ void setupPinAPI(AsyncWebServer& server) {
             Serial.printf("[PinAPI] ERREUR NVS pour %s\n", pinLabel.c_str());
         }
 
-        /* PRENDRE EFFET TOUT DE SUITE.
-         *
-         * Ce chemin ecrivait en NVS et repondait « ok » sans jamais demander le
-         * rechargement : la carte continuait sur l'ANCIENNE configuration, et
-         * la modification ne s'appliquait qu'au redemarrage suivant. Vu de
-         * l'utilisateur : « je change la note, ca ne marche plus ; le
-         * peripherique MIDI se deconnecte et se reconnecte ; ca remarche ».
-         * Le rechargement est amorti de 500 ms cote boucle (il groupe les
-         * enregistrements successifs) et il ne redemarre rien : il met les
-         * taches temps reel en pause, relit, et repart. */
-        nidmi_requestReloadPins();
+        /* Pas de nidmi_requestReloadPins() ICI : il y en a deja un a la fin de
+         * ce meme gestionnaire, present depuis l'origine (juste avant le
+         * request->send). J'en avais ajoute un second en croyant qu'il
+         * manquait — ma recherche s'etait arretee 200 lignes trop tot, avant
+         * le bloc des composants a broches multiples. Une recherche BORNEE ne
+         * prouve pas une absence : deuxieme fois dans cette session. */
         
         /* Si additionalPins présent, utiliser le handler générique pour ce type de composant */
         if(hasAdditionalPins && def) {
