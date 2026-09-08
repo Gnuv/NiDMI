@@ -28,8 +28,20 @@
  */
 class ComponentManager {
 private:
-    /* MAX_COMPONENTS doit supporter 2 MUX (32 pins) + autres composants */
-    static constexpr uint8_t MAX_COMPONENTS = 64;
+    /* MAX_COMPONENTS : 24, et c'est un choix de MEMOIRE.
+     *
+     * Chaque emplacement coute ~440 octets de RAM interne (config, etat,
+     * filtre, trois horodatages de telemetrie). A 64, l'objet pesait 28 ko —
+     * sur une carte qui vit avec une trentaine de kilo-octets de tas libre.
+     * Servir l'interface embarquee (559 ko, une cinquantaine de requetes),
+     * recharger une configuration et tenir l'audio dans ce qui restait la
+     * mettait a genoux : des routes qui n'aboutissent plus, puis un blocage.
+     *
+     * 24 emplacements liberent ~17,6 ko. Ils permettent un multiplexeur 16
+     * voies plus huit composants directs, ce qui couvre les boitiers vises.
+     * Deux multiplexeurs demanderaient de remonter ce nombre — et de le payer
+     * en tas. Le compromis se decide ici, en connaissance de cause. */
+    static constexpr uint8_t MAX_COMPONENTS = 24;
     
     ComponentConfig configs[MAX_COMPONENTS];
     ComponentState states[MAX_COMPONENTS];
