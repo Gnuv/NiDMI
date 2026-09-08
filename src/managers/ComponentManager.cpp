@@ -201,11 +201,17 @@ void ComponentManager::reloadConfigs() {
         osc_output_all_enabled_ = prefs.getBool("osc_out_all", true);
         prefs.end();
     }
+    marquer("pause");
     bool wdt = pauseRealtimeTasks();
+    marquer("clearAll");
     clearAll();
+    marquer("mux");
     loadMuxConfigFromNVS();
+    marquer("nvs");
     ConfigLoader::loadFromNVS(*this);
+    marquer("reprise");
     resumeRealtimeTasks(wdt);
+    marquer("repos");
 }
 
 bool ComponentManager::pauseRealtimeTasks() {
@@ -369,6 +375,7 @@ bool ComponentManager::removeComponent(uint8_t gpio) {
 void ComponentManager::clearAll() {
     // Éteindre tous les messages MIDI actifs avant de tout effacer
     for (uint8_t i = 0; i < component_count; i++) {
+        marquer("clear-midi", i);
         const ComponentConfig& config = configs[i];
         ComponentState& state = states[i];
         
@@ -437,6 +444,7 @@ void ComponentManager::clearAll() {
      *
      * On libere selon le TYPE : l'union ne sait pas se detruire seule. */
     for (uint8_t i = 0; i < component_count; i++) {
+        marquer("clear-free", i);
         ComponentConfig& c = configs[i];
         if (!c.specificConfig.specific) continue;
         switch (c.type) {

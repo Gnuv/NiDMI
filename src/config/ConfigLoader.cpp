@@ -79,9 +79,11 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
         char keyBuf[16]; // "pin_A99" ou "pin_D99"
         snprintf(keyBuf, sizeof(keyBuf), "pin_%s", pinLabelCStr);
         
+        manager.marquer("nvs-scan", i);
         if (!preferences.isKey(keyBuf)) {
             continue; // Passer au suivant
         }
+        manager.marquer("nvs-pin", i);
         
         // Lire la config - limiter strictement la portée de la String
         String pinConfig = preferences.getString(keyBuf, "");

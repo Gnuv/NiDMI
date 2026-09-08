@@ -211,6 +211,8 @@ void setupPinAPI(AsyncWebServer& server) {
          * echafaudage : c'est la meme question que la route pose deja. */
         String j = String("{\"rechargement_en_cours\":")
                  + (g_componentManager.isNvsWriteInProgress() ? "true" : "false")
+                 + ",\"phase\":\"" + g_componentManager.phaseRechargement() + "\""
+                 + ",\"phase_i\":" + String(g_componentManager.phaseIndice())
                  + ",\"composants\":[";
         for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
             const ComponentConfig* c = g_componentManager.getConfig(i);

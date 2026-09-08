@@ -74,12 +74,25 @@ private:
 
     // Garde NVS : les tâches temps réel vérifient ce flag et yieldent
     volatile bool _nvsWriteInProgress = false;
+    const char* volatile _phase = "repos";
+    volatile int _phaseI = -1;
 
     /** Master switch OSC sortie (NVS osc_out_all), rechargé dans reloadConfigs() */
     bool osc_output_all_enabled_ = true;
     
 public:
     bool isNvsWriteInProgress() const { return _nvsWriteInProgress; }
+
+    /* OU en est un rechargement.
+     *
+     * Un rechargement qui se bloque laisse la carte SANS composants — plus
+     * aucun MIDI — et la seule chose visible de l'exterieur etait « zero
+     * composant », identique a « rien a charger ». Ces deux champs nomment
+     * l'etape en cours ; /api/pins/actif les publie. Deux ecritures de pointeur
+     * par etape, aucun cout mesurable. */
+    const char* phaseRechargement() const { return _phase; }
+    int         phaseIndice()       const { return _phaseI; }
+    void        marquer(const char* p, int i = -1) { _phase = p; _phaseI = i; }
 private:
     
 public:
