@@ -2,6 +2,7 @@
 #include "../mapping/MappingEngine.h"
 #include "../mapping/ScriptStore.h"
 #include <Preferences.h>
+volatile uint32_t g_midiEnvois = 0;   // messages reellement emis
 #include "CcMap.h"
 #include <Arduino.h>
 
@@ -29,6 +30,7 @@ void MidiRouter::update() {
 }
 
 void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+    { extern volatile uint32_t g_midiEnvois; g_midiEnvois++; }
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendNoteOn(ch, note, velocity);
@@ -58,6 +60,7 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 }
 
 void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
+    { extern volatile uint32_t g_midiEnvois; g_midiEnvois++; }
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendNoteOff(ch, note, velocity);
@@ -81,6 +84,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
 }
 
 void MidiRouter::sendControlChange(uint8_t channel, uint8_t control, uint8_t value) {
+    { extern volatile uint32_t g_midiEnvois; g_midiEnvois++; }
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendControlChange(ch, control, value);

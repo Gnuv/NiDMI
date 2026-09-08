@@ -1,5 +1,7 @@
 #include "APICommon.h"
-#include "../components/basic/ButtonDef.h"   // ButtonConfig, pour retablir le pull
+#include "../components/basic/ButtonDef.h"
+#include "../utils/ComponentInitializer.h"
+#include "../server/WebDebugConsole.h"   // ButtonConfig, pour retablir le pull
 #include "../utils/PinMapper.h"
 #include "../utils/JSONParser.h"
 #include "../managers/ComponentManager.h"
@@ -124,6 +126,61 @@ void setupPinAPI(AsyncWebServer& server) {
      * sans dépendre de la télémétrie (qui n'est émise que lors d'un événement MIDI).
      * Usage : /api/pins/read?gpio=1  ou  /api/pins/read?gpio=D0
      * Retourne un échantillonnage court (min/max/moyenne) pour rendre le bruit visible. */
+    /* ── Lecture NUMERIQUE, non destructive ───────────────────────────────
+     * /api/pins/read fait un analogRead, qui reconfigure le pad et supprime le
+     * pull interne : il ne peut donc JAMAIS observer l'etat au repos d'un
+     * bouton — la mesure detruit ce qu'elle mesure, et on lit du bruit qu'on
+     * prend pour un defaut de cablage. Piege rencontre deux fois.
+     * Ici, un simple digitalRead : on ne touche a rien. C'est la bonne mesure
+     * pour un bouton, et la seule qui dise la verite. */
+    /* Diagnostic : la boucle des composants tourne-t-elle ? A quelle cadence ?
+     * Deux appels espaces disent tout : si le compteur n'avance pas, le
+     * processeur ne s'execute pas et il est inutile de chercher du cote de la
+     * broche ou du script. */
+    server.on("/api/pins/diag", HTTP_GET, [](AsyncWebServerRequest *request){
+        extern volatile uint32_t g_boutonPasses, g_boutonFronts, g_boutonScripts, g_midiEnvois;
+        extern char g_boutonNom[24]; extern char g_boutonScript[132];
+        extern volatile float g_boutonReg;
+        // Le script porte des retours a la ligne et des guillemets : sans
+        // echappement, ce diagnostic produirait lui-meme du JSON invalide —
+        // exactement le defaut qu'il sert a chercher (§29).
+        auto jsonEchappeDiag = [](const String& v){ String o; for (unsigned i=0;i<v.length();i++){
+            char c=v[i];
+            if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\";
+            else if (c=='\n') o+="\\n"; else if (c=='\r') o+="\\r";
+            else if ((unsigned char)c<0x20) o+=' '; else o+=c; } return o; };
+        request->send(200, "application/json",
+            String("{\"passes_bouton\":") + (unsigned long)g_boutonPasses
+            + ",\"fronts\":"        + (unsigned long)g_boutonFronts
+            + ",\"scripts\":"       + (unsigned long)g_boutonScripts
+            + ",\"midi_envois\":"   + (unsigned long)g_midiEnvois
+            + ",\"millis\":"        + (unsigned long)millis()
+            + ",\"niveau_d3\":"     + digitalRead(4)
+            + ",\"nom\":\""         + String(g_boutonNom) + "\""
+            + ",\"script_len\":"    + (int)strlen(g_boutonScript)
+            + ",\"reg\":"           + String(g_boutonReg, 2)
+            + ",\"script\":\""      + jsonEchappeDiag(String(g_boutonScript)) + "\"}");
+    });
+
+    server.on("/api/pins/niveau", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("gpio")) {
+            request->send(400, "application/json", "{\"error\":\"parametre 'gpio' manquant\"}");
+            return;
+        }
+        String param = request->getParam("gpio")->value();
+        PinMapper::detectMcu();
+        uint8_t gpio = (param.length() && isDigit(param.charAt(0)))
+                     ? (uint8_t)param.toInt() : PinMapper::labelToGpio(param);
+        if (gpio == 255 || gpio > 48) {
+            request->send(404, "application/json", "{\"error\":\"pin inconnue\"}");
+            return;
+        }
+        const int n = digitalRead(gpio);
+        request->send(200, "application/json",
+            String("{\"gpio\":") + gpio + ",\"label\":\"" + PinMapper::gpioToLabel(gpio)
+            + "\",\"niveau\":" + n + "}");
+    });
+
     server.on("/api/pins/read", HTTP_GET, [](AsyncWebServerRequest *request){
         if (!request->hasParam("gpio")) {
             request->send(400, "application/json",
@@ -169,27 +226,31 @@ void setupPinAPI(AsyncWebServer& server) {
         }
         uint16_t avg = (uint16_t)(sum / SAMPLES);
 
-        /* RETABLIR LE MODE DE LA BROCHE. analogRead() reconfigure le pad en
-         * entree ADC et SUPPRIME le pull interne. Sur une broche portant un
-         * composant configure — un bouton en INPUT_PULLUP, typiquement — lire
-         * son etat depuis le moniteur le laissait FLOTTANT jusqu'au
-         * redemarrage : le bouton cessait de fonctionner, et la lecture
-         * suivante montrait un bruit qu'on prenait pour un defaut de cablage.
-         * Piege vecu : j'ai diagnostique une « broche flottante » que ma
-         * propre mesure venait de creer. */
+        /* RETABLIR LE MODE DE LA BROCHE.
+         *
+         * analogRead() reconfigure le pad en entree ADC et SUPPRIME le pull
+         * interne. Sur une broche portant un composant configure — un bouton en
+         * INPUT_PULLUP, typiquement — lire son etat depuis le moniteur la
+         * laissait FLOTTANTE jusqu'au redemarrage : le bouton cessait de
+         * fonctionner, et la lecture suivante montrait un bruit qu'on prenait
+         * pour un defaut de cablage. Piege vecu deux fois, la seconde apres un
+         * premier correctif qui ne marchait pas.
+         *
+         * On appelle donc la primitive OFFICIELLE, celle du demarrage, plutot
+         * que de reconstituer sa logique a cote : elle connait les modes de
+         * pull, le cas tactile (ou il ne faut PAS appeler pinMode), et tout ce
+         * qu'on aurait oublie. Reconstituer, c'est se condamner a diverger. */
         {
+            bool retabli = false;
             for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
-                const ComponentConfig* cfg = g_componentManager.getConfig(i);
+                ComponentConfig* cfg = g_componentManager.getConfigMutable(i);
                 if (!cfg || cfg->gpio != gpio) continue;
-                if (cfg->type != ComponentType::BUTTON) break;
-                String pull = "pullup";
-                if (cfg->specificConfig.button && strlen(cfg->specificConfig.button->btnPullMode) > 0)
-                    pull = String(cfg->specificConfig.button->btnPullMode);
-                if      (pull == "pullup")   pinMode(gpio, INPUT_PULLUP);
-                else if (pull == "pulldown") pinMode(gpio, INPUT_PULLDOWN);
-                else                          pinMode(gpio, INPUT);
+                ComponentInitializer::setupGpio(gpio, cfg->type, cfg);
+                retabli = true;
                 break;
             }
+            NIDMI_WEB_LOG("[pins/read] GPIO%d lu ; mode %s", (int)gpio,
+                          retabli ? "retabli (composant configure)" : "laisse en ADC (aucun composant)");
         }
 
         String json = "{";
