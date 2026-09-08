@@ -231,6 +231,8 @@ void setupPinAPI(AsyncWebServer& server) {
 
     server.on("/api/pins/diag", HTTP_GET, [](AsyncWebServerRequest *request){
         extern volatile uint32_t g_boutonPasses, g_boutonFronts, g_boutonScripts, g_midiEnvois;
+        extern volatile uint8_t g_reloadEtape;
+        extern volatile uint32_t g_reloadTasLibre, g_reloadBlocMax;
         extern char g_boutonNom[24]; extern char g_boutonScript[132];
         extern volatile float g_boutonReg;
         // Le script porte des retours a la ligne et des guillemets : sans
@@ -251,6 +253,9 @@ void setupPinAPI(AsyncWebServer& server) {
             + ",\"nom\":\""         + String(g_boutonNom) + "\""
             + ",\"script_len\":"    + (int)strlen(g_boutonScript)
             + ",\"reg\":"           + String(g_boutonReg, 2)
+            + ",\"reload_etape\":"  + (int)g_reloadEtape
+            + ",\"reload_tas\":"    + (unsigned long)g_reloadTasLibre
+            + ",\"reload_bloc\":"   + (unsigned long)g_reloadBlocMax
             + ",\"script\":\""      + jsonEchappeDiag(String(g_boutonScript)) + "\"}");
     });
 

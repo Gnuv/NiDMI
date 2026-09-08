@@ -1,4 +1,5 @@
 #include "ComponentManager.h"
+#include "esp_heap_caps.h"
 #include "../server/WebDebugConsole.h"
 #include <Arduino.h> // For Serial.printf
 #include <Preferences.h>
@@ -194,7 +195,18 @@ void ComponentManager::update() {
     }
 }
 
+/* Etape du rechargement, lisible par /api/pins/diag.
+ * Le journal web perd ses lignes sous pression memoire — son silence ne prouve
+ * rien (MESURES.md §36). Une variable relue en HTTP, elle, repond meme quand la
+ * boucle est figee : c'est le seul instrument fiable ici. */
+volatile uint8_t g_reloadEtape = 0;      // 0 repos · 1 debut · 2 vide · 3 mux · 4 nvs · 5 fini
+volatile uint32_t g_reloadTasLibre = 0;  // tas au moment du rechargement
+volatile uint32_t g_reloadBlocMax = 0;   // plus grand bloc contigu
+
 void ComponentManager::reloadConfigs() {
+    g_reloadEtape = 1;
+    g_reloadTasLibre = ESP.getFreeHeap();
+    g_reloadBlocMax  = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     NIDMI_WEB_LOG("[Reload] debut (composants=%u)", (unsigned)component_count);
     {
         Preferences prefs;
@@ -204,10 +216,14 @@ void ComponentManager::reloadConfigs() {
     }
     bool wdt = pauseRealtimeTasks();
     clearAll();
+    g_reloadEtape = 2;
     loadMuxConfigFromNVS();
+    g_reloadEtape = 3;
     NIDMI_WEB_LOG("[Reload] mux ok, lecture NVS...");
     ConfigLoader::loadFromNVS(*this);
+    g_reloadEtape = 4;
     resumeRealtimeTasks(wdt);
+    g_reloadEtape = 5;
     NIDMI_WEB_LOG("[Reload] fin (composants=%u)", (unsigned)component_count);
 }
 
@@ -422,6 +438,41 @@ void ComponentManager::clearAll() {
             }
         }
     }
+    /* LIBERER les configurations specifiques.
+     *
+     * ComponentInitializer les alloue au « new » (ButtonConfig, VelostatConfig,
+     * ImuConfig...), et RIEN ne les liberait : le destructeur de
+     * ComponentConfig porte un TODO disant qu'on « assume que ComponentManager
+     * gere la memoire » — il ne la gerait pas. Chaque rechargement fuyait donc
+     * une configuration par composant.
+     *
+     * Tant que les rechargements etaient rares, la fuite passait inapercue.
+     * Depuis qu'un enregistrement de broche recharge (ce qui est necessaire
+     * pour qu'une modification prenne effet, MESURES.md §35), CHAQUE
+     * modification fuit : ~90 octets pour deux composants, mesures. Au bout de
+     * quelques dizaines d'editions le tas ne suffit plus, le rechargement
+     * echoue APRES clearAll(), et la carte se retrouve sans aucun composant —
+     * plus de MIDI du tout. C'est exactement le symptome signale.
+     *
+     * On libere selon le TYPE : l'union ne sait pas se detruire seule. */
+    for (uint8_t i = 0; i < component_count; i++) {
+        ComponentConfig& c = configs[i];
+        if (!c.specificConfig.specific) continue;
+        switch (c.type) {
+            case ComponentType::BUTTON:        delete c.specificConfig.button;       break;
+            case ComponentType::LED:           delete c.specificConfig.led;          break;
+            case ComponentType::POTENTIOMETER: delete c.specificConfig.potentiometer;break;
+            case ComponentType::VELOSTAT:      delete c.specificConfig.velostat;     break;
+            case ComponentType::JOYSTICK:      delete c.specificConfig.joystick;     break;
+            case ComponentType::JOYSTICK3:     delete c.specificConfig.joystick3;    break;
+            case ComponentType::IMU:           delete c.specificConfig.imu;          break;
+            case ComponentType::MPR121:        delete c.specificConfig.mpr121;       break;
+            case ComponentType::NOISE_SAMPLER: delete c.specificConfig.noiseSampler; break;
+            default:                           operator delete(c.specificConfig.specific); break;
+        }
+        c.specificConfig.specific = nullptr;
+    }
+
     component_count = 0;
     // Réinitialiser les filtres
     for (uint8_t i = 0; i < MAX_COMPONENTS; i++) {
