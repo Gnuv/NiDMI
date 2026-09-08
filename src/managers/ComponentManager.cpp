@@ -214,8 +214,62 @@ void ComponentManager::reloadConfigs() {
     marquer("repos");
 }
 
+/* La phase SURVIT au redemarrage.
+ *
+ * Le chien de garde arme ci-dessous transforme un rechargement bloque en
+ * redemarrage — c'est ce qu'on veut d'un instrument sans ecran. Mais le
+ * redemarrage effacerait justement la seule trace de l'endroit ou ca a cale, et
+ * les deux correctifs se combattraient. La RTC RAM n'est pas remise a zero par
+ * un reset ; on y depose la derniere phase atteinte, et /api/pins/actif la
+ * publie sous « phase_precedente ». Le blocage se raconte donc lui-meme, apres
+ * coup, sans qu'il faille etre au clavier au bon moment. */
+RTC_NOINIT_ATTR static char     s_phaseRtc[24];
+RTC_NOINIT_ATTR static int32_t  s_phaseRtcI;
+RTC_NOINIT_ATTR static uint32_t s_phaseRtcMagie;
+static const uint32_t PHASE_MAGIE = 0x4E49444DUL;   // "NIDM"
+
+static char s_phaseAvant[24]  = "";
+static int  s_phaseAvantI     = -1;
+
+void ComponentManager::capturerPhasePrecedente() {
+    if (s_phaseRtcMagie == PHASE_MAGIE) {
+        s_phaseRtc[sizeof(s_phaseRtc) - 1] = '\0';
+        strlcpy(s_phaseAvant, s_phaseRtc, sizeof(s_phaseAvant));
+        s_phaseAvantI = (int)s_phaseRtcI;
+    } else {
+        s_phaseAvant[0] = '\0';
+        s_phaseAvantI = -1;
+    }
+    s_phaseRtcMagie = PHASE_MAGIE;
+    strlcpy(s_phaseRtc, "demarrage", sizeof(s_phaseRtc));
+    s_phaseRtcI = -1;
+}
+
+const char* ComponentManager::phaseAvantRedemarrage() { return s_phaseAvant; }
+int         ComponentManager::phaseAvantIndice()      { return s_phaseAvantI; }
+
+void ComponentManager::marquer(const char* p, int i) {
+    _phase = p;
+    _phaseI = i;
+    strlcpy(s_phaseRtc, p ? p : "?", sizeof(s_phaseRtc));
+    s_phaseRtcI = i;
+    if (_chienArme) esp_task_wdt_reset();
+}
+
 bool ComponentManager::pauseRealtimeTasks() {
     _nvsWriteInProgress = true;
+    /* ARMER le chien de garde sur la tache qui recharge.
+     *
+     * Constate en direct : un rechargement s'est bloque dans la lecture de la
+     * broche D0 et n'en est jamais ressorti — plus de 30 s, zero composant,
+     * plus aucun MIDI, et rien pour l'en sortir : cette tache n'etait surveillee
+     * par personne. La carte restait morte jusqu'a une intervention humaine, ce
+     * qui n'a aucun sens pour un instrument qui tourne sans ecran.
+     *
+     * Chaque marqueur nourrit le chien (voir marquer()) : un rechargement qui
+     * avance n'est jamais interrompu, seul un CALAGE declenche le redemarrage.
+     * Ca ne repare pas la cause — ca l'empeche d'etre definitive. */
+    _chienArme = (esp_task_wdt_add(NULL) == ESP_OK);
     /* On NE RETIRE PLUS la tache du chien de garde.
      *
      * Elle en etait retiree pour qu'un rechargement un peu long ne le declenche
@@ -232,6 +286,7 @@ bool ComponentManager::pauseRealtimeTasks() {
 
 void ComponentManager::resumeRealtimeTasks(bool restoreWdt) {
     _nvsWriteInProgress = false;
+    if (_chienArme) { esp_task_wdt_delete(NULL); _chienArme = false; }
     if (restoreWdt) {
         esp_task_wdt_add(xTaskGetCurrentTaskHandle());
         esp_task_wdt_reset();

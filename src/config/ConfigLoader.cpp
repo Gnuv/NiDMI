@@ -85,12 +85,14 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
         }
         manager.marquer("nvs-pin", i);
         
+        manager.marquer("nvs-getString", i);
         // Lire la config - limiter strictement la portée de la String
         String pinConfig = preferences.getString(keyBuf, "");
         if (pinConfig.length() == 0) {
             continue;
         }
         
+        manager.marquer("nvs-role", i);
         // Extraire role - garder en vie jusqu'à l'utilisation
         String role = JSONParser::extractStr(pinConfig, "role", "\n");
         if (role.length() == 0) continue;
@@ -122,6 +124,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
             }
         }
         
+        manager.marquer("nvs-midi", i);
         // Extraire paramètres MIDI
         uint8_t midi_param = 7; // défaut CC
         uint8_t channel = 1;    // défaut canal 1
@@ -261,6 +264,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
         Serial.printf("[ConfigLoader] Pin %s: type=%d, midi_param=%d, channel=%d, msg_type=%d\n", 
                      pinLabelCStr, (int)type, midi_param, channel, (int)msg_type);
         
+        manager.marquer("nvs-addComponent", i);
         bool success = manager.addComponent(gpio, type, midi_param, channel, msg_type);
         
         if (!success) {

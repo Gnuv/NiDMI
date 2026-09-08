@@ -131,6 +131,9 @@ static void touchDiag(const char* label) {
 }
 
 void nidmi_begin() {
+    /* AVANT tout chargement : lire la phase laissee par la vie precedente,
+     * sinon le premier marquer() de ce demarrage l'ecraserait. */
+    ComponentManager::capturerPhasePrecedente();
     Serial.begin(115200);
     delay(50);
 

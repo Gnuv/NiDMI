@@ -213,6 +213,8 @@ void setupPinAPI(AsyncWebServer& server) {
                  + (g_componentManager.isNvsWriteInProgress() ? "true" : "false")
                  + ",\"phase\":\"" + g_componentManager.phaseRechargement() + "\""
                  + ",\"phase_i\":" + String(g_componentManager.phaseIndice())
+                 + ",\"phase_precedente\":\"" + ComponentManager::phaseAvantRedemarrage() + "\""
+                 + ",\"phase_precedente_i\":" + String(ComponentManager::phaseAvantIndice())
                  + ",\"composants\":[";
         for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
             const ComponentConfig* c = g_componentManager.getConfig(i);

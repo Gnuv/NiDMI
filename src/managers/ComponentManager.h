@@ -76,6 +76,7 @@ private:
     volatile bool _nvsWriteInProgress = false;
     const char* volatile _phase = "repos";
     volatile int _phaseI = -1;
+    bool _chienArme = false;
 
     /** Master switch OSC sortie (NVS osc_out_all), rechargé dans reloadConfigs() */
     bool osc_output_all_enabled_ = true;
@@ -92,7 +93,16 @@ public:
      * par etape, aucun cout mesurable. */
     const char* phaseRechargement() const { return _phase; }
     int         phaseIndice()       const { return _phaseI; }
-    void        marquer(const char* p, int i = -1) { _phase = p; _phaseI = i; }
+    /* Marquer, c'est aussi PROGRESSER : on en profite pour nourrir le chien de
+     * garde. Un rechargement qui avance le rassure a chaque etape ; un
+     * rechargement qui CALE entre deux marqueurs le laisse aboyer, et la carte
+     * redemarre en quelques secondes au lieu de rester morte. C'est le
+     * comportement qu'on veut d'un instrument sans ecran. */
+    void marquer(const char* p, int i = -1);
+    /* Ou en etait le rechargement AVANT le dernier redemarrage (RTC RAM). */
+    static void        capturerPhasePrecedente();
+    static const char* phaseAvantRedemarrage();
+    static int         phaseAvantIndice();
 private:
     
 public:
