@@ -204,7 +204,14 @@ void setupPinAPI(AsyncWebServer& server) {
         auto ech = [](const String& v){ String o; for (unsigned i=0;i<v.length();i++){ char c=v[i];
             if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\";
             else if (c=='\n') o+="\\n"; else if ((unsigned char)c<0x20) o+=' '; else o+=c; } return o; };
-        String j = "{\"composants\":[";
+        /* `rechargement_en_cours` : vrai si un rechargement a commence et n'est
+         * pas revenu. Avec une liste VIDE, il distingue les deux pannes qui se
+         * ressemblent — « le rechargement s'est bloque apres avoir vide » et
+         * « il a fini mais n'a rien trouve ». Deux entiers, pas un
+         * echafaudage : c'est la meme question que la route pose deja. */
+        String j = String("{\"rechargement_en_cours\":")
+                 + (g_componentManager.isNvsWriteInProgress() ? "true" : "false")
+                 + ",\"composants\":[";
         for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
             const ComponentConfig* c = g_componentManager.getConfig(i);
             if (!c) continue;
