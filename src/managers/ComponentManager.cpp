@@ -1,5 +1,4 @@
 #include "ComponentManager.h"
-#include "esp_heap_caps.h"
 #include "../server/WebDebugConsole.h"
 #include <Arduino.h> // For Serial.printf
 #include <Preferences.h>
@@ -195,19 +194,7 @@ void ComponentManager::update() {
     }
 }
 
-/* Etape du rechargement, lisible par /api/pins/diag.
- * Le journal web perd ses lignes sous pression memoire — son silence ne prouve
- * rien (MESURES.md §36). Une variable relue en HTTP, elle, repond meme quand la
- * boucle est figee : c'est le seul instrument fiable ici. */
-volatile uint8_t g_reloadEtape = 0;      // 0 repos · 1 debut · 2 vide · 3 mux · 4 nvs · 5 fini
-volatile uint32_t g_reloadTasLibre = 0;  // tas au moment du rechargement
-volatile uint32_t g_reloadBlocMax = 0;   // plus grand bloc contigu
-
 void ComponentManager::reloadConfigs() {
-    g_reloadEtape = 1;
-    g_reloadTasLibre = ESP.getFreeHeap();
-    g_reloadBlocMax  = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    NIDMI_WEB_LOG("[Reload] debut (composants=%u)", (unsigned)component_count);
     {
         Preferences prefs;
         prefs.begin("nidmi", true);
@@ -216,15 +203,9 @@ void ComponentManager::reloadConfigs() {
     }
     bool wdt = pauseRealtimeTasks();
     clearAll();
-    g_reloadEtape = 2;
     loadMuxConfigFromNVS();
-    g_reloadEtape = 3;
-    NIDMI_WEB_LOG("[Reload] mux ok, lecture NVS...");
     ConfigLoader::loadFromNVS(*this);
-    g_reloadEtape = 4;
     resumeRealtimeTasks(wdt);
-    g_reloadEtape = 5;
-    NIDMI_WEB_LOG("[Reload] fin (composants=%u)", (unsigned)component_count);
 }
 
 bool ComponentManager::pauseRealtimeTasks() {

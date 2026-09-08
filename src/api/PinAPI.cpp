@@ -193,24 +193,13 @@ void setupPinAPI(AsyncWebServer& server) {
      * sans dépendre de la télémétrie (qui n'est émise que lors d'un événement MIDI).
      * Usage : /api/pins/read?gpio=1  ou  /api/pins/read?gpio=D0
      * Retourne un échantillonnage court (min/max/moyenne) pour rendre le bruit visible. */
-    /* ── Lecture NUMERIQUE, non destructive ───────────────────────────────
-     * /api/pins/read fait un analogRead, qui reconfigure le pad et supprime le
-     * pull interne : il ne peut donc JAMAIS observer l'etat au repos d'un
-     * bouton — la mesure detruit ce qu'elle mesure, et on lit du bruit qu'on
-     * prend pour un defaut de cablage. Piege rencontre deux fois.
-     * Ici, un simple digitalRead : on ne touche a rien. C'est la bonne mesure
-     * pour un bouton, et la seule qui dise la verite. */
-    /* Diagnostic : la boucle des composants tourne-t-elle ? A quelle cadence ?
-     * Deux appels espaces disent tout : si le compteur n'avance pas, le
-     * processeur ne s'execute pas et il est inutile de chercher du cote de la
-     * broche ou du script. */
-    /* ── CE QUI TOURNE VRAIMENT ────────────────────────────────────────────
-     * /api/pins/list dit ce qu'il y a en NVS. Cette route-ci dit ce que la
+    /* ── CE QUE LA CARTE EXECUTE ──────────────────────────────────────────
+     * /api/pins/list dit ce qu'il y a en memoire morte. Celle-ci dit ce que la
      * carte a CHARGE et execute a cet instant. Les deux doivent coincider ;
-     * quand ils divergent, c'est qu'une ecriture n'a pas pris effet — et c'est
-     * precisement ce qui est arrive.
-     * C'est la regle du headless rendue observable : on peut verifier, sans
-     * rien toucher, que la page et la carte parlent de la meme chose.        */
+     * quand elles divergent, une ecriture n'a pas pris effet.
+     * C'est la regle — « la page montre l'etat exact de ce qui tourne » —
+     * rendue verifiable en une requete. Elle reste, la ou l'echafaudage de
+     * debogage a ete retire.                                                 */
     server.on("/api/pins/actif", HTTP_GET, [](AsyncWebServerRequest *request){
         auto ech = [](const String& v){ String o; for (unsigned i=0;i<v.length();i++){ char c=v[i];
             if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\";
@@ -227,55 +216,6 @@ void setupPinAPI(AsyncWebServer& server) {
         }
         j += "]}";
         request->send(200, "application/json", j);
-    });
-
-    server.on("/api/pins/diag", HTTP_GET, [](AsyncWebServerRequest *request){
-        extern volatile uint32_t g_boutonPasses, g_boutonFronts, g_boutonScripts, g_midiEnvois;
-        extern volatile uint8_t g_reloadEtape;
-        extern volatile uint32_t g_reloadTasLibre, g_reloadBlocMax;
-        extern char g_boutonNom[24]; extern char g_boutonScript[132];
-        extern volatile float g_boutonReg;
-        // Le script porte des retours a la ligne et des guillemets : sans
-        // echappement, ce diagnostic produirait lui-meme du JSON invalide —
-        // exactement le defaut qu'il sert a chercher (§29).
-        auto jsonEchappeDiag = [](const String& v){ String o; for (unsigned i=0;i<v.length();i++){
-            char c=v[i];
-            if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\";
-            else if (c=='\n') o+="\\n"; else if (c=='\r') o+="\\r";
-            else if ((unsigned char)c<0x20) o+=' '; else o+=c; } return o; };
-        request->send(200, "application/json",
-            String("{\"passes_bouton\":") + (unsigned long)g_boutonPasses
-            + ",\"fronts\":"        + (unsigned long)g_boutonFronts
-            + ",\"scripts\":"       + (unsigned long)g_boutonScripts
-            + ",\"midi_envois\":"   + (unsigned long)g_midiEnvois
-            + ",\"millis\":"        + (unsigned long)millis()
-            + ",\"niveau_d3\":"     + digitalRead(4)
-            + ",\"nom\":\""         + String(g_boutonNom) + "\""
-            + ",\"script_len\":"    + (int)strlen(g_boutonScript)
-            + ",\"reg\":"           + String(g_boutonReg, 2)
-            + ",\"reload_etape\":"  + (int)g_reloadEtape
-            + ",\"reload_tas\":"    + (unsigned long)g_reloadTasLibre
-            + ",\"reload_bloc\":"   + (unsigned long)g_reloadBlocMax
-            + ",\"script\":\""      + jsonEchappeDiag(String(g_boutonScript)) + "\"}");
-    });
-
-    server.on("/api/pins/niveau", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (!request->hasParam("gpio")) {
-            request->send(400, "application/json", "{\"error\":\"parametre 'gpio' manquant\"}");
-            return;
-        }
-        String param = request->getParam("gpio")->value();
-        PinMapper::detectMcu();
-        uint8_t gpio = (param.length() && isDigit(param.charAt(0)))
-                     ? (uint8_t)param.toInt() : PinMapper::labelToGpio(param);
-        if (gpio == 255 || gpio > 48) {
-            request->send(404, "application/json", "{\"error\":\"pin inconnue\"}");
-            return;
-        }
-        const int n = digitalRead(gpio);
-        request->send(200, "application/json",
-            String("{\"gpio\":") + gpio + ",\"label\":\"" + PinMapper::gpioToLabel(gpio)
-            + "\",\"niveau\":" + n + "}");
     });
 
     server.on("/api/pins/read", HTTP_GET, [](AsyncWebServerRequest *request){

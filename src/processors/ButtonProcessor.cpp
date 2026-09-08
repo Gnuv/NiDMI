@@ -1,12 +1,6 @@
 #include "ButtonProcessor.h"
 #include "../server/WebDebugConsole.h"
 
-volatile uint32_t g_boutonPasses = 0;   // tours de boucle
-volatile uint32_t g_boutonFronts = 0;   // fronts stables vus
-volatile uint32_t g_boutonScripts = 0;  // executions du script
-char g_boutonNom[24] = "";              // nom du composant, tel que charge
-char g_boutonScript[132] = "";          // script, tel que charge
-volatile float g_boutonReg = 0;         // ce que r("<nom>") vaut a cet instant
 #include "ProcessorRegistry.h"
 #include "../components/ComponentTypes.h"  // Définitions communes
 #include "../components/basic/ButtonDef.h"
@@ -29,14 +23,6 @@ void ButtonProcessor::process(
         }
     }
     
-    /* Compteur de PASSAGES. Un bouton qui « ne marche pas » peut cacher deux
-     * choses tres differentes : la broche ne bouge pas, ou le processeur ne
-     * tourne pas assez souvent pour la voir. Sans ce compteur on ne peut pas
-     * les distinguer, et on cherche au mauvais endroit. Expose par
-     * /api/pins/diag. */
-    extern volatile uint32_t g_boutonPasses;
-    g_boutonPasses++;
-
     bool raw_state = digitalRead(config.gpio);
     bool pressed;
     
@@ -106,7 +92,7 @@ void ButtonProcessor::process(
             if (config.name && config.name[0] != '\0') {
                 FluxRegistry::update(config.name, currentStableState ? 1.0f : 0.0f);
             }
-            NIDMI_WEB_LOG("[Bouton] GPIO%d arme (stable=%d)", config.gpio, currentStableState ? 1 : 0);
+            Serial.printf("[ButtonProcessor] GPIO%d script arme (stable=%d)\n", config.gpio, currentStableState ? 1 : 0);
         }
     }
 
@@ -160,15 +146,6 @@ void ButtonProcessor::process(
     // In script mode, button behavior must be deterministic and edge-driven,
     // independently of btnMode (pulse/toggle/press_release).
     if (config.midiMode == MidiMode::SCRIPT) {
-        /* Trace des FRONTS. Sans elle, un bouton muet laisse toutes les
-         * hypotheses ouvertes : broche flottante, processeur jamais appele,
-         * script sans effet. Le journal serie n'est pas lisible ici (variante
-         * usbmidi-on, pas de CDC) — il faut la console web. */
-        { extern volatile uint32_t g_boutonFronts; if (falling || rising) g_boutonFronts++; }
-        if (falling || rising)
-            NIDMI_WEB_LOG("[Bouton] GPIO%d %s (brut=%d, arme=%lu)", config.gpio,
-                          falling ? "APPUI" : "relache", (int)raw_state,
-                          (unsigned long)state.note_on_time);
         // If not armed yet, do not emit MIDI on this edge.
         if (state.note_on_time == 0) {
             state.last_time = now;
@@ -204,17 +181,7 @@ void ButtonProcessor::process(
          *     r("bouton") : sel(0) : map(60) : noteoff.out(1) ;
          * On execute donc a chaque changement d'etat stable, sans rien lire du
          * texte. */
-        if (falling || rising)
-            NIDMI_WEB_LOG("[Bouton] GPIO%d script=%u o nom='%s' reg=%.1f",
-                          config.gpio, (unsigned)strlen(config.mappingScript),
-                          config.name, FluxRegistry::get(config.name));
         if (config.mappingScript[0] != '\0') {
-            { extern volatile uint32_t g_boutonScripts; g_boutonScripts++;
-              extern char g_boutonNom[24]; extern char g_boutonScript[132];
-              extern volatile float g_boutonReg;
-              strlcpy(g_boutonNom, config.name, sizeof(g_boutonNom));
-              strlcpy(g_boutonScript, config.mappingScript, sizeof(g_boutonScript));
-              g_boutonReg = FluxRegistry::get(config.name); }
             MappingEngine::executerCapteur(config.mappingScript,
                                            currentStableState ? 1.0f : 0.0f,
                                            midi_sender, &state.scriptEtat);
