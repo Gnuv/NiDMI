@@ -77,6 +77,8 @@ private:
     const char* volatile _phase = "repos";
     volatile int _phaseI = -1;
     bool _chienArme = false;
+    /* Acquittement de la tache temps reel : elle le pose en entrant en pause. */
+    volatile bool _tempsReelEnPause = false;
 
     /** Master switch OSC sortie (NVS osc_out_all), rechargé dans reloadConfigs() */
     bool osc_output_all_enabled_ = true;

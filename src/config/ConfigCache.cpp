@@ -183,6 +183,21 @@ void ConfigCache::removeConfig(const String& pin) {
         }
         Serial.printf("[ConfigCache] Pin '%s' retirée du cache (count=%d)\n", pin.c_str(), count);
     }
+
+    /* RECHARGER, comme toute autre ecriture.
+     *
+     * Supprimer une broche nettoyait la NVS mais ne demandait rien : la carte
+     * continuait d'EXECUTER le composant supprime, indefiniment. Mesure :
+     * /api/pins/list ne montrait plus D0, /api/pins/actif le montrait encore
+     * six secondes plus tard, et pour toujours. Un composant qui emet du MIDI
+     * sans plus etre ni visible ni modifiable — la negation exacte de la regle
+     * du projet (« la page montre l'etat exact de ce qui tourne »).
+     *
+     * saveAll() et le vidage complet le faisaient deja ; la suppression d'UNE
+     * broche avait ete oubliee. On s'appuie sur la meme regle qu'ailleurs : la
+     * NVS fait foi, la carte se reconstruit dessus — ce qui rend inoffensif le
+     * fait qu'aucun ComplexHandler ne corresponde a un composant simple. */
+    nidmi_requestReloadPins();
 }
 
 /* Clear complet de la NVS - supprime tout le namespace "nidmi" */

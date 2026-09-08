@@ -270,6 +270,20 @@ bool ComponentManager::pauseRealtimeTasks() {
      * avance n'est jamais interrompu, seul un CALAGE declenche le redemarrage.
      * Ca ne repare pas la cause — ca l'empeche d'etre definitive. */
     _chienArme = (esp_task_wdt_add(NULL) == ESP_OK);
+    /* ATTENDRE L'ACQUITTEMENT, au lieu d'esperer que 20 ms suffisent.
+     *
+     * L'ancienne version posait le drapeau puis dormait 20 ms « le temps que ca
+     * se calme ». Ce n'est pas une synchronisation : si la tache temps reel etait
+     * dans un analogRead ou dans un envoi MIDI a cet instant, elle y restait
+     * pendant que clearAll() liberait ses configurations et que setupGpio()
+     * reconfigurait ses broches. Reconfigurer une broche qu'une autre tache est
+     * peut-etre en train de lire est faux par construction, que ce soit la cause
+     * du calage observe ou non.
+     *
+     * On attend donc qu'elle DISE qu'elle est garee. Plafond a 200 ms : au-dela
+     * on continue quand meme — mieux vaut un rechargement imparfait qu'un
+     * rechargement qui ne revient jamais. */
+    for (int i = 0; i < 40 && !_tempsReelEnPause; i++) vTaskDelay(pdMS_TO_TICKS(5));
     /* On NE RETIRE PLUS la tache du chien de garde.
      *
      * Elle en etait retiree pour qu'un rechargement un peu long ne le declenche
@@ -715,9 +729,11 @@ void ComponentManager::midiTaskLoop() {
     
     for(;;) {
         if (_nvsWriteInProgress || !midi_sender) {
+            _tempsReelEnPause = true;      // acquittement lu par pauseRealtimeTasks()
             vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
+        _tempsReelEnPause = false;
         
         // Envoyer les mises à jour MIDI des multiplexeurs
         mux_manager.sendMidiUpdates(midi_sender);

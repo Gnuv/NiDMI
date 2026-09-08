@@ -1,4 +1,6 @@
 #include "ComponentInitializer.h"
+#include "../managers/ComponentManager.h"
+#include "../Globals.h"   // g_componentManager (marqueurs de phase)
 #include "../components/ComponentTypes.h"  // Définitions communes
 #include "../components/ComponentRegistry.h"  // Pour obtenir les définitions
 #include "../components/ComponentDefinition.h"  // Pour FormFieldDef, FieldType, MAX_FORM_FIELDS
@@ -430,13 +432,21 @@ void ComponentInitializer::setupGpio(uint8_t gpio, ComponentType type, Component
         type == ComponentType::VELOSTAT ||
         type == ComponentType::NOISE_SAMPLER;
     if (is_single_pin_analog_sensor) {
+        /* C'est ICI que le rechargement a cale, une fois, sur le GPIO 1
+         * (phase_precedente = "add-gpio":1). Deux marqueurs encadrent le seul
+         * appel de ce chemin : ils diront si le blocage est DANS le test de
+         * broche flottante — qui reconfigure la broche (pinMode pull-up puis
+         * pull-down) — ou dans la trace qui le suit. */
+        g_componentManager.marquer("float-test", gpio);
         bool floating = PinMapper::isPinFloating(gpio);
+        g_componentManager.marquer("float-fait", gpio);
         if (config) {
             config->pin_disconnected = floating;
         }
         if (floating) {
             Serial.printf("[ComponentInitializer] GPIO%d: pin flottante détectée — envoi MIDI/OSC désactivé\n", gpio);
         }
+        g_componentManager.marquer("float-trace", gpio);
         return;
     }
 
