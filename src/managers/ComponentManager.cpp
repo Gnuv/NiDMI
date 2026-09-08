@@ -336,9 +336,16 @@ bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t mi
     ComponentState& state = states[component_count];
     
     // Initialiser la configuration et l'état avec les valeurs par défaut
+    /* Marqueurs : le blocage constate se situe DANS ces trois appels
+     * (phase_precedente = "nvs-addComponent"). Les separer nomme le coupable
+     * — allocation, etat, ou configuration materielle de la broche. */
+    marquer("add-config", gpio);
     ComponentInitializer::initializeConfig(config, gpio, type, midi_param, channel, msg_type);
+    marquer("add-etat", gpio);
     ComponentInitializer::initializeState(state);
+    marquer("add-gpio", gpio);
     ComponentInitializer::setupGpio(gpio, type, &config);
+    marquer("add-fini", gpio);
     
     // Serial.printf("[ComponentManager] Added component: GPIO%d, type=%d, param=%d, channel=%d, msg_type=%d\n",
     //               gpio, (int)type, midi_param, channel, (int)msg_type);
