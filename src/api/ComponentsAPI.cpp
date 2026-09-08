@@ -25,6 +25,40 @@ void setupComponentsAPI(AsyncWebServer& server) {
      * GET /api/components/definitions
      * Retourne la liste des composants disponibles avec leurs métadonnées
      */
+    /* ── Empreinte des definitions ────────────────────────────────────────
+     * L'app garde les definitions en cache local (elles sont compilees dans le
+     * firmware et ne bougent pas), et les redemander a chaque ouverture coutait
+     * trois secondes — 43 pages d'une definition chacune (MESURES.md §30).
+     *
+     * La cle du cache etait fw_version. Mauvaise cle : « git describe --dirty »
+     * rend la MEME chaine pour deux builds sales au meme commit, si bien que
+     * deux firmwares differents partageaient un cache pendant le developpement.
+     * On expose donc une empreinte de CE QUE VALENT les definitions, pas de la
+     * version du source dont elles viennent.
+     *
+     * FNV-1a 32 bits sur le JSON de toutes les pages, calcule une seule fois et
+     * garde : ~43 rendus dans le tampon statique, quelques dizaines de ms, et
+     * seulement si quelqu'un demande. */
+    server.on("/api/components/empreinte", HTTP_GET, [](AsyncWebServerRequest* request) {
+        static char cache[16] = {0};
+        if (!cache[0]) {
+            static char tampon[10240];
+            uint32_t h = 2166136261u;                 // FNV-1a, valeur de depart
+            const int total = (int)ComponentRegistry::count();
+            for (int p = 0; p < total; p++) {
+                const int n = ComponentRegistry::toJsonArrayPage(tampon, sizeof(tampon), p, 1);
+                for (int i = 0; i < n; i++) { h ^= (uint8_t)tampon[i]; h *= 16777619u; }
+            }
+            // Le NOMBRE compte aussi : deux jeux differents pourraient, a la
+            // marge, donner le meme condense d'octets.
+            h ^= (uint32_t)total; h *= 16777619u;
+            snprintf(cache, sizeof(cache), "%08x", (unsigned)h);
+        }
+        String j = String("{\"empreinte\":\"") + cache + "\",\"total\":"
+                 + (int)ComponentRegistry::count() + "}";
+        request->send(200, "application/json", j);
+    });
+
     server.on("/api/components/definitions", HTTP_GET, [](AsyncWebServerRequest* request) {
 #ifdef NIDMI_COMPONENT_DEFS_PAGINATION
         Serial.printf("[API] REQ definitions heap=%d\n", (int)ESP.getFreeHeap());
