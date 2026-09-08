@@ -1,4 +1,5 @@
 #include "ComponentManager.h"
+#include "../server/WebDebugConsole.h"
 #include <Arduino.h> // For Serial.printf
 #include <Preferences.h>
 #include <esp_task_wdt.h>
@@ -194,6 +195,7 @@ void ComponentManager::update() {
 }
 
 void ComponentManager::reloadConfigs() {
+    NIDMI_WEB_LOG("[Reload] debut (composants=%u)", (unsigned)component_count);
     {
         Preferences prefs;
         prefs.begin("nidmi", true);
@@ -203,15 +205,26 @@ void ComponentManager::reloadConfigs() {
     bool wdt = pauseRealtimeTasks();
     clearAll();
     loadMuxConfigFromNVS();
+    NIDMI_WEB_LOG("[Reload] mux ok, lecture NVS...");
     ConfigLoader::loadFromNVS(*this);
     resumeRealtimeTasks(wdt);
+    NIDMI_WEB_LOG("[Reload] fin (composants=%u)", (unsigned)component_count);
 }
 
 bool ComponentManager::pauseRealtimeTasks() {
     _nvsWriteInProgress = true;
-    bool removed = (esp_task_wdt_delete(xTaskGetCurrentTaskHandle()) == ESP_OK);
+    /* On NE RETIRE PLUS la tache du chien de garde.
+     *
+     * Elle en etait retiree pour qu'un rechargement un peu long ne le declenche
+     * pas. Mais un rechargement qui se BLOQUE devenait alors definitif : la
+     * boucle ne revenait jamais, _nvsWriteInProgress restait vrai, les
+     * composants restaient VIDES — plus aucun MIDI — et rien ne remettait la
+     * carte d'aplomb. Il fallait la debrancher.
+     * Le rechargement prend une centaine de millisecondes ; le chien de garde
+     * en tolere plusieurs secondes. Le garder arme ne coute rien et transforme
+     * un blocage definitif en un redemarrage de deux secondes. */
     vTaskDelay(pdMS_TO_TICKS(20));
-    return removed;
+    return false;
 }
 
 void ComponentManager::resumeRealtimeTasks(bool restoreWdt) {
