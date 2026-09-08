@@ -43,6 +43,73 @@ static bool extractJsonQuoted(const char* json, size_t jsonLen, const char* key,
     return true;
 }
 
+/* ── Fusion d'une configuration de broche ────────────────────────────────────
+ *
+ * REGLE : une ecriture PARTIELLE ne doit jamais detruire le reste.
+ *
+ * /api/pins/set remplacait la configuration entiere par ce que portait la
+ * requete. Or l'interface envoie souvent quelques champs : choisir le role
+ * d'une broche expedie « {gpio, label, role} » et rien d'autre — le script de
+ * mapping, le nom du composant et le mode MIDI etaient donc EFFACES sur la
+ * carte, en silence, par un simple choix dans une liste. C'est ce qui rendait
+ * un bouton muet des qu'on retouchait a sa configuration.
+ *
+ * On conserve donc les champs que la requete ne mentionne pas. Ce que
+ * l'utilisateur change, change ; le reste continue — la regle du headless,
+ * appliquee a la configuration.
+ *
+ * Pour EFFACER une broche il y a /api/pins/delete : c'est explicite, et ca
+ * doit le rester.                                                            */
+static String fusionnerConfigBroche(const String& neuf, const String& ancien) {
+    if (ancien.length() < 2 || neuf.length() < 2) return neuf;
+
+    String sortie = neuf;
+    int i = ancien.indexOf('{');
+    if (i < 0) return neuf;
+    i++;
+
+    while (i < (int)ancien.length()) {
+        while (i < (int)ancien.length() && (ancien[i] == ' ' || ancien[i] == ',')) i++;
+        if (i >= (int)ancien.length() || ancien[i] == '}') break;
+        if (ancien[i] != '"') break;                       // pas un objet plat : on renonce
+
+        const int debutCle = ++i;
+        while (i < (int)ancien.length() && ancien[i] != '"') { if (ancien[i] == '\\') i++; i++; }
+        const String cle = ancien.substring(debutCle, i);
+        i++;                                                // guillemet fermant
+        while (i < (int)ancien.length() && (ancien[i] == ' ' || ancien[i] == ':')) i++;
+
+        const int debutVal = i;
+        if (ancien[i] == '"') {                             // chaine
+            i++;
+            while (i < (int)ancien.length() && ancien[i] != '"') { if (ancien[i] == '\\') i++; i++; }
+            i++;
+        } else if (ancien[i] == '{' || ancien[i] == '[') {   // objet ou tableau
+            int prof = 0; bool chaine = false;
+            for (; i < (int)ancien.length(); i++) {
+                const char c = ancien[i];
+                if (chaine) { if (c == '\\') i++; else if (c == '"') chaine = false; continue; }
+                if (c == '"') { chaine = true; continue; }
+                if (c == '{' || c == '[') prof++;
+                else if (c == '}' || c == ']') { if (--prof == 0) { i++; break; } }
+            }
+        } else {                                            // nombre, true, false, null
+            while (i < (int)ancien.length() && ancien[i] != ',' && ancien[i] != '}') i++;
+        }
+        String valeur = ancien.substring(debutVal, i);
+        valeur.trim();
+
+        if (!cle.length() || !valeur.length()) continue;
+        // Deja porte par la requete ? Alors c'est elle qui fait foi.
+        if (sortie.indexOf(String("\"") + cle + "\":") >= 0) continue;
+
+        const int accolade = sortie.lastIndexOf('}');
+        if (accolade < 0) break;
+        sortie = sortie.substring(0, accolade) + ",\"" + cle + "\":" + valeur + "}";
+    }
+    return sortie;
+}
+
 void setupPinAPI(AsyncWebServer& server) {
     /* API - Capacités des pins (dynamique selon MCU) */
     server.on("/api/pins/caps", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -698,6 +765,24 @@ void setupPinAPI(AsyncWebServer& server) {
         
         json += "}";
         
+        /* FUSION : on conserve ce que la requete ne mentionne pas. */
+        {
+            Preferences lecture;
+            if (lecture.begin("nidmi", true)) {
+                const String cleF = "pin_" + pinLabel;
+                const String ancien = lecture.getString(cleF.c_str(), "");
+                lecture.end();
+                if (ancien.length()) {
+                    const String fusionne = fusionnerConfigBroche(json, ancien);
+                    if (fusionne.length() != json.length())
+                        Serial.printf("[PinAPI] %s : fusion %u -> %u octets\n",
+                                      pinLabel.c_str(), (unsigned)json.length(),
+                                      (unsigned)fusionne.length());
+                    json = fusionne;
+                }
+            }
+        }
+
         if (json.length() > NVS_MAX_PIN_CONFIG_SIZE) {
             Serial.printf("[PinAPI] JSON trop gros pour NVS: %u > %u (pin=%s)\n",
                 (unsigned)json.length(), (unsigned)NVS_MAX_PIN_CONFIG_SIZE, pinLabel.c_str());
