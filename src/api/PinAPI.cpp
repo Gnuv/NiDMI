@@ -204,6 +204,31 @@ void setupPinAPI(AsyncWebServer& server) {
      * Deux appels espaces disent tout : si le compteur n'avance pas, le
      * processeur ne s'execute pas et il est inutile de chercher du cote de la
      * broche ou du script. */
+    /* ── CE QUI TOURNE VRAIMENT ────────────────────────────────────────────
+     * /api/pins/list dit ce qu'il y a en NVS. Cette route-ci dit ce que la
+     * carte a CHARGE et execute a cet instant. Les deux doivent coincider ;
+     * quand ils divergent, c'est qu'une ecriture n'a pas pris effet — et c'est
+     * precisement ce qui est arrive.
+     * C'est la regle du headless rendue observable : on peut verifier, sans
+     * rien toucher, que la page et la carte parlent de la meme chose.        */
+    server.on("/api/pins/actif", HTTP_GET, [](AsyncWebServerRequest *request){
+        auto ech = [](const String& v){ String o; for (unsigned i=0;i<v.length();i++){ char c=v[i];
+            if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\";
+            else if (c=='\n') o+="\\n"; else if ((unsigned char)c<0x20) o+=' '; else o+=c; } return o; };
+        String j = "{\"composants\":[";
+        for (uint8_t i = 0; i < g_componentManager.getComponentCount(); i++) {
+            const ComponentConfig* c = g_componentManager.getConfig(i);
+            if (!c) continue;
+            if (j[j.length()-1] != '[') j += ",";
+            j += String("{\"gpio\":") + c->gpio
+               + ",\"nom\":\"" + ech(String(c->name)) + "\""
+               + ",\"mode\":\"" + (c->midiMode == MidiMode::SCRIPT ? "script" : "midi") + "\""
+               + ",\"script\":\"" + ech(String(c->mappingScript)) + "\"}";
+        }
+        j += "]}";
+        request->send(200, "application/json", j);
+    });
+
     server.on("/api/pins/diag", HTTP_GET, [](AsyncWebServerRequest *request){
         extern volatile uint32_t g_boutonPasses, g_boutonFronts, g_boutonScripts, g_midiEnvois;
         extern char g_boutonNom[24]; extern char g_boutonScript[132];
@@ -799,6 +824,18 @@ void setupPinAPI(AsyncWebServer& server) {
         if (written == 0) {
             Serial.printf("[PinAPI] ERREUR NVS pour %s\n", pinLabel.c_str());
         }
+
+        /* PRENDRE EFFET TOUT DE SUITE.
+         *
+         * Ce chemin ecrivait en NVS et repondait « ok » sans jamais demander le
+         * rechargement : la carte continuait sur l'ANCIENNE configuration, et
+         * la modification ne s'appliquait qu'au redemarrage suivant. Vu de
+         * l'utilisateur : « je change la note, ca ne marche plus ; le
+         * peripherique MIDI se deconnecte et se reconnecte ; ca remarche ».
+         * Le rechargement est amorti de 500 ms cote boucle (il groupe les
+         * enregistrements successifs) et il ne redemarre rien : il met les
+         * taches temps reel en pause, relit, et repart. */
+        nidmi_requestReloadPins();
         
         /* Si additionalPins présent, utiliser le handler générique pour ce type de composant */
         if(hasAdditionalPins && def) {

@@ -54,9 +54,28 @@ extern "C" void nidmi_requestReloadPins(){
 // Redémarrage différé (depuis la loop, pas depuis le handler HTTP — évite de couper la NVS en plein écriture)
 static volatile bool g_requestReboot = false;
 static unsigned long g_rebootRequestTime = 0;
+/* Le redemarrage etait CONFIE A LA BOUCLE. Cela marche tant que la boucle
+ * tourne — mais apres un OTA, elle ne tourne plus : l'ecriture de l'image
+ * laisse le coeur applicatif fige (journal : « [OTA] Image validee,
+ * redemarrage... » puis plus rien, tache audio comprise), si bien que
+ * ESP.restart() n'etait jamais atteint. La carte restait en vie par sa seule
+ * pile reseau : elle repondait en HTTP, mais ne redemarrait pas, ne rechargeait
+ * pas ses configs, et l'image fraichement ecrite n'etait jamais lancee. Il
+ * fallait la debrancher.
+ *
+ * On confie donc le redemarrage a une TACHE DEDIEE, qui dort deux secondes —
+ * le temps que la reponse HTTP parte — puis redemarre. Elle ne depend de rien
+ * d'autre. La boucle garde son propre chemin pour les cas ordinaires. */
+static void tacheRedemarrage(void*) {
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+}
+
 extern "C" void nidmi_requestReboot(){
     g_rebootRequestTime = millis();
     g_requestReboot = true;
+    // Filet de securite : si la boucle est morte, cette tache redemarre quand meme.
+    xTaskCreate(tacheRedemarrage, "reboot", 2048, nullptr, configMAX_PRIORITIES - 2, nullptr);
 }
 
 // Mode téléchargement (bootloader ROM), demandé par l'API. Même différé que le
