@@ -841,6 +841,29 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
 
+        /* DEFAUTS D'UNE CONFIGURATION NEUVE.
+         *
+         * Creer un composant en n'envoyant que son role — ce que fait la liste
+         * deroulante de l'interface — rangeait une config SANS midiMode et SANS
+         * name. La carte retombait alors en mode MIDI classique, avec le CC par
+         * defaut de la definition : un potentiometre annonce en CC7 par son
+         * script emettait en CC1, et en tout ou rien. Symptome signale tel quel
+         * (« il envoie le CC1 sans donnees continues »).
+         *
+         * Le mode RTP n'a plus d'interface pour etre choisi (§12) : une broche
+         * neuve est donc en mode script, et porte un nom — sans nom, sa valeur
+         * n'entre pas dans le registre et aucun r("...") ne peut la lire.
+         * On ne pose QUE ce qui manque : la fusion ci-dessus a deja preserve
+         * tout ce que la requete ne mentionnait pas. */
+        if (json.indexOf("\"midiMode\"") < 0) {
+            json = json.substring(0, json.length() - 1) + ",\"midiMode\":\"script\"}";
+            Serial.printf("[PinAPI] %s : midiMode absent -> script (defaut)\n", pinLabel.c_str());
+        }
+        if (json.indexOf("\"name\"") < 0 && role.length()) {
+            json = json.substring(0, json.length() - 1) + ",\"name\":\"" + role + "\"}";
+            Serial.printf("[PinAPI] %s : name absent -> \"%s\"\n", pinLabel.c_str(), role.c_str());
+        }
+
         if (json.length() > NVS_MAX_PIN_CONFIG_SIZE) {
             Serial.printf("[PinAPI] JSON trop gros pour NVS: %u > %u (pin=%s)\n",
                 (unsigned)json.length(), (unsigned)NVS_MAX_PIN_CONFIG_SIZE, pinLabel.c_str());
