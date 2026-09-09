@@ -431,8 +431,20 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         auto par = [&](const char* n) -> String {
             return request->hasParam(n, true) ? request->getParam(n, true)->value() : String("");
         };
-        if (par("reset") == "1")
+        /* Le texte du script doit SURVIVRE a la requete : un differe garde un
+         * pointeur dessus et ne sera rejoue qu'a la requete suivante. On le
+         * garde donc ici, et on oublie les reprises de l'ancien AVANT de le
+         * remplacer — sinon on rejouerait sur de la memoire rendue. */
+        static String scriptEssai;
+        const String demande = par("script");
+        if (demande != scriptEssai) {
+            MappingEngine::viderDifferes(scriptEssai.c_str());
+            scriptEssai = demande;
+        }
+        if (par("reset") == "1") {
             for (auto& e : etats) e.reinitialiser();
+            MappingEngine::viderDifferes(scriptEssai.c_str());
+        }
         // genre=reset : on remet a zero et on N'EXECUTE PAS. Sans ce
         // court-circuit, la requete de remise a zero jouait aussi un evenement
         // et faisait avancer toggle/seq/counter d'un cran avant meme le premier
@@ -473,9 +485,17 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         // realite et un script a deux « toggle() » paraitrait correct ici tout
         // en se marchant dessus sur la carte.
         const int slots = (genre == "capteur") ? 1 : 8;
-        const int n = MappingEngine::executer(par("script").c_str(), ev, liste,
+        int n = MappingEngine::executer(scriptEssai.c_str(), ev, liste,
                                               MappingEngine::MAX_SORTIES, traite,
-                                              etats, slots);
+                                              etats, slots, /*horsLigne=*/true);
+        /* Un battement vide aussi la file des DIFFERES — del(), makenote()...
+         * Sans ca ces verbes seraient invisibles a l'essai : leur sortie ne
+         * vient pas de l'appel qui les a rencontres, mais d'un battement
+         * ulterieur. Le banc hote fait exactement pareil. */
+        if (ev.type == MappingEngine::Evenement::Tick && n < MappingEngine::MAX_SORTIES)
+            n += MappingEngine::battreDifferes(ev.instant, liste + n,
+                                               MappingEngine::MAX_SORTIES - n,
+                                               /*horsLigne=*/true);
         // PASSAGE : quand aucun pipeline n'a pris l'evenement en charge, il
         // ressort tel quel — c'est ce que fait MidiRouter a partir de `traite`,
         // et ce que fait le moteur web. La route le montre donc aussi, sans

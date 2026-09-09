@@ -42,6 +42,15 @@ public:
         float   change   = NAN;
         uint32_t metroProchain = 0;      // date du prochain bang
         bool     metroArme     = false;  // faux tant que le premier tick n'a pas planifie
+        uint32_t debounceDernier = 0;    // date du dernier passage de debounce()
+        /* La position COURANTE du glissando de lag(). Elle survit au glissando
+         * lui-meme — c'est d'elle que repart le suivant. Les parametres du
+         * glissando en cours (depart, cible, duree) vivent dans la reprise :
+         * un glissando est une tache qui passe, pas une propriete du pipeline,
+         * et 256 etats n'ont pas a payer pour seize taches. */
+        float    lagCur = NAN;           // NAN = jamais glisse
+        int8_t   mnNote = -1;            // note tenue par makenote() en bascule
+                                         // (-1 = aucune)
         void reinitialiser() { *this = Etat(); }
     };
 
@@ -125,9 +134,15 @@ public:
     //                 prend rien en charge, l'evenement passe.
     // etats/nEtats : l'etat par pipeline. nullptr = le tableau interne, celui du
     // script MIDI. Un composant passe le sien.
+    // horsLigne : cet appel SIMULE, il ne pilote pas la carte. Ses verbes de
+    //              temps tiennent leur propre file et leur propre horloge, que
+    //              la boucle MIDI ne vide jamais. Sans ca, la route d'essai
+    //              deposait ses differes dans la file VIVANTE : ils partaient
+    //              en MIDI reel et ne revenaient jamais a l'essai.
     static int executer(const char* script, const Evenement& evt,
                         Sortie* sorties, int max, bool& traite,
-                        Etat* etats = nullptr, int nEtats = 0);
+                        Etat* etats = nullptr, int nEtats = 0,
+                        bool horsLigne = false);
 
     /* Le BATTEMENT D'HORLOGE : fait tourner les pipelines qui n'attendent aucun
      * MIDI. `Tick` (avec l'instant en millis) tire metro() ; `Init`, envoye une
@@ -136,6 +151,20 @@ public:
      * d'un DSL passe de script MIDI a script generaliste (DMX, OSC...). */
     static void battre(const char* script, Evenement::Type type, uint32_t instant,
                        MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
+
+    /* Les VERBES DE TEMPS — del(), et bientot makenote(), lag(), ramp() — ne
+     * rendent pas leur valeur tout de suite : ils la mettent de cote et l'aval
+     * du pipeline est rejoue plus tard. C'est ici qu'on vide cette file, une
+     * fois par battement, pour TOUS les scripts a la fois.
+     * `viderDifferes(script)` oublie les reprises d'un script donne — a appeler
+     * quand son texte est libere, sinon on rejouerait sur de la memoire rendue.
+     * Sans argument : tout oublier. */
+    static void battreDifferes(uint32_t maintenant, MidiSender* sender);
+    /* Variante qui REMPLIT une liste au lieu d'emettre : le banc de conformite
+     * n'a pas de MidiSender, et c'est lui qui prouve ces verbes. */
+    static int  battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
+                               bool horsLigne = false);
+    static void viderDifferes(const char* script = nullptr);
 
     // Efface l'etat par pipeline (toggle, counter, seq, sel/map, lp, drunk...).
     // A appeler quand le SCRIPT change : sinon un compteur repart d'ou en etait

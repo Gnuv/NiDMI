@@ -76,6 +76,51 @@ namespace {
 // quand une note arrive.
 constexpr int MAX_PIPELINES = 12;
 MappingEngine::Etat g_etats[MAX_PIPELINES];
+
+/* Les reprises en attente. Reservoir BORNE et global : une carte n'a pas de tas
+ * a gaspiller, et un script qui differe sans fin doit buter sur une limite
+ * visible plutot que sur une allocation qui echoue. */
+struct Reprise {
+    const char* script = nullptr;
+    MappingEngine::Etat* etats = nullptr;
+    int      nEtats = 0;
+    uint8_t  pipe = 0, seg = 0;
+    float    valeur = 0;
+    uint32_t echeance = 0;
+    MappingEngine::Evenement evt;
+    bool     actif = false;
+    bool     horsLigne = false;   // simulee : la boucle MIDI ne la vide pas
+
+    /* DEUX ESPECES de reprise.
+     *   Differee — del(), makenote() : une valeur mise de cote, rejouee UNE
+     *              fois quand `echeance` est passee, puis oubliee.
+     *   Continue — lag(), ramp() : une interpolation qui rend une valeur A
+     *              CHAQUE battement jusqu'a son terme. Pas d'echeance : elle
+     *              tire tant que t < 1.
+     * Une tache continue est UNIQUE par (script, pipeline, segment) : un
+     * nouvel evenement remplace le glissando en cours au lieu de s'y ajouter,
+     * comme la cle `lag_${pi}:${si}` du moteur de reference. */
+    uint8_t  genre = 0;
+    float    de = 0, vers = 0;    // bornes de l'interpolation
+    uint32_t debut = 0, duree = 0;
+};
+enum : uint8_t { RepDifferee = 0, RepLag = 1, RepRampe = 2 };
+constexpr int MAX_REPRISES = 16;
+Reprise g_reprises[MAX_REPRISES];
+
+/* L'HORLOGE DU MOTEUR, tenue par le battement.
+ * del() s'en sert plutot que de millis() : c'est ce que fait la reference
+ * (this._now, mis a jour par tick()), et c'est ce qui rend le verbe
+ * EPROUVABLE — un banc peut avancer cette horloge, pas le temps mural. */
+uint32_t g_maintenant = 0;
+
+/* L'horloge de la SIMULATION, tenue a part. Sur la carte, l'horloge vivante
+ * vaut millis() — des millions — pendant que le banc compte a partir de zero :
+ * une echeance posee dans un temps et relue dans l'autre n'arrive jamais. Deux
+ * lignes de temps, deux horloges, chacune ecrite par une seule tache. */
+uint32_t g_horsLigneMaintenant = 0;
+
+
 MappingEngine::Impression g_impression = nullptr;
 
 // ── Outils de chaine ───────────────────────────────────────────────────────
@@ -213,6 +258,10 @@ void MappingEngine::surImpression(Impression fn) { g_impression = fn; }
 
 void MappingEngine::reinitialiser() {
     for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i].reinitialiser();
+    /* Et les reprises en attente : elles portent un POINTEUR vers le texte du
+     * script. Changer de script libere ce texte — rejouer ensuite lirait de la
+     * memoire rendue. */
+    for (int i = 0; i < MAX_REPRISES; i++) g_reprises[i].actif = false;
 }
 
 namespace {
@@ -452,9 +501,88 @@ uint8_t sept(float v) { return (uint8_t)constrain((int)lroundf(v), 0, 127); }
 // Evalue UN segment. Renvoie false si le segment bloque le pipeline — c'est le
 // `null` du moteur web (sel qui ne trouve pas, block, spigot ferme, change sans
 // changement) : tout ce qui suit dans ce pipeline est abandonne.
-bool evaluerSegment(const String& seg, float& courant, const Evt& e,
+/* OU se trouve le segment qu'on evalue.
+ *
+ * Les verbes de TEMPS — del, makenote, lag, ramp — ne rendent pas leur valeur
+ * tout de suite : ils la mettent de cote et rejouent l'AVAL du pipeline plus
+ * tard. Pour ca il faut savoir quel script, quel pipeline, quel segment. Le
+ * moteur web garde ces informations dans des cles de son etat ; ici on les
+ * passe, ce qui evite un dictionnaire sur une carte qui n'en a pas les moyens. */
+struct Contexte {
+    const char* script = nullptr;
+    Etat*   etats  = nullptr;
+    int     nEtats = 0;
+    uint8_t pipe   = 0;
+    uint8_t seg    = 0;
+    bool    horsLigne = false;   // cf. executer(..., horsLigne)
+};
+
+/* L'horloge de CE contexte. Une simulation et la carte vivante ne comptent pas
+ * dans le meme temps ; lire la mauvaise, c'est poser une echeance qui n'arrive
+ * jamais. */
+uint32_t horlogeDe(const Contexte* c) {
+    return (c && c->horsLigne) ? g_horsLigneMaintenant : g_maintenant;
+}
+
+/* Le tableau d'etats REELLEMENT employe : nullptr veut dire « celui du moteur ». */
+MappingEngine::Etat& etatDe(MappingEngine::Etat* etats, int nEtats, uint8_t pipe) {
+    if (!etats || nEtats <= 0) { etats = g_etats; nEtats = MAX_PIPELINES; }
+    return etats[(pipe < nEtats) ? pipe : nEtats - 1];
+}
+
+/* Arme (ou REARME) une tache continue. Deux passes : un glissando deja en cours
+ * sur ce meme segment est repris, sinon on prend un emplacement libre. */
+bool continuer(const Contexte* c, uint8_t genre, float de, float vers,
+               uint32_t debut, uint32_t duree, const Evt& e) {
+    if (!c || !c->script) return false;
+    Reprise* cible = nullptr;
+    for (int i = 0; i < MAX_REPRISES && !cible; i++) {
+        Reprise& r = g_reprises[i];
+        if (r.actif && r.genre == genre && r.script == c->script &&
+            r.pipe == c->pipe && r.seg == c->seg) cible = &r;
+    }
+    for (int i = 0; i < MAX_REPRISES && !cible; i++)
+        if (!g_reprises[i].actif) cible = &g_reprises[i];
+    if (!cible) {
+        Serial.println("[nms] file des differes pleine — une interpolation est perdue");
+        return false;
+    }
+    cible->script = c->script; cible->etats = c->etats; cible->nEtats = c->nEtats;
+    cible->pipe = c->pipe;     cible->seg = c->seg;
+    cible->genre = genre;      cible->horsLigne = c->horsLigne;
+    cible->de = de;            cible->vers = vers;
+    cible->debut = debut;      cible->duree = duree;
+    cible->valeur = de;        cible->echeance = debut;
+    cible->evt = e;            cible->actif = true;
+    return true;
+}
+
+bool differer(const Contexte* c, float valeur, const Evt& e, uint32_t echeance) {
+    if (!c || !c->script) return false;
+    for (int i = 0; i < MAX_REPRISES; i++) {
+        if (g_reprises[i].actif) continue;
+        Reprise& r = g_reprises[i];
+        r.script = c->script; r.etats = c->etats; r.nEtats = c->nEtats;
+        r.pipe = c->pipe;     r.seg = c->seg;
+        r.valeur = valeur;    r.echeance = echeance;
+        r.evt = e;            r.actif = true;
+        r.horsLigne = c->horsLigne;   // la reprise reste dans SA ligne de temps
+        r.genre = RepDifferee;
+        return true;
+    }
+    /* Reservoir plein : on le DIT. Un differe qui disparait en silence est le
+     * genre de panne qu'on passe cette session a supprimer. */
+    Serial.println("[nms] file des differes pleine — une valeur est perdue");
+    return false;
+}
+
+/* `e` n'est PAS const : makenote() reecrit l'evenement lui-meme — sa nature,
+ * sa note, sa velocite. C'est ainsi que le moteur de reference procede, et
+ * c'est ce qui permet a un note.out() en aval d'emettre la note fabriquee
+ * plutot que celle qui est entree. */
+bool evaluerSegment(const String& seg, float& courant, Evt& e,
                     Sortie* sorties, int max, int& n,
-                    Etat& st, bool srcEstCcNum) {
+                    Etat& st, bool srcEstCcNum, const Contexte* ctx) {
     String a;
 
     // ── Arithmetique ────────────────────────────────────────────────────────
@@ -667,6 +795,109 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
         courant = st.lp;
         return true;
     }
+    /* debounce(ms) — laisse passer, puis se tait pendant `ms`.
+     *
+     * Le moteur web lit Date.now() ; ici c'est millis(). Meme semantique — un
+     * temps mural, pas le tick — donc un pipeline d'evenements peut s'en servir
+     * sans qu'une horloge tourne. */
+    /* del(ms) — met la valeur de cote et rend la main ; l'aval du pipeline sera
+     * rejoue quand l'echeance sera passee. Le pipeline s'arrete ICI pour cet
+     * evenement : c'est ce que rend le moteur web en renvoyant null. */
+    if (verbe(seg, "del", a)) {
+        const long ms = (long)valeurArg(a);
+        if (ms <= 0) return true;                 // sans delai, on continue tout droit
+        differer(ctx, courant, e, horlogeDe(ctx) + (uint32_t)ms);
+        return false;
+    }
+
+    /* makenote([vel[, duree]]) — fabrique une NOTE a partir de la valeur qui
+     * passe. Ce verbe ne sort rien de lui-meme : il reecrit l'evenement, et
+     * c'est un note.out() en aval qui emet. Deux formes :
+     *   makenote(vel, duree) — note-on maintenant, note-off apres `duree` ms,
+     *                          l'aval etant rejoue pour le off.
+     *   makenote([vel])      — BASCULE : un evenement ouvre la note, le
+     *                          suivant la ferme. De quoi tenir une note avec
+     *                          un bouton qui n'envoie qu'une impulsion. */
+    if (verbe(seg, "makenote", a)) {
+        // Rien au chargement : loadbang parcourt les pipelines, et une bascule
+        // qui s'inverse a l'allumage serait une note fantome.
+        if (e.type == Evt::Init) return true;
+        String m[2];
+        const int k = decouperArgs(a, m, 2);
+        const uint8_t vel  = (k >= 1 && m[0].length()) ? sept(valeurArg(m[0])) : 127;
+        const uint8_t note = sept(courant);
+        const uint8_t ch   = e.canal ? e.canal : 1;
+        if (k >= 2) {
+            const long ms = (long)valeurArg(m[1]);
+            e.type = Evt::NoteOn; e.a = note; e.b = vel; e.canal = ch;
+            if (ms > 0) {
+                Evt off = e;
+                off.type = Evt::NoteOff; off.a = note; off.b = 0; off.canal = ch;
+                differer(ctx, courant, off, horlogeDe(ctx) + (uint32_t)ms);
+            }
+            return true;
+        }
+        if (st.mnNote == (int8_t)note) {          // deja ouverte : on la ferme
+            e.type = Evt::NoteOff; e.a = note; e.b = 0; e.canal = ch;
+            st.mnNote = -1;
+        } else {
+            e.type = Evt::NoteOn;  e.a = note; e.b = vel; e.canal = ch;
+            st.mnNote = (int8_t)note;
+        }
+        return true;
+    }
+
+    /* lag(monteeMs[, descenteMs]) — glisse vers la valeur recue au lieu d'y
+     * sauter. Rend TOUT DE SUITE la position courante ; c'est le battement qui
+     * la fait avancer. Avec deux arguments, la montee et la descente ont des
+     * durees differentes — ce qu'un potentiometre ou un filtre demandent
+     * souvent (attaque vive, retour lent). */
+    if (verbe(seg, "lag", a)) {
+        String m[2];
+        const int k = decouperArgs(a, m, 2);
+        if (k < 1) return true;
+        const float monte   = valeurArg(m[0]);
+        const float descend = (k >= 2) ? valeurArg(m[1]) : monte;
+        /* La position S'INSTALLE a la premiere lecture. C'est la semantique du
+         * moteur de reference, dont le lecteur d'etat ECRIT son defaut : le
+         * premier evenement ne glisse donc pas — il pose le point de depart —
+         * et c'est le deuxieme qui part de la. Sans ca, lag() ne glissait
+         * jamais : la position valait toujours la valeur recue. */
+        if (isnan(st.lagCur)) st.lagCur = courant;
+        const float actuel = st.lagCur;
+        if (actuel != courant) {
+            const float ms = (courant >= actuel) ? monte : descend;
+            // Duree nulle : pas de glissando, on se pose sur la valeur.
+            if (ms <= 0) { st.lagCur = courant; return true; }
+            continuer(ctx, RepLag, actuel, courant, horlogeDe(ctx), (uint32_t)ms, e);
+        }
+        courant = st.lagCur;                  // la position, pas la consigne
+        return true;
+    }
+
+    /* ramp(depart, arrivee, ms) — une rampe qui IGNORE la valeur amont : elle
+     * fabrique la sienne. Chaque evenement la relance depuis le depart. */
+    if (verbe(seg, "ramp", a)) {
+        String m[3];
+        if (decouperArgs(a, m, 3) == 3) {
+            const float de = valeurArg(m[0]), vers = valeurArg(m[1]);
+            const float ms = valeurArg(m[2]);
+            if (ms <= 0) { courant = vers; return true; }
+            continuer(ctx, RepRampe, de, vers, horlogeDe(ctx), (uint32_t)ms, e);
+            courant = de;                     // la premiere valeur sort tout de suite
+        }
+        return true;
+    }
+
+    if (verbe(seg, "debounce", a)) {
+        const long ms = (long)valeurArg(a);
+        const uint32_t maintenant = millis();
+        if (ms > 0 && st.debounceDernier != 0 &&
+            (uint32_t)(maintenant - st.debounceDernier) < (uint32_t)ms) return false;
+        st.debounceDernier = maintenant;
+        return true;
+    }
+
     if (verbe(seg, "hysteresis", a)) {
         String m[2];
         if (decouperArgs(a, m, 2) == 2) {
@@ -786,14 +1017,33 @@ bool evaluerSegment(const String& seg, float& courant, const Evt& e,
 
 int MappingEngine::executer(const char* script, const Evenement& evt,
                             Sortie* sorties, int max, bool& traite,
-                            Etat* etats, int nEtats) {
+                            Etat* etats, int nEtats, bool horsLigne) {
     if (!etats || nEtats <= 0) { etats = g_etats; nEtats = MAX_PIPELINES; }
     traite = false;
     int n = 0;
     if (!script || script[0] == '\0' || !sorties || max <= 0) return 0;
 
+    /* L'HORLOGE AVANCE AVANT LES PIPELINES. Un del() ou un makenote()
+     * rencontre pendant ce battement doit compter a partir de maintenant, pas
+     * du battement precedent : sinon son echeance est deja passee et il tire
+     * dans le meme souffle. C'est ici, dans le point de passage commun, plutot
+     * que chez chaque appelant — le banc, la route d'essai et battre() posaient
+     * l'horloge chacun a leur maniere, et deux d'entre eux la posaient trop
+     * tard. */
+    if (evt.type == Evenement::Tick)
+        (horsLigne ? g_horsLigneMaintenant : g_maintenant) = evt.instant;
+
     const String s = nettoyer(script);
     const Famille fEvt = familleEvenement(evt);
+
+    /* L'evenement est MUTABLE et PARTAGE par tous les pipelines : makenote()
+     * le reecrit, et un pipeline suivant voit la reecriture — c'est ce que fait
+     * le moteur de reference. On en garde l'empreinte d'origine : si un verbe
+     * l'a reecrit, l'evenement fabrique ne doit surtout pas ressortir AUSSI par
+     * le passage transparent, comme s'il etait entre par le MIDI. */
+    Evenement e = evt;
+    const Evenement::Type type0 = evt.type;
+    const uint8_t a0 = evt.a, b0 = evt.b;
 
     int pi = 0, debutPipe = 0;
     while (debutPipe <= (int)s.length()) {
@@ -810,7 +1060,7 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
             // L'etat du pipeline AVANT d'evaluer la source : metro() et
             // loadbang() y tiennent leur minuterie.
             Etat& stSrc = etats[(pi < nEtats) ? pi : nEtats - 1];
-            const Source d = evaluerSource(src, evt, stSrc);
+            const Source d = evaluerSource(src, e, stSrc);
             if (d.declenche) {
                 // « Pris en charge » seulement si la source repond au GENRE de
                 // l'evenement. Un pipeline pilote par f() ou counter() tourne
@@ -825,16 +1075,24 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
                 const bool srcCcNum = src.startsWith("ccnum.in");
                 float courant = d.valeur;
 
+                Contexte ctx;
+                ctx.script = script; ctx.etats = etats; ctx.nEtats = nEtats;
+                ctx.pipe = (uint8_t)pi;
+                ctx.horsLigne = horsLigne;
+
                 int debut = (finSrc == -1) ? (int)pipe.length() + 1 : finSrc + 1;
+                uint8_t si = 0;
                 while (debut <= (int)pipe.length()) {
                     const int fin = prochainSep(pipe, debut, ':');
                     String seg = pipe.substring(debut, (fin == -1) ? pipe.length() : fin);
                     seg.trim();
+                    ctx.seg = si;
                     if (seg.length() &&
-                        !evaluerSegment(seg, courant, evt, sorties, max, n, st, srcCcNum))
+                        !evaluerSegment(seg, courant, e, sorties, max, n, st, srcCcNum, &ctx))
                         break;                      // segment bloquant
                     if (fin == -1) break;
                     debut = fin + 1;
+                    si++;
                 }
             }
             pi++;
@@ -843,7 +1101,109 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
         if (finPipe == -1) break;
         debutPipe = finPipe + 1;
     }
+    /* Evenement REECRIT (makenote) : on le declare pris en charge. Sans ca, la
+     * note d'origine ressortirait par le passage transparent A COTE de la note
+     * fabriquee — deux notes la ou le script n'en demandait qu'une. */
+    if (e.type != type0 || e.a != a0 || e.b != b0) traite = true;
     return n;
+}
+
+/* REJOUER L'AVAL d'un pipeline, a partir du segment qui suit `seg`.
+ *
+ * C'est ce que fait le tick() du moteur web quand il vide une file de del ou de
+ * makenote : il reprend les segments suivants avec la valeur mise de cote. On
+ * repart du texte du script — pipeline `pipe`, segments apres `seg` — plutot
+ * que de garder des offsets, qui ne survivraient pas a une reecriture du
+ * script. */
+static int rejouerDepuis(const char* script, uint8_t pipeIdx, uint8_t segIdx,
+                         float valeur, const Evt& evt, Etat* etats, int nEtats,
+                         Sortie* sorties, int max, bool horsLigne) {
+    int n = 0;
+    if (!script || !script[0] || !sorties || max <= 0) return 0;
+    if (!etats || nEtats <= 0) { etats = g_etats; nEtats = MAX_PIPELINES; }
+
+    Evt e = evt;                      // copie MUTABLE : cf. evaluerSegment
+    const String s = nettoyer(script);
+    int pi = 0, debutPipe = 0;
+    while (debutPipe <= (int)s.length()) {
+        const int finPipe = prochainSep(s, debutPipe, ';');
+        const String pipe = s.substring(debutPipe, (finPipe == -1) ? s.length() : finPipe);
+        if (pi == pipeIdx) {
+            Etat& st = etats[(pi < nEtats) ? pi : nEtats - 1];
+            const int finSrc = prochainSep(pipe, 0, ':');
+            int debut = (finSrc == -1) ? (int)pipe.length() + 1 : finSrc + 1;
+            uint8_t si = 0;
+            float courant = valeur;
+            Contexte ctx;
+            ctx.script = script; ctx.etats = etats; ctx.nEtats = nEtats; ctx.pipe = pipeIdx;
+            ctx.horsLigne = horsLigne;   // un del() qui en rejoue un autre y reste
+            while (debut <= (int)pipe.length()) {
+                const int fin = prochainSep(pipe, debut, ':');
+                String seg = pipe.substring(debut, (fin == -1) ? pipe.length() : fin);
+                seg.trim();
+                if (si > segIdx) {                 // on ne rejoue que l'AVAL
+                    ctx.seg = si;
+                    if (seg.length() &&
+                        !evaluerSegment(seg, courant, e, sorties, max, n, st, false, &ctx))
+                        break;
+                }
+                if (fin == -1) break;
+                debut = fin + 1;
+                si++;
+            }
+            return n;
+        }
+        if (finPipe == -1) break;
+        debutPipe = finPipe + 1;
+        pi++;
+    }
+    return n;
+}
+
+/* Vide la file des DIFFERES en REMPLISSANT une liste. Disponible des deux
+ * cotes : c'est cette variante que le banc de conformite emploie, et c'est donc
+ * elle qui prouve del(), makenote(), lag() et ramp(). */
+int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
+                                  bool horsLigne) {
+    (horsLigne ? g_horsLigneMaintenant : g_maintenant) = maintenant;
+    int total = 0;
+    for (int i = 0; i < MAX_REPRISES; i++) {
+        Reprise& r = g_reprises[i];
+        if (!r.actif) continue;
+        if (r.horsLigne != horsLigne) continue;     // chacun sa ligne de temps
+
+        /* Une tache CONTINUE tire a chaque battement : on calcule ou en est
+         * l'interpolation, on rejoue l'aval avec cette valeur, et on ne la
+         * retire qu'une fois arrivee. */
+        if (r.genre != RepDifferee) {
+            const int32_t ecoule = (int32_t)(maintenant - r.debut);
+            const float t = (r.duree == 0 || ecoule >= (int32_t)r.duree) ? 1.f
+                          : (ecoule <= 0) ? 0.f : (float)ecoule / (float)r.duree;
+            const float v = r.de + (r.vers - r.de) * t;
+            // lag() garde sa position ; ramp() ne laisse rien derriere elle.
+            if (r.genre == RepLag) etatDe(r.etats, r.nEtats, r.pipe).lagCur = v;
+            if (total < max)
+                total += rejouerDepuis(r.script, r.pipe, r.seg, v, r.evt,
+                                       r.etats, r.nEtats, sorties + total,
+                                       max - total, horsLigne);
+            if (t >= 1.f) r.actif = false;
+            continue;
+        }
+
+        if ((int32_t)(maintenant - r.echeance) < 0) continue;
+        r.actif = false;                            // libere AVANT de rejouer :
+                                                    // le rejeu peut re-differer
+        if (total < max)
+            total += rejouerDepuis(r.script, r.pipe, r.seg, r.valeur, r.evt,
+                                   r.etats, r.nEtats, sorties + total, max - total,
+                                   horsLigne);
+    }
+    return total;
+}
+
+void MappingEngine::viderDifferes(const char* script) {
+    for (int i = 0; i < MAX_REPRISES; i++)
+        if (!script || g_reprises[i].script == script) g_reprises[i].actif = false;
 }
 
 // Canal MIDI valide. Le PIPELINE ne borne rien — le moteur web ne borne pas
@@ -931,6 +1291,14 @@ static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, 
     }
 }
 
+/* La variante a EMETTEUR emploie emettreVers, qui n'existe que dans la carte —
+ * elle vit donc sous la garde, avec executerCapteur. */
+void MappingEngine::battreDifferes(uint32_t maintenant, MidiSender* sender) {
+    Sortie liste[MAX_SORTIES];
+    const int n = battreDifferes(maintenant, liste, MAX_SORTIES);
+    if (n > 0) emettreVers(sender, liste, n);
+}
+
 void MappingEngine::executerCapteur(const char* script, float valeur,
                                     MidiSender* sender, Etat* etats, int nEtats,
                                     float brut) {
@@ -962,7 +1330,7 @@ void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t in
     if (!script || script[0] == '\0') return;
     Evenement e;
     e.type = type;
-    e.instant = instant;
+    e.instant = instant;                  // l'horloge est posee par executer()
     Sortie liste[MAX_SORTIES];
     bool traite = false;
     const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
