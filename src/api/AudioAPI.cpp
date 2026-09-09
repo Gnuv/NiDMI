@@ -308,9 +308,18 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
 
 server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
+        /* `actif` : le nom de l'emplacement 0 — conserve pour ne pas casser
+         * les clients existants. `emplacements` dit ce que TOUS portent, ce
+         * qu'un seul nom ne pouvait pas exprimer. */
+        String emps = "[";
+        for (uint8_t e = 0; e < MidiRouter::MAX_SCRIPTS_MAP; e++) {
+            if (e) emps += ",";
+            emps += "\"" + g_midiRouter.nomEmplacement(e) + "\"";
+        }
+        emps += "]";
         request->send(200, "application/json",
-                      "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"fichiers\":"
-                      + ScriptStore::listerJson() + "}");
+                      "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"emplacements\":" + emps
+                      + ",\"fichiers\":" + ScriptStore::listerJson() + "}");
     });
 
     /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */
@@ -348,12 +357,29 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     /* Choisit le script ACTIF, par nom. persist=1 le memorise en NVS : la carte
      * le rechargera seule au demarrage, sans navigateur. Seul le NOM est
      * persiste — le contenu reste dans LittleFS. */
+    /* Ce que la CHAINE des emplacements fait d'un CC entrant, sans rien emettre.
+     * Le pendant de /api/mapping/essai pour le routage : celle-la eprouve un
+     * script isole, celle-ci la chaine complete telle qu'elle tourne. */
+    server.on("/api/midi/chaine", HTTP_POST, [](AsyncWebServerRequest *request){
+        auto par = [&](const char* n, int d) -> int {
+            return request->hasParam(n, true) ? request->getParam(n, true)->value().toInt() : d;
+        };
+        uint8_t c = (uint8_t)par("ch", 1), n = (uint8_t)par("cc", 0), v = (uint8_t)par("val", 0);
+        const bool passe = g_midiRouter.chaineScriptsCc(c, n, v);
+        request->send(200, "application/json",
+            String("{\"passe\":") + (passe ? "true" : "false")
+            + ",\"ch\":" + String((int)c) + ",\"cc\":" + String((int)n)
+            + ",\"val\":" + String((int)v) + "}");
+    });
+
     server.on("/api/midi/script/select", HTTP_POST, [](AsyncWebServerRequest *request){
         const String nom = request->hasParam("name", true)
                          ? request->getParam("name", true)->value() : String("");
         const bool persister = request->hasParam("persist", true)
                             && request->getParam("persist", true)->value() != "0";
-        const bool ok = g_midiRouter.chargerScriptNomme(nom.c_str(), persister);
+        const uint8_t emp = request->hasParam("slot", true)
+                          ? (uint8_t)request->getParam("slot", true)->value().toInt() : 0;
+        const bool ok = g_midiRouter.chargerScriptNomme(nom.c_str(), persister, emp);
         request->send(ok ? 200 : 404, "application/json",
                       String("{\"status\":\"") + (ok ? "ok" : "introuvable")
                       + "\",\"actif\":\"" + g_midiRouter.nomScript() + "\"}");
@@ -367,8 +393,10 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         // dont le plus grand bloc contigu descend sous 15 ko — elle acceptait
         // la requete sans plus servir de reponse. Pour EFFACER le script, on
         // envoie donc `script` explicitement vide.
+        const uint8_t emp = request->hasParam("slot", true)
+                          ? (uint8_t)request->getParam("slot", true)->value().toInt() : 0;
         if (request->hasParam("script", true))
-            g_midiRouter.setScriptMidi(request->getParam("script", true)->value());
+            g_midiRouter.setScriptMidi(request->getParam("script", true)->value(), emp);
         // Les REGLAGES du script. Sans eux, r("param","nom",min,max,defaut)
         // retombe sur son defaut et le script parait inerte : c'est ce qui
         // rendait un bloc transpose sans effet alors que son code etait bien

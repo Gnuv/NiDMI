@@ -859,7 +859,8 @@ static uint8_t canalValide(uint8_t c) { return (uint8_t)constrain((int)c, 1, 16)
 // saura emettre plusieurs notes, c'est ici qu'on regardera.
 bool MappingEngine::executeMidiNote(const char* script,
                                     uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
-                                    bool estNoteOff, SortieNote& sortie) {
+                                    bool estNoteOff, SortieNote& sortie,
+                                    Etat* etats, int nEtats) {
     sortie.emise = sortie.traite = false;
     Evenement e;
     e.type  = estNoteOff ? Evenement::NoteOff : Evenement::NoteOn;
@@ -867,7 +868,7 @@ bool MappingEngine::executeMidiNote(const char* script,
 
     Sortie liste[MAX_SORTIES];
     bool traite = false;
-    const int n = executer(script, e, liste, MAX_SORTIES, traite);
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
     sortie.traite = traite;
     for (int i = 0; i < n; i++) {
         if (liste[i].type != Sortie::Note && liste[i].type != Sortie::NoteOff) continue;
@@ -882,7 +883,7 @@ bool MappingEngine::executeMidiNote(const char* script,
 
 bool MappingEngine::executeMidiCc(const char* script,
                                   uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
-                                  SortieCc& sortie) {
+                                  SortieCc& sortie, Etat* etats, int nEtats) {
     sortie.emise = sortie.traite = false;
     Evenement e;
     e.type = Evenement::Cc;
@@ -890,7 +891,7 @@ bool MappingEngine::executeMidiCc(const char* script,
 
     Sortie liste[MAX_SORTIES];
     bool traite = false;
-    const int n = executer(script, e, liste, MAX_SORTIES, traite);
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
     sortie.traite = traite;
     for (int i = 0; i < n; i++) {
         if (liste[i].type != Sortie::Cc) continue;

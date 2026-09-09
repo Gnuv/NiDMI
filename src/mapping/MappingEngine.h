@@ -107,6 +107,10 @@ public:
     // script qui emet seize evenements sur une seule note entrante est une
     // erreur d'ecriture, pas un cas a servir.
     static const int MAX_SORTIES = 16;
+    /* Pipelines qu'un script map peut porter avec un etat PROPRE. C'etait une
+     * constante privee du moteur (le tableau global) ; elle devient publique
+     * parce que chaque emplacement de script doit dimensionner le sien. */
+    static const int MAX_PIPELINES_SCRIPT = 12;
 
 
     // Execute le script sur un evenement.
@@ -177,9 +181,14 @@ public:
         uint8_t velo   = 0;
         uint8_t canal  = 1;
     };
+    /* `etats` : l'etat par pipeline de CE script. Sans lui, on retombe sur le
+     * tableau GLOBAL — ce qui allait tant qu'il n'y avait qu'un script map, et
+     * qui ferait se marcher dessus les emplacements multiples (meme piege que
+     * le §59 pour les broches). */
     static bool executeMidiNote(const char* script,
                                 uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
-                                bool estNoteOff, SortieNote& sortie);
+                                bool estNoteOff, SortieNote& sortie,
+                                Etat* etats = nullptr, int nEtats = 0);
 
     // ── Traitement d'un CONTROLEUR CONTINU entrant ──────────────────────────
     // Pendant du precedent pour les CC. Les verbes sont ceux que la langue
@@ -213,5 +222,5 @@ public:
     };
     static bool executeMidiCc(const char* script,
                               uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
-                              SortieCc& sortie);
+                              SortieCc& sortie, Etat* etats = nullptr, int nEtats = 0);
 };

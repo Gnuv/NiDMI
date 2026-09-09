@@ -234,21 +234,37 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
 // les sources (USB, RTP, et demain la WebSocket de l'app) passent par ici,
 // sinon la table ne vaudrait que pour celles qu'on aurait pense cabler : c'est
 // exactement l'erreur qui avait ete faite sur les notes.
+/* LA CHAINE DES SCRIPTS MAP, pour un CC.
+ *
+ * Extraite de ccEntrant pour etre EPROUVABLE : sans point d'entree, la chaine
+ * n'etait verifiable qu'en jouant du MIDI sur la carte, donc en pratique jamais.
+ * /api/midi/chaine l'appelle telle quelle — ce que l'essai prouve est
+ * exactement ce que la production execute, pas une copie qui divergera.
+ *
+ * Rend false si un emplacement a AVALE l'evenement (traite sans emission) :
+ * c'est ce qui rend un filtre exprimable.
+ */
+bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+        Emplacement& em = emplacements[e];
+        if (!em.contenu.length()) continue;
+        MappingEngine::SortieCc sortie;
+        MappingEngine::executeMidiCc(em.contenu.c_str(), n, v, c, sortie,
+                                     em.etats, MappingEngine::MAX_PIPELINES_SCRIPT);
+        if (sortie.emise) { c = sortie.canal; n = sortie.cc; v = sortie.valeur; }
+        else if (sortie.traite) return false;
+        // Ni emise ni traite : cet emplacement ne parle pas de CC, on passe.
+    }
+    return true;
+}
+
 void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
     uint8_t c = channel, n = control, v = value;
 
     // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
     //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
     //    renumerote un CC doit donc renumeroter aussi ce qu'apprend CcMap.
-    if (scriptEntrant.length()) {
-        MappingEngine::SortieCc sortie;
-        MappingEngine::executeMidiCc(scriptEntrant.c_str(), control, value, channel, sortie);
-        if (sortie.emise) { c = sortie.canal; n = sortie.cc; v = sortie.valeur; }
-        else if (sortie.traite) return;   // le script s'occupe des CC et tait celui-ci
-        // Ni emise ni traite : le script ne parle pas de CC (un transpose.nms,
-        // par exemple). On passe tel quel — sinon charger un script de notes
-        // rendrait muet tout controleur, y compris l'apprentissage ci-dessous.
-    }
+    if (!chaineScriptsCc(c, n, v)) return;   // un emplacement a avale le CC
 
     // 2. Apprentissage. Il precede l'application pour que la cible bouge des
     //    le geste qui l'apprend — sans ca il faut toucher le potentiometre une
@@ -282,34 +298,40 @@ void MidiRouter::setParamsScript(const String& params) {
 }
 
 void MidiRouter::battreHorloge(uint32_t maintenant) {
-    if (!scriptEntrant.length()) return;
-    /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
-     * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
-     * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
-     * en tache bloquee. */
-    if (initEnAttente) {
-        initEnAttente = false;
-        MappingEngine::battre(scriptEntrant.c_str(), MappingEngine::Evenement::Init,
-                              maintenant, this);
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+        Emplacement& em = emplacements[e];
+        if (!em.contenu.length()) continue;
+        /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
+         * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
+         * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
+         * en tache bloquee. */
+        if (em.initEnAttente) {
+            em.initEnAttente = false;
+            MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
+                                  maintenant, this, em.etats,
+                                  MappingEngine::MAX_PIPELINES_SCRIPT);
+        }
+        MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
+                              maintenant, this, em.etats,
+                              MappingEngine::MAX_PIPELINES_SCRIPT);
     }
-    MappingEngine::battre(scriptEntrant.c_str(), MappingEngine::Evenement::Tick,
-                          maintenant, this);
 }
 
-void MidiRouter::setScriptMidi(const String& script) {
-    scriptEntrant = script;
-    initEnAttente = true;          // nouveau script : son loadbang() est du
-    // Le script change : l'etat par pipeline (compteur, seq, toggle, sel/map,
-    // lp...) n'a plus de sens. Sans cet effacement, un counter reprend a la
-    // position ou en etait le script PRECEDENT — un decalage silencieux, et
-    // d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note.
-    MappingEngine::reinitialiser();
-    // Un script pousse EN LIGNE n'est plus celui du fichier : laisser
-    // nomScriptActif tel quel faisait annoncer « transpose.nms » alors qu'un
-    // tout autre code tournait. On dit ce qui est vrai.
-    nomScriptActif = script.length() ? String("(en ligne)") : String("");
-    Serial.printf("[MidiRouter] script MIDI entrant : %s\n",
-                  scriptEntrant.length() ? scriptEntrant.c_str() : "(aucun)");
+void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
+    if (emplacement >= MAX_SCRIPTS_MAP) return;
+    Emplacement& em = emplacements[emplacement];
+    em.contenu = script;
+    em.initEnAttente = true;          // nouveau script : son loadbang() est du
+    /* L'etat par pipeline de CET emplacement n'a plus de sens : un counter
+     * reprendrait la ou en etait le script precedent — decalage silencieux, et
+     * d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note. On ne
+     * touche PAS aux autres emplacements, qui n'ont pas change. */
+    for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
+    /* Un script pousse EN LIGNE n'est plus celui du fichier : laisser le nom tel
+     * quel faisait annoncer « transpose.nms » alors qu'un autre code tournait. */
+    em.nom = script.length() ? String("(en ligne)") : String("");
+    Serial.printf("[MidiRouter] emplacement %u : script en ligne (%u o)\n",
+                  (unsigned)emplacement, (unsigned)script.length());
 }
 
 // Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,
@@ -319,10 +341,13 @@ void MidiRouter::setScriptMidi(const String& script) {
 void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
     uint8_t n = note, v = velocity, c = channel;
 
-    if (scriptEntrant.length()) {
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+        Emplacement& em = emplacements[e];
+        if (!em.contenu.length()) continue;
         MappingEngine::SortieNote sortie;
-        if (MappingEngine::executeMidiNote(scriptEntrant.c_str(), note, velocity, channel,
-                                           estNoteOff, sortie)) {
+        if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c,
+                                           estNoteOff, sortie,
+                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT)) {
             n = sortie.note; v = sortie.velo; c = sortie.canal;
         }
         // Script qui PARLE de notes mais n'a rien emis pour celle-ci : on NE
@@ -351,16 +376,27 @@ constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
 constexpr const char* NVS_CLE_SCRIPT  = "script";
 }
 
-bool MidiRouter::chargerScriptNomme(const char* nom, bool persister) {
+/* La cle NVS d'un emplacement : « script » pour le premier — le nom historique,
+ * qu'on garde pour ne pas perdre la configuration des cartes existantes — puis
+ * « script1 », « script2 »... */
+static String cleNvsEmplacement(uint8_t e) {
+    return e == 0 ? String(NVS_CLE_SCRIPT) : (String(NVS_CLE_SCRIPT) + String((int)e));
+}
+
+bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emplacement) {
+    if (emplacement >= MAX_SCRIPTS_MAP) return false;
+    Emplacement& em = emplacements[emplacement];
+    const String cle = cleNvsEmplacement(emplacement);
+
     if (!nom || !*nom) {                       // "" = plus de script du tout
-        scriptEntrant = "";
-        nomScriptActif = "";
-        MappingEngine::reinitialiser();
+        em.contenu = "";
+        em.nom = "";
+        for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
         if (persister) {
             Preferences p;
-            if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(NVS_CLE_SCRIPT); p.end(); }
+            if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(cle.c_str()); p.end(); }
         }
-        Serial.println("[MidiRouter] script MIDI : aucun (passage direct)");
+        Serial.printf("[MidiRouter] emplacement %u : aucun script\n", (unsigned)emplacement);
         return true;
     }
     String contenu;
@@ -368,28 +404,35 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister) {
         Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
         return false;
     }
-    scriptEntrant  = contenu;
-    nomScriptActif = nom;
-    MappingEngine::reinitialiser();   // meme raison que dans setScriptMidi
+    em.contenu = contenu;
+    em.nom     = nom;
+    em.initEnAttente = true;
+    for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
     if (persister) {
         Preferences p;
-        if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(NVS_CLE_SCRIPT, nomScriptActif); p.end(); }
+        if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(cle.c_str(), em.nom); p.end(); }
     }
-    Serial.printf("[MidiRouter] script '%s' charge (%u o)%s\n",
-                  nom, (unsigned)contenu.length(), persister ? " et memorise" : "");
+    Serial.printf("[MidiRouter] emplacement %u : '%s' charge (%u o)%s\n",
+                  (unsigned)emplacement, nom, (unsigned)contenu.length(),
+                  persister ? " et memorise" : "");
     return true;
 }
 
 void MidiRouter::restaurerScript() {
     Preferences p;
     if (!p.begin(NVS_ESPACE_MIDI, true)) return;
-    const String nom = p.getString(NVS_CLE_SCRIPT, "");
+    String noms[MAX_SCRIPTS_MAP];
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++)
+        noms[e] = p.getString(cleNvsEmplacement(e).c_str(), "");
     p.end();
-    if (!nom.length()) return;
-    if (!chargerScriptNomme(nom.c_str(), false)) {
-        // Le fichier a disparu (mapfs efface, script supprime). On ne bloque
-        // rien : la carte demarre en passage direct plutot qu'a moitie
-        // configuree, et le nom reste en NVS au cas ou le fichier revienne.
-        Serial.printf("[MidiRouter] script memorise '%s' absent — passage direct\n", nom.c_str());
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+        if (!noms[e].length()) continue;
+        if (!chargerScriptNomme(noms[e].c_str(), false, e)) {
+            // Le fichier a disparu (mapfs efface, script supprime). On ne bloque
+            // rien : l'emplacement reste vide plutot qu'a moitie configure, et le
+            // nom reste en NVS au cas ou le fichier revienne.
+            Serial.printf("[MidiRouter] emplacement %u : '%s' absent — laisse vide\n",
+                          (unsigned)e, noms[e].c_str());
+        }
     }
 }
