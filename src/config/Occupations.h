@@ -26,6 +26,8 @@
  */
 #include <Arduino.h>
 
+#include "../components/ComponentTypes.h"   // PinType
+
 namespace Occupations {
 
 struct Qui {
@@ -44,5 +46,37 @@ bool audioDeclare();
 
 /** Le bloc "bus" de /api/pins/caps : UNIQUEMENT ce qui est déclaré. */
 String json();
+
+/** Vrai si un composant (broche principale OU additionnelle) tient ce GPIO. */
+bool prisParUnComposant(uint8_t gpio);
+
+/**
+ * Vrai si ce GPIO est une broche SUPPLÉMENTAIRE d'un autre composant (l'axe Y
+ * d'un joystick, une ligne d'adresse de multiplexeur…).
+ *
+ * La distinction compte : réécrire la configuration de sa PROPRE broche
+ * principale est le geste le plus courant (changer un script, un n° de note) et
+ * doit rester libre. Voler la broche supplémentaire d'un voisin, non — ça le
+ * casse en silence, ce qu'aucun écran ne montrerait.
+ */
+bool tenuCommeSupplementaire(uint8_t gpio);
+
+/** Vrai si la broche est libre : ni bus déclaré, ni composant. */
+bool libre(uint8_t gpio);
+
+/**
+ * Première broche LIBRE du type demandé, en partant de `apres` (exclu) et en
+ * suivant l'ordre de la sérigraphie — D0, D1, D2… puis les autres.
+ *
+ * Sert à l'attribution automatique des broches supplémentaires : choisir un
+ * composant qui en demande plusieurs ne doit pas obliger à les désigner une par
+ * une, ni — surtout — enregistrer une configuration incomplète en silence, ce
+ * que faisait /api/pins/set (le bloc additionalPins était simplement omis, le
+ * handler abandonnait au chargement, et rien ne le disait).
+ *
+ * Rend 255 si aucune ne convient : l'appelant doit alors REFUSER, pas ranger
+ * une configuration qui ne marchera pas.
+ */
+uint8_t premiereLibre(PinType type, uint8_t apres);
 
 }  // namespace Occupations

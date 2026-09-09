@@ -500,6 +500,13 @@ void setupPinAPI(AsyncWebServer& server) {
         {
             Occupations::rafraichir();
             const Occupations::Qui q = Occupations::qui(sigGpio);
+            if (!q.bus && Occupations::tenuCommeSupplementaire(sigGpio)) {
+                request->send(409, "application/json",
+                    String("{\"status\":\"error\",\"message\":\"GPIO ") + String(sigGpio) +
+                    " est deja une broche d'un autre composant (axe, ligne d'adresse...). "
+                    "La lui prendre le casserait.\"}");
+                return;
+            }
             if (q.bus) {
                 request->send(409, "application/json",
                     String("{\"status\":\"error\",\"message\":\"GPIO ") + String(sigGpio) +
@@ -704,49 +711,60 @@ void setupPinAPI(AsyncWebServer& server) {
         /* Nom personnalisé du composant */
         addParam("name");
         
-        /* Vérifier si le composant a des additionalPins */
+        /* BROCHES SUPPLEMENTAIRES : les ATTRIBUER, ou REFUSER.
+         *
+         * Avant : si la requete ne donnait pas les broches requises, le bloc
+         * additionalPins etait simplement OMIS et la configuration rangee quand
+         * meme. Au chargement le handler ne trouvait rien (JoystickHandler :
+         * « yGpio == 255 ») et abandonnait — sans un mot. Choisir un joystick
+         * dans l'interface produisait donc une broche configuree qui ne
+         * fonctionnait pas, sans erreur nulle part.
+         *
+         * Desormais, pour chaque broche requise absente de la requete : on prend
+         * la premiere broche LIBRE du bon type, en partant de la principale et
+         * en suivant l'ordre de la serigraphie. Si aucune ne convient, on REFUSE
+         * en nommant ce qui manque — jamais de configuration incomplete rangee
+         * en silence. C'est le mecanisme general : le DAC, une carte SD ou un
+         * multiplexeur passent par le meme chemin, sans cas particulier. */
+        /* Les GPIO retenus, pour que le handler ci-dessous emploie EXACTEMENT
+         * ceux qu'on vient de ranger en memoire — et pas une seconde lecture de
+         * la requete, qui ne connait pas les attributions automatiques. */
+        uint8_t apGpio[MAX_ADDITIONAL_PINS];
+        for (uint8_t i = 0; i < MAX_ADDITIONAL_PINS; i++) apGpio[i] = 255;
         bool hasAdditionalPins = false;
-        
-        if(def && def->additionalPinCount > 0 && def->additionalPins) {
-            /* Vérifier que tous les paramètres required sont présents */
+
+        if (def && def->additionalPinCount > 0 && def->additionalPins) {
             hasAdditionalPins = true;
-            for(uint8_t i = 0; i < def->additionalPinCount && i < def->additionalPinsCapacity; i++) {
-                if(!def->additionalPins[i].optional) {
-                    String pinId = String(def->additionalPins[i].id);
-                    bool hasParam = request->hasParam(pinId.c_str(), true);
-                    if(!hasParam) {
-                        hasAdditionalPins = false;
-                        break;
+            String bloc;
+            bool premier = true;
+            for (uint8_t i = 0; i < def->additionalPinCount && i < def->additionalPinsCapacity; i++) {
+                const AdditionalPinDef& ap = def->additionalPins[i];
+                uint8_t g = 255;
+                if (request->hasParam(ap.id, true)) {
+                    g = (uint8_t)request->getParam(ap.id, true)->value().toInt();
+                } else if (!ap.optional) {
+                    g = Occupations::premiereLibre(ap.pinType, sigGpio);
+                    if (g == 255) {
+                        request->send(409, "application/json",
+                            String("{\"status\":\"error\",\"message\":\"") + def->displayName +
+                            " demande une broche pour « " + ap.displayName +
+                            " », et aucune broche libre du bon type n'est disponible. "
+                            "Liberer une broche, puis recommencer.\"}");
+                        return;
                     }
+                    Serial.printf("[PinAPI] %s : « %s » attribue automatiquement au GPIO %u\n",
+                                  def->id, ap.displayName, (unsigned)g);
+                } else {
+                    g = ap.defaultValue;
                 }
+                if (i < MAX_ADDITIONAL_PINS) apGpio[i] = g;
+                if (!premier) bloc += ",";
+                bloc += "\"" + String(ap.id) + "\":" + String(g);
+                premier = false;
             }
-            
-            if(hasAdditionalPins) {
-                json += ",\"additionalPins\":{";
-                bool first = true;
-                for(uint8_t i = 0; i < def->additionalPinCount && i < def->additionalPinsCapacity; i++) {
-                    const AdditionalPinDef& pin = def->additionalPins[i];
-                    if(request->hasParam(pin.id, true)) {
-                        if(!first) json += ",";
-                        json += "\"" + String(pin.id) + "\":" + request->getParam(pin.id, true)->value();
-                        first = false;
-                    } else if(!pin.optional) {
-                        // Pin requise absente (ne devrait pas arriver après la vérification ci-dessus)
-                        hasAdditionalPins = false;
-                        break;
-                    } else {
-                        // Pin optionnelle absente, utiliser la valeur par défaut
-                        if(!first) json += ",";
-                        json += "\"" + String(pin.id) + "\":" + String(pin.defaultValue);
-                        first = false;
-                    }
-                }
-                json += "}";
-                
-                /* Note: complexId supprimé - plus besoin d'ID explicite */
-            }
+            json += ",\"additionalPins\":{" + bloc + "}";
         }
-        
+
         json += "}";
         
         /* FUSION : on conserve ce que la requete ne mentionne pas. */
@@ -810,13 +828,9 @@ void setupPinAPI(AsyncWebServer& server) {
                     const AdditionalPinDef& pinDef = def->additionalPins[i];
                     data.additionalPins[i].id = pinDef.id;
                     
-                    if(request->hasParam(pinDef.id, true)) {
-                        data.additionalPins[i].gpio = request->getParam(pinDef.id, true)->value().toInt();
-                    } else if(!pinDef.optional && pinDef.defaultValue != 255) {
-                        data.additionalPins[i].gpio = pinDef.defaultValue;
-                    } else {
-                        data.additionalPins[i].gpio = pinDef.defaultValue;  /* 255 pour non connecté */
-                    }
+                    data.additionalPins[i].gpio =
+                        (i < MAX_ADDITIONAL_PINS && apGpio[i] != 255) ? apGpio[i]
+                                                                      : pinDef.defaultValue;
                 }
                 
                 /* Allouer et remplir formFields */

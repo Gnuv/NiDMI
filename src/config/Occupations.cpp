@@ -4,6 +4,9 @@
 
 #include "../audio/AudioEngine.h"
 #include "../utils/PinMapper.h"
+#include "../managers/ComponentManager.h"
+#include "../managers/complex/ComplexHandlerRegistry.h"
+#include "../Globals.h"
 
 namespace {
 
@@ -62,6 +65,64 @@ Qui qui(uint8_t gpio) {
         if (gpio == PinMapper::labelToGpio("RX")) return { "uart", "rx" };
     }
     return { nullptr, nullptr };
+}
+
+bool prisParUnComposant(uint8_t gpio) {
+    /* Les composants multi-broches savent DEJA repondre : chaque ComplexHandler
+     * implemente isGpioUsed(). On leur demande plutot que de tenir un second
+     * inventaire qui divergerait. */
+    for (uint8_t i = 0; i < ComplexHandlerRegistry::getHandlerCount(); i++) {
+        ComplexHandler* h = ComplexHandlerRegistry::getHandlerByIndex(i);
+        if (h && h->isGpioUsed(gpio)) return true;
+    }
+    return g_componentManager.findComponentByGpio(gpio) != 255;
+}
+
+bool tenuCommeSupplementaire(uint8_t gpio) {
+    /* Un handler l'utilise, mais ce n'est la broche PRINCIPALE d'aucun
+     * composant : c'est donc une broche supplementaire. findComponentByGpio()
+     * ne connait que les principales — la difference suffit. */
+    if (g_componentManager.findComponentByGpio(gpio) != 255) return false;
+    for (uint8_t i = 0; i < ComplexHandlerRegistry::getHandlerCount(); i++) {
+        ComplexHandler* h = ComplexHandlerRegistry::getHandlerByIndex(i);
+        if (h && h->isGpioUsed(gpio)) return true;
+    }
+    return false;
+}
+
+bool libre(uint8_t gpio) {
+    return qui(gpio).bus == nullptr && !prisParUnComposant(gpio);
+}
+
+static bool convient(uint8_t gpio, PinType type) {
+    switch (type) {
+        case PinType::PIN_ANALOG:            return PinMapper::hasAdc(gpio);
+        case PinType::PIN_ANALOG_OR_DIGITAL: return true;
+        case PinType::PIN_DIGITAL:
+        case PinType::PIN_PWM:               return true;   // universelles sur ces cartes
+        default:                             return true;
+    }
+}
+
+uint8_t premiereLibre(PinType type, uint8_t apres) {
+    PinMapper::detectMcu();
+    const PinMapping* m = PinMapper::getAllMappings();
+    const size_t n = PinMapper::getMappingCount();
+    /* Deux passes : d'abord APRES la broche principale (l'ordre de la
+     * serigraphie est celui du bornier, donc celui du cablage), puis depuis le
+     * debut — mieux vaut une broche avant qu'un refus. */
+    for (int passe = 0; passe < 2; passe++) {
+        for (size_t i = 0; i < n; i++) {
+            const uint8_t g = m[i].gpio;
+            if (g == 255 || g > 48) continue;
+            if (passe == 0 && g <= apres) continue;
+            if (passe == 1 && g > apres) continue;
+            if (!convient(g, type)) continue;
+            if (!libre(g)) continue;
+            return g;
+        }
+    }
+    return 255;
 }
 
 String json() {
