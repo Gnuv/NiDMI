@@ -35,6 +35,18 @@ struct Qui {
     const char* role;  // "bck", "sda", "mosi", "tx"...  — nullptr si libre
 };
 
+/**
+ * Relâche le périphérique déclaré sur cette broche : ses broches
+ * supplémentaires redeviennent libres, et l'audio s'arrête s'il perd son DAC.
+ *
+ * Un seul point pour les deux gestes qui retirent un composant — la suppression
+ * d'une broche, et le changement de rôle. Les écrire séparément, c'est l'assurance
+ * que l'un des deux oubliera de libérer quelque chose : c'est exactement ainsi
+ * qu'une suppression a longtemps laissé la carte exécuter un composant disparu
+ * (MESURES.md §44).
+ */
+void relacher(const char* pinLabel, uint8_t gpio, const char* role);
+
 /** Relit les déclarations depuis la NVS. À appeler avant tout rechargement. */
 void rafraichir();
 

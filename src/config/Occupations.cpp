@@ -22,6 +22,28 @@ bool cleExiste(Preferences& p, const char* cle) { return p.isKey(cle); }
 
 namespace Occupations {
 
+void relacher(const char* pinLabel, uint8_t gpio, const char* role) {
+    if (!role || !*role) return;
+    rafraichir();                       // partir de l'etat reel, pas d'un cache
+    const bool audioAvant = audioDeclare();
+
+    ComplexHandler* h = ComplexHandlerRegistry::getHandler(role);
+    if (h) {
+        h->removeComponent(pinLabel ? pinLabel : "", gpio);
+        Serial.printf("[Occupations] %s relache sur %s : ses broches sont libres\n",
+                      role, pinLabel ? pinLabel : "?");
+    }
+    rafraichir();
+
+    /* Perdre le DAC, c'est perdre le son : l'I2S tourne sur des broches qui ne
+     * lui appartiennent plus. On coupe, et on ne le rearme pas au demarrage —
+     * sans DAC declare il echouerait de toute facon. */
+    if (audioAvant && !audioDeclare() && AudioEngine::isStarted()) {
+        Serial.println("[Occupations] plus de DAC declare — le moteur audio est arrete");
+        AudioEngine::setEngine(-1, /*persister=*/true);
+    }
+}
+
 void rafraichir() {
     /* L'audio occupe ses broches quand le DAC est DÉCLARÉ — plus quand un
      * moteur se trouve mémorisé. C'est ce que l'utilisateur voit et manipule

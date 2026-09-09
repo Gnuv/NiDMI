@@ -499,27 +499,38 @@ void setupPinAPI(AsyncWebServer& server) {
          * part tel quel dans l'editeur, qui le rend copiable. */
         {
             Occupations::rafraichir();
-            /* SA PROPRE BROCHE reste modifiable.
+            /* SA PROPRE BROCHE reste modifiable, ET CHANGER DE ROLE LIBERE
+             * L'ANCIEN PERIPHERIQUE.
              *
              * Les controles ci-dessous portent sur le fait de PRENDRE une broche
-             * a quelqu'un d'autre. Rejouer la configuration de son propre
-             * composant — changer un script, un nom, une broche supplementaire —
-             * n'est pas une prise. Sans cette exemption, declarer le DAC le
-             * rendait aussitot immodifiable : « GPIO 1 est occupe par le bus
-             * audio (bck) », alors que c'est lui qui l'occupe.
+             * a quelqu'un d'AUTRE. Rejouer la configuration de son propre
+             * composant — script, nom, broche supplementaire — n'en est pas une :
+             * sans cette exemption, declarer le DAC le rendait aussitot
+             * immodifiable (« GPIO 1 est occupe par le bus audio »), alors que
+             * c'est lui qui l'occupe.
              *
-             * Changer de ROLE sur une broche occupee reste refuse : il faut
-             * supprimer d'abord, pour que le peripherique libere proprement ses
-             * broches supplementaires. */
+             * Et remplacer le composant d'une broche par un autre n'en est pas
+             * une non plus : c'est SA broche, on en dispose. On relache donc
+             * l'ancien — ses broches supplementaires redeviennent libres, et le
+             * son s'arrete si c'etait le DAC — au lieu d'exiger une suppression
+             * prealable, qui n'apprenait rien a personne et laissait
+             * l'utilisateur devant un refus sans issue evidente. */
             bool memeComposant = false;
             {
-                Preferences lecture;
-                if (lecture.begin("nidmi", true)) {
-                    const String cle = "pin_" + pinLabel;
-                    const String ancien = lecture.getString(cle.c_str(), "");
-                    lecture.end();
-                    if (ancien.length())
-                        memeComposant = (JSONParser::extractStr(ancien, "role", "\n") == role);
+                String ancienRole;
+                {
+                    Preferences lecture;
+                    if (lecture.begin("nidmi", true)) {
+                        const String cle = "pin_" + pinLabel;
+                        const String ancien = lecture.getString(cle.c_str(), "");
+                        lecture.end();
+                        if (ancien.length())
+                            ancienRole = JSONParser::extractStr(ancien, "role", "\n");
+                    }
+                }
+                if (ancienRole.length()) {
+                    if (ancienRole == role) memeComposant = true;
+                    else Occupations::relacher(pinLabel.c_str(), sigGpio, ancienRole.c_str());
                 }
             }
             const Occupations::Qui q = memeComposant ? Occupations::Qui{nullptr, nullptr}
@@ -1076,13 +1087,14 @@ void setupPinAPI(AsyncWebServer& server) {
                 }
             }
             
-            /* Si role trouvé et handler disponible, utiliser le handler générique */
+            /* MEME POINT DE RELACHE que le changement de role.
+             *
+             * Ce passage appelait le handler directement ; le changement de role
+             * en aurait eu une seconde copie, et l'un des deux aurait fini par
+             * oublier quelque chose — l'arret du son quand on retire le DAC, par
+             * exemple. Un seul chemin : Occupations::relacher(). */
             if(role.length() > 0) {
-                ComplexHandler* handler = ComplexHandlerRegistry::getHandler(role.c_str());
-                if(handler && sigGpio != 255) {
-                    /* Utiliser le handler générique pour supprimer le composant */
-                    handler->removeComponent(pinLabel.c_str(), sigGpio);
-                }
+                if (sigGpio != 255) Occupations::relacher(pinLabel.c_str(), sigGpio, role.c_str());
             } else {
                 /* Pour les composants simples, supprimer via ComponentManager */
                 if(sigGpio != 255) {

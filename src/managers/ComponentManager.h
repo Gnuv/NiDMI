@@ -116,7 +116,11 @@ public:
     void reloadConfigs();
     void syncOSCConfig();
     // Gestion des composants
-    bool addComponent(uint8_t gpio, ComponentType type, uint8_t midi_param, uint8_t channel, MidiMessageType msg_type = MidiMessageType::NOTE);
+    /* `role` : l'identifiant du composant ajoute (ex. "dac_i2s"). Facultatif,
+     * mais il permet de distinguer « cette broche est prise » de « cette broche
+     * est prise PAR MOI » — un peripherique doit pouvoir occuper les siennes. */
+    bool addComponent(uint8_t gpio, ComponentType type, uint8_t midi_param, uint8_t channel,
+                      MidiMessageType msg_type = MidiMessageType::NOTE, const char* role = nullptr);
     bool removeComponent(uint8_t gpio);
     void clearAll();
     

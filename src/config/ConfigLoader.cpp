@@ -266,7 +266,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                      pinLabelCStr, (int)type, midi_param, channel, (int)msg_type);
         
         manager.marquer("nvs-addComponent", i);
-        bool success = manager.addComponent(gpio, type, midi_param, channel, msg_type);
+        bool success = manager.addComponent(gpio, type, midi_param, channel, msg_type, role.c_str());
         
         if (!success) {
             // Échec silencieux pour éviter le spam (les erreurs sont déjà loggées dans addComponent)
@@ -1141,7 +1141,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
 
         // Ajouter le composant au manager (comme pour A/D), puis récupérer sa config mutables
         ComponentType type = def->type;
-        bool success = manager.addComponent(gpio, type, midi_param, channel, msg_type);
+        bool success = manager.addComponent(gpio, type, midi_param, channel, msg_type, role.c_str());
         if (!success) {
             Serial.printf("[ConfigLoader] Failed to add bus component %s on GPIO%d\n", busLabel, gpio);
             continue;

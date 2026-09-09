@@ -1,4 +1,6 @@
 #include "../config/Occupations.h"
+#include "complex/ComplexHandlerRegistry.h"
+#include "complex/ComplexHandler.h"
 #include "../audio/AudioEngine.h"   // PIN_BCLK/LRCK/DIN
 #include "ComponentManager.h"
 #include "../server/WebDebugConsole.h"
@@ -313,7 +315,7 @@ void ComponentManager::resumeRealtimeTasks(bool restoreWdt) {
 
 
 
-bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t midi_param, uint8_t channel, MidiMessageType msg_type) {
+bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t midi_param, uint8_t channel, MidiMessageType msg_type, const char* role) {
     if (component_count >= MAX_COMPONENTS) {
         Serial.printf("[ComponentManager] ERROR: Max components reached (%d)\n", MAX_COMPONENTS);
         return false;
@@ -335,7 +337,21 @@ bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t mi
      * heritee ne doit pas pouvoir remettre la carte dans cet etat — d'ou le
      * refus ici, en plus du grisage cote app (/api/pins/caps declare ce bus). */
     {
-        const Occupations::Qui q = Occupations::qui(gpio);
+        /* UNE BROCHE PRISE PAR SOI-MEME N'EST PAS PRISE.
+         *
+         * Le DAC declare le bus audio ; au rechargement suivant, ce meme bus
+         * refusait de le recharger — les handlers ne sont pas vides entre deux
+         * chargements, donc la declaration survivait et se retournait contre son
+         * proprietaire. Constate : DAC present en memoire, absent de
+         * /api/pins/actif, son coupe. On demande donc au handler du role s'il
+         * s'agit de SES broches. */
+        bool aSoi = false;
+        if (role && *role) {
+            ComplexHandler* h = ComplexHandlerRegistry::getHandler(role);
+            aSoi = h && h->isGpioUsed(gpio);
+        }
+        const Occupations::Qui q = aSoi ? Occupations::Qui{nullptr, nullptr}
+                                        : Occupations::qui(gpio);
         if (q.bus) {
             Serial.printf("[ComponentManager] GPIO %d refuse : occupe par le bus %s (%s)\n",
                           gpio, q.bus, q.role);
