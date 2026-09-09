@@ -181,10 +181,22 @@ void ButtonProcessor::process(
          *     r("bouton") : sel(0) : map(60) : noteoff.out(1) ;
          * On execute donc a chaque changement d'etat stable, sans rien lire du
          * texte. */
+        /* Un front de bouton se VOIT dans la console I/O.
+         *
+         * Jusqu'ici la seule trace partait sur Serial — muette sur la variante
+         * usbmidi, donc invisible. Quand un bouton cesse d'emettre, rien ne
+         * permettait de distinguer « la broche ne bouge pas » de « le script ne
+         * sort rien » : il fallait un build special. Une ligne par front, la ou
+         * l'utilisateur regarde deja. */
+        NIDMI_WEB_LOG("[Bouton] GPIO%d %s -> script", (int)config.gpio,
+                      currentStableState ? "APPUI" : "RELACHE");
+
         if (config.mappingScript[0] != '\0') {
             MappingEngine::executerCapteur(config.mappingScript,
                                            currentStableState ? 1.0f : 0.0f,
                                            midi_sender, &state.scriptEtat);
+        } else {
+            NIDMI_WEB_LOG("[Bouton] GPIO%d : aucun script — rien a emettre", (int)config.gpio);
         }
 
         state.last_time = now;
