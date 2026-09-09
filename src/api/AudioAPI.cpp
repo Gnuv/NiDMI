@@ -1,3 +1,5 @@
+#include "../managers/ComponentManager.h"
+#include "../Globals.h"
 #include "APICommon.h"
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
@@ -87,6 +89,24 @@ void setupAudioAPI(AsyncWebServer& server) {
             return;
         }
         const int n = request->getParam("engine", true)->value().toInt();
+        /* DIRE LA VRAIE RAISON.
+         *
+         * ensureStarted() refuse de demarrer quand une broche du bus audio
+         * porte un composant, mais setEngine() ne rend qu'un echec generique :
+         * l'API repondait « Plaits indisponible (tas insuffisant ?) » pour une
+         * broche occupee. Un message faux coute plus cher qu'une absence de
+         * message — on verifie donc ici, avant, pour pouvoir nommer la cause. */
+        if (n >= 0) {
+            for (int broche : { AudioEngine::PIN_BCLK, AudioEngine::PIN_LRCK, AudioEngine::PIN_DIN }) {
+                if (g_componentManager.findComponentByGpio((uint8_t)broche) != 255) {
+                    request->send(409, "application/json",
+                        String("{\"status\":\"error\",\"message\":\"GPIO ") + String(broche) +
+                        " porte un composant : le bus audio ne peut pas demarrer. "
+                        "Liberer cette broche dans la zone I/O.\"}");
+                    return;
+                }
+            }
+        }
         if (AudioEngine::setEngine(n, /*persister=*/true)) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");

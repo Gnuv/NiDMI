@@ -1,3 +1,4 @@
+#include "../config/Occupations.h"
 #include "../audio/AudioEngine.h"   // PIN_BCLK/LRCK/DIN
 #include "ComponentManager.h"
 #include "../server/WebDebugConsole.h"
@@ -202,6 +203,7 @@ void ComponentManager::reloadConfigs() {
         osc_output_all_enabled_ = prefs.getBool("osc_out_all", true);
         prefs.end();
     }
+    Occupations::rafraichir();   // les declarations peuvent avoir change
     marquer("pause");
     bool wdt = pauseRealtimeTasks();
     marquer("clearAll");
@@ -332,9 +334,13 @@ bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t mi
      * le calage observe (« phase_precedente = add-gpio:1 »). Une configuration
      * heritee ne doit pas pouvoir remettre la carte dans cet etat — d'ou le
      * refus ici, en plus du grisage cote app (/api/pins/caps declare ce bus). */
-    if (gpio == AudioEngine::PIN_BCLK || gpio == AudioEngine::PIN_LRCK || gpio == AudioEngine::PIN_DIN) {
-        Serial.printf("[ComponentManager] GPIO %d refuse : broche du bus audio (I2S)\n", gpio);
-        return false;
+    {
+        const Occupations::Qui q = Occupations::qui(gpio);
+        if (q.bus) {
+            Serial.printf("[ComponentManager] GPIO %d refuse : occupe par le bus %s (%s)\n",
+                          gpio, q.bus, q.role);
+            return false;
+        }
     }
 
     // Vérifier si le GPIO existe déjà

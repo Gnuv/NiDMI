@@ -1,3 +1,5 @@
+#include "../managers/ComponentManager.h"
+#include "../Globals.h"   // g_componentManager : les broches audio peuvent porter un composant
 #include "AudioEngine.h"
 
 #include <Arduino.h>
@@ -455,6 +457,23 @@ void entretienBoot() {
 
 bool ensureStarted() {
   if (demarre) return true;
+
+  /* L'AUTRE MOITIE DE LA REGLE.
+   *
+   * On refuse un composant sur une broche du bus audio (ComponentManager) ;
+   * il faut refuser symetriquement de DEMARRER l'audio quand un composant
+   * tient deja une de ces broches. Sans ca : poser un potentiometre sur D0
+   * pendant que l'audio dort — ce qui est legitime, la broche est alors libre
+   * — puis choisir un moteur, et l'I2S s'ouvre sur une broche qu'un capteur
+   * sonde en pull-up/pull-down. C'est exactement le blocage du §45, repris par
+   * l'autre bout. */
+  for (int broche : { PIN_BCLK, PIN_LRCK, PIN_DIN }) {
+    if (g_componentManager.findComponentByGpio((uint8_t)broche) != 255) {
+      Serial.printf("[audio] demarrage refuse : GPIO%d porte un composant. "
+                    "Le liberer dans la zone I/O pour retrouver le son.\n", broche);
+      return false;
+    }
+  }
 
   heapAvant = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
