@@ -424,6 +424,10 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         else if (genre == "touch")   { ev.type = MappingEngine::Evenement::Touch;     ev.a = a; }
         else if (genre == "ptouch")  { ev.type = MappingEngine::Evenement::PolyTouch; ev.a = a; ev.b = b; }
         else if (genre == "pgm")     { ev.type = MappingEngine::Evenement::Pgm;       ev.a = a; }
+        // Les sources d'horloge : « tick » porte l'instant dans `a`, « init »
+        // tire loadbang(). Sans elles, le banc ne pouvait pas prouver metro().
+        else if (genre == "tick")    { ev.type = MappingEngine::Evenement::Tick; ev.instant = (uint32_t)a; }
+        else if (genre == "init")    { ev.type = MappingEngine::Evenement::Init; }
         else if (genre != "capteur") {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"genre inconnu\"}");

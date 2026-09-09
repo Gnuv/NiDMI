@@ -26,6 +26,7 @@
 #include "../osc/OSCConfigLoader.h"
 #include "../utils/ComponentInitializer.h"
 #include "MuxValidator.h"
+#include "../midi/MidiRouter.h"
 #include "../Globals.h"
 #include "../components/motion/Lis3dhDef.h"
 
@@ -771,6 +772,13 @@ void ComponentManager::midiTaskLoop() {
         }
         _tempsReelEnPause = false;
         
+        /* Le battement d'horloge du script map (metro, loadbang).
+         * Ici plutot que dans la boucle principale : cette tache tourne a
+         * periode FIXE (10 ms) et ne s'est jamais bloquee, alors que la boucle
+         * l'a fait (§42). Une horloge qui derive ou s'arrete est pire que pas
+         * d'horloge du tout. */
+        g_midiRouter.battreHorloge(millis());
+
         // Envoyer les mises à jour MIDI des multiplexeurs
         mux_manager.sendMidiUpdates(midi_sender);
         

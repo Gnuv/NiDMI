@@ -261,8 +261,26 @@ void lireDeuxFiltres(const String& args, int& a, int& b) {
     b = (n >= 2 && m[1].length()) ? (int)m[1].toInt() : -1;
 }
 
-Source evaluerSource(const String& seg, const Evt& e) {
+Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
     Source non;
+
+    /* SUR UN BATTEMENT, SEULES LES SOURCES D'HORLOGE TIRENT.
+     *
+     * r(), f(), i() et les litteraux se declenchent « sur n'importe quel
+     * evenement » — c'est leur definition, et elle est juste tant que les
+     * evenements sont du MIDI. Avec un battement a 100 Hz, ces memes pipelines
+     * emettraient cent fois par seconde. Le moteur web ne s'y trompe pas : son
+     * tick() ne fait tourner QUE les pipelines a minuterie et les lectures
+     * inter-blocs, jamais tous les pipelines.
+     *
+     * Pour lire le registre au rythme qu'on choisit, on l'ecrit : le r() se met
+     * APRES l'horloge — « metro(50) : r("bouton") : ... » — ce qui a le merite
+     * de dire sa cadence dans le script. */
+    if (e.type == Evt::Tick || e.type == Evt::Init) {
+        const bool horloge = (seg == "loadbang()") || seg.startsWith("metro(");
+        if (!horloge) return non;
+    }
+
     if (estNombre(seg)) return { seg.toFloat(), true };
 
     String args;
@@ -271,6 +289,48 @@ Source evaluerSource(const String& seg, const Evt& e) {
     if (verbe(seg, "i", args)) return { roundf(valeurArg(args.length() ? args : String("0"))), true };
     // r(...) / receive(...) — lecture du registre, se declenche sur tout.
     if (verbe(seg, "r", args) || verbe(seg, "receive", args)) return { valeurArg(seg), true };
+
+    /* ── SOURCES D'HORLOGE : ce qui fait tourner un pipeline sans MIDI ────────
+     * Heritage assume du DSL, passe de « script MIDI » a script generaliste :
+     * un pipeline qui pilote du DMX ou de l'OSC n'a aucune raison d'attendre
+     * une note. La reponse est celle de Max/Pd — une source d'horloge, ecrite
+     * dans le script, pas un mecanisme cache. */
+
+    /* loadbang() — un bang unique apres un chargement.
+     * PAS pilote par le tick : le moteur web lui donne un declencheur propre
+     * (triggerLoadbang(), « after UI is ready »). On garde la meme forme, un
+     * evenement Init distinct, plutot que de le faire tirer au premier
+     * battement : sinon les deux moteurs diraient deja deux choses. */
+    if (seg == "loadbang()") {
+        /* Tire a CHAQUE Init, sans verrou. C'est la semantique du moteur web :
+         * triggerLoadbang() emet a chaque appel, et c'est l'APPELANT qui n'en
+         * fait qu'un apres le chargement. Le verrou que j'avais ajoute ici
+         * deplacait la responsabilite dans le moteur et faisait diverger les
+         * deux — le banc l'a signale au premier passage. */
+        if (e.type != Evt::Init) return non;
+        return { 1.0f, true };
+    }
+
+    // metro(ms) — un bang tous les `ms`. Comme [metro] de Max/Pd, PAS de bang
+    // immediat : le premier battement planifie, le suivant tire.
+    if (verbe(seg, "metro", args)) {
+        if (e.type != Evt::Tick) return non;
+        const long ms = (long)valeurArg(args.length() ? args : String("0"));
+        if (ms <= 0) return non;
+        if (!st.metroArme) { st.metroArme = true; st.metroProchain = e.instant + (uint32_t)ms; return non; }
+        if ((int32_t)(e.instant - st.metroProchain) < 0) return non;
+        /* Replanification : « prochain += ms », donc SANS DERIVE — et
+         * resynchronisation sur maintenant seulement si l'on a plus d'une
+         * periode de retard. C'est mot pour mot la regle du moteur web ; y
+         * mettre « instant + ms » aurait fait deriver la carte a chaque
+         * battement un peu tardif.
+         * Le rattrapage (metro(ms,catchup[,max]), qui tire plusieurs bangs dans
+         * un meme battement) n'est PAS porte : ici un pipeline ne tourne qu'une
+         * fois par appel. Divergence declaree dans le vocabulaire, pas tue. */
+        if ((int32_t)(e.instant - st.metroProchain) > (int32_t)ms) st.metroProchain = e.instant;
+        st.metroProchain += (uint32_t)ms;
+        return { 1.0f, true };
+    }
     /* raw.in() — la LECTURE DU CAPTEUR dans sa resolution native.
      *
      *   r("in")    valeur mise a l'echelle MIDI, 0..127
@@ -747,7 +807,10 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
         src.trim();
 
         if (src.length()) {
-            const Source d = evaluerSource(src, evt);
+            // L'etat du pipeline AVANT d'evaluer la source : metro() et
+            // loadbang() y tiennent leur minuterie.
+            Etat& stSrc = etats[(pi < nEtats) ? pi : nEtats - 1];
+            const Source d = evaluerSource(src, evt, stSrc);
             if (d.declenche) {
                 // « Pris en charge » seulement si la source repond au GENRE de
                 // l'evenement. Un pipeline pilote par f() ou counter() tourne
@@ -757,7 +820,8 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
 
                 // Au-dela du nombre de slots, les pipelines partagent le dernier : un
                 // script plus long garde un etat *coherent*, faute d'etre separe.
-                Etat& st = etats[(pi < nEtats) ? pi : nEtats - 1];
+                // (Deja resolu au-dessus pour metro()/loadbang().)
+                Etat& st = stSrc;
                 const bool srcCcNum = src.startsWith("ccnum.in");
                 float courant = d.valeur;
 
@@ -845,6 +909,27 @@ bool MappingEngine::executeMidiCc(const char* script,
 // le meme vocabulaire : scale, clamp, curve, sel/map, hysteresis, lp, counter…
 // Un script de capteur et un script de mapping disent desormais la meme chose.
 #ifndef NMS_BANC_HOTE
+/* Emission d'une liste de sorties. Extrait d'executerCapteur pour que le
+ * battement d'horloge emette EXACTEMENT de la meme facon — deux copies auraient
+ * fini par diverger sur un type de message. */
+static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, int n) {
+    if (!sender) return;
+    for (int i = 0; i < n; i++) {
+        const MappingEngine::Sortie& s = liste[i];
+        const uint8_t ch = (uint8_t)constrain((int)s.canal, 1, 16);
+        switch (s.type) {
+            case MappingEngine::Sortie::Note:      sender->sendNoteOn(ch, s.a, s.b);        break;
+            case MappingEngine::Sortie::NoteOff:   sender->sendNoteOff(ch, s.a, s.b);       break;
+            case MappingEngine::Sortie::Cc:        sender->sendControlChange(ch, s.a, s.b); break;
+            case MappingEngine::Sortie::Bend:      sender->sendPitchBend(ch, s.valeur14);   break;
+            case MappingEngine::Sortie::Touch:     sender->sendAftertouch(ch, s.a);         break;
+            case MappingEngine::Sortie::PolyTouch: sender->sendKeyPressure(ch, s.a, s.b);   break;
+            case MappingEngine::Sortie::Pgm:       sender->sendProgramChange(ch, s.a);      break;
+            case MappingEngine::Sortie::Print:     break;                                   // deja au journal
+        }
+    }
+}
+
 void MappingEngine::executerCapteur(const char* script, float valeur,
                                     MidiSender* sender, Etat* etat, float brut) {
     if (!script || script[0] == '\0') return;
@@ -863,21 +948,22 @@ void MappingEngine::executerCapteur(const char* script, float valeur,
     Sortie liste[MAX_SORTIES];
     bool traite = false;
     const int n = executer(script, e, liste, MAX_SORTIES, traite, etat, etat ? 1 : 0);
-    if (!sender) return;
+    emettreVers(sender, liste, n);
+}
 
-    for (int i = 0; i < n; i++) {
-        const Sortie& s = liste[i];
-        const uint8_t ch = (uint8_t)constrain((int)s.canal, 1, 16);
-        switch (s.type) {
-            case Sortie::Note:      sender->sendNoteOn(ch, s.a, s.b);        break;
-            case Sortie::NoteOff:   sender->sendNoteOff(ch, s.a, s.b);       break;
-            case Sortie::Cc:        sender->sendControlChange(ch, s.a, s.b); break;
-            case Sortie::Bend:      sender->sendPitchBend(ch, s.valeur14);   break;
-            case Sortie::Touch:     sender->sendAftertouch(ch, s.a);         break;
-            case Sortie::PolyTouch: sender->sendKeyPressure(ch, s.a, s.b);   break;
-            case Sortie::Pgm:       sender->sendProgramChange(ch, s.a);      break;
-            case Sortie::Print:     break;                                   // deja au journal
-        }
-    }
+/* Le battement d'horloge : fait tourner les pipelines qui n'attendent aucun
+ * MIDI — metro() sur Tick, loadbang() sur Init. Meme emission que pour un
+ * capteur : un script generaliste (DMX, OSC, MIDI) n'a pas a savoir d'ou vient
+ * le declencheur. */
+void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t instant,
+                           MidiSender* sender, Etat* etats, int nEtats) {
+    if (!script || script[0] == '\0') return;
+    Evenement e;
+    e.type = type;
+    e.instant = instant;
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
+    if (n > 0) emettreVers(sender, liste, n);
 }
 #endif  // NMS_BANC_HOTE

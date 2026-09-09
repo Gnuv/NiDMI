@@ -281,8 +281,24 @@ void MidiRouter::setParamsScript(const String& params) {
     }
 }
 
+void MidiRouter::battreHorloge(uint32_t maintenant) {
+    if (!scriptEntrant.length()) return;
+    /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
+     * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
+     * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
+     * en tache bloquee. */
+    if (initEnAttente) {
+        initEnAttente = false;
+        MappingEngine::battre(scriptEntrant.c_str(), MappingEngine::Evenement::Init,
+                              maintenant, this);
+    }
+    MappingEngine::battre(scriptEntrant.c_str(), MappingEngine::Evenement::Tick,
+                          maintenant, this);
+}
+
 void MidiRouter::setScriptMidi(const String& script) {
     scriptEntrant = script;
+    initEnAttente = true;          // nouveau script : son loadbang() est du
     // Le script change : l'etat par pipeline (compteur, seq, toggle, sel/map,
     // lp...) n'a plus de sens. Sans cet effacement, un counter reprend a la
     // position ou en etait le script PRECEDENT — un decalage silencieux, et

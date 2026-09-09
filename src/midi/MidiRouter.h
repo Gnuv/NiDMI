@@ -42,6 +42,17 @@ public:
     // traitement — c'est la regle du headless.
     void setScriptMidi(const String& script);
 
+    /* Le battement d'horloge du script map. Appele periodiquement par la tache
+     * temps reel : c'est lui qui fait tourner metro(), et qui envoie le Init de
+     * loadbang() apres un chargement. Sans lui, un script map ne s'executait
+     * QUE sur un MIDI entrant — donc jamais en headless si rien n'entre, et
+     * deux scripts ne pouvaient pas se parler par le registre. */
+    void battreHorloge(uint32_t maintenant);
+
+private:
+    bool initEnAttente = true;   // un loadbang() est du
+public:
+
     // Parametres du script, format "cle=valeur;cle=valeur". Un .nms lit ses
     // reglages par r("param","nom",min,max,defaut) : sans eux il retombe sur le
     // DEFAUT et parait ne rien faire — c'est ce qui rendait un bloc transpose

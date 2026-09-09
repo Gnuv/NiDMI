@@ -40,6 +40,8 @@ public:
         float   drunk    = NAN;
         float   lp       = NAN;
         float   change   = NAN;
+        uint32_t metroProchain = 0;      // date du prochain bang
+        bool     metroArme     = false;  // faux tant que le premier tick n'a pas planifie
         void reinitialiser() { *this = Etat(); }
     };
 
@@ -62,6 +64,8 @@ public:
                                 MidiSender* midi_sender, Etat* etat = nullptr,
                                 float brut = NAN);
 
+
+
     // ── Traitement d'un EVENEMENT MIDI ENTRANT ──────────────────────────────
     // execute() ci-dessus prend une seule valeur flottante : c'est le modele des
     // CAPTEURS (un potentiometre, un bouton). Un message MIDI porte plusieurs
@@ -71,12 +75,20 @@ public:
     // seule etait une simplification qui se voyait des le premier script a deux
     // pipelines.
     struct Evenement {
-        enum Type { Aucun, NoteOn, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm };
+        /* `Tick` : le battement d'horloge. C'est lui qui fait tourner les
+         * pipelines dont la source n'attend aucun MIDI — metro(), loadbang().
+         * Sans lui, un script sans note.in() ne s'executait jamais sur la
+         * carte, et deux scripts ne pouvaient pas se parler par le registre
+         * (MESURES.md §57). */
+        enum Type { Aucun, NoteOn, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm,
+                    Tick,    // battement d'horloge : fait tourner metro()
+                    Init };  // une fois apres un chargement : fait tourner loadbang()
         Type    type     = Aucun;
         uint8_t canal    = 0;    // 1..16 (0 = inconnu)
         uint8_t a        = 0;    // note | numero de CC | note (polytouch) | programme
         uint8_t b        = 0;    // velocite | valeur de CC | pression
         int16_t valeur14 = 0;    // pitch bend, -8192..8191
+        uint32_t instant = 0;    // millis() — n'a de sens que pour Tick
     };
 
     struct Sortie {
@@ -111,6 +123,14 @@ public:
     static int executer(const char* script, const Evenement& evt,
                         Sortie* sorties, int max, bool& traite,
                         Etat* etats = nullptr, int nEtats = 0);
+
+    /* Le BATTEMENT D'HORLOGE : fait tourner les pipelines qui n'attendent aucun
+     * MIDI. `Tick` (avec l'instant en millis) tire metro() ; `Init`, envoye une
+     * fois apres un chargement, tire loadbang(). C'est la reponse du langage a
+     * « que se passe-t-il quand il n'y a pas de note.in() ? » — heritage assume
+     * d'un DSL passe de script MIDI a script generaliste (DMX, OSC...). */
+    static void battre(const char* script, Evenement::Type type, uint32_t instant,
+                       MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
 
     // Efface l'etat par pipeline (toggle, counter, seq, sel/map, lp, drunk...).
     // A appeler quand le SCRIPT change : sinon un compteur repart d'ou en etait
