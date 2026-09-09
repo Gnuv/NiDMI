@@ -30,7 +30,8 @@ enum class ComponentType : uint8_t {
     IMU           = 10, // IMU (accéléromètre, gyroscope, etc.)
     MPR121        = 11, // Touch capacitif 12 canaux (Grove, I2C)
     NOISE_SAMPLER = 12, // Source signal : bruit blanc externe échantillonné sur ADC (famille SIGNAL)
-    JOYSTICK3     = 13  // Joystick 3 axes analogiques (X/Y/Z)
+    JOYSTICK3     = 13, // Joystick 3 axes analogiques (X/Y/Z)
+    DAC_I2S       = 14  // Sortie audio I2S (BCK/LRCK/DIN) : un peripherique qu'on DECLARE
     // Facilement extensible pour de nouveaux types
 };
 

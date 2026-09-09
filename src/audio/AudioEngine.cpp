@@ -1,3 +1,4 @@
+#include "../config/Occupations.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"   // g_componentManager : les broches audio peuvent porter un composant
 #include "AudioEngine.h"
@@ -458,21 +459,18 @@ void entretienBoot() {
 bool ensureStarted() {
   if (demarre) return true;
 
-  /* L'AUTRE MOITIE DE LA REGLE.
+  /* PAS DE DAC DECLARE, PAS D'AUDIO.
    *
-   * On refuse un composant sur une broche du bus audio (ComponentManager) ;
-   * il faut refuser symetriquement de DEMARRER l'audio quand un composant
-   * tient deja une de ces broches. Sans ca : poser un potentiometre sur D0
-   * pendant que l'audio dort — ce qui est legitime, la broche est alors libre
-   * — puis choisir un moteur, et l'I2S s'ouvre sur une broche qu'un capteur
-   * sonde en pull-up/pull-down. C'est exactement le blocage du §45, repris par
-   * l'autre bout. */
-  for (int broche : { PIN_BCLK, PIN_LRCK, PIN_DIN }) {
-    if (g_componentManager.findComponentByGpio((uint8_t)broche) != 255) {
-      Serial.printf("[audio] demarrage refuse : GPIO%d porte un composant. "
-                    "Le liberer dans la zone I/O pour retrouver le son.\n", broche);
-      return false;
-    }
+   * Regle posee par l'utilisateur, et c'est la bonne : la carte decrit ce qui
+   * est REELLEMENT branche. Tant que le DAC n'est pas declare dans l'inventaire
+   * I/O, ses trois broches appartiennent a qui veut — un bouton, un
+   * potentiometre — et ouvrir l'I2S dessus casserait ce qui s'y trouve. Dans
+   * l'autre sens, un capteur qui sonde le BCK bloque la carte (MESURES.md §45).
+   * Declarer le DAC est donc le geste qui autorise le son. */
+  if (!Occupations::audioDeclare()) {
+    Serial.println("[audio] demarrage refuse : aucun DAC declare. "
+                   "Le declarer dans la zone I/O (broche D0) pour activer le son.");
+    return false;
   }
 
   heapAvant = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);

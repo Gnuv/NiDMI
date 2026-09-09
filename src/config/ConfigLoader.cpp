@@ -14,6 +14,7 @@
 #include "../utils/JSONParser.h"
 #include "../utils/PinMapper.h"
 #include "../utils/ComponentInitializer.h"  // Pour setupGpio
+#include "../managers/complex/ComplexHandler.h"
 #include "../managers/complex/ComplexHandlerRegistry.h"
 #include "../managers/complex/joystick/JoystickHandler.h"
 #include "../managers/complex/joystick3/Joystick3Handler.h"
@@ -272,34 +273,39 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
             continue;
         }
         
-        // Joystick : enregistrer le GPIO Y dans le handler (chargement NVS)
-        if (type == ComponentType::JOYSTICK) {
-            int joyYPin = JSONParser::extractInt(pinConfig, "joyYPin", 255);
-            if (joyYPin < 255) {
-                ComplexHandler* handler = ComplexHandlerRegistry::getHandler("joystick");
-                if (handler) {
-                    JoystickHandler* jh = static_cast<JoystickHandler*>(handler);
-                    jh->registerYAxis(gpio, (uint8_t)joyYPin);
+        /* COMPOSANTS A BROCHES SUPPLEMENTAIRES : restauration GENERIQUE.
+         *
+         * Ce passage etait ecrit A LA MAIN, type par type — un bloc pour le
+         * joystick, un pour le joystick 3 axes. Tout nouveau composant a
+         * broches multiples n'etait donc PAS restaure au demarrage : constate
+         * avec le DAC, dont la declaration disparaissait au redemarrage (la
+         * memoire le contenait, /api/pins/caps ne le voyait plus, et le son
+         * restait coupe). Un cas particulier de plus par composant, c'est
+         * exactement ce qu'il fallait cesser.
+         *
+         * On reconstruit donc les donnees depuis la configuration rangee et on
+         * les rend au handler du role, quel qu'il soit. Les handlers sont
+         * idempotents : reappeler addComponent met a jour l'existant. */
+        if (def->additionalPinCount > 0 && def->additionalPins) {
+            ComplexHandler* handler = ComplexHandlerRegistry::getHandler(role.c_str());
+            if (handler) {
+                ComplexComponentData data;
+                data.def = def;
+                data.pinLabel = pinLabelCStr;
+                data.mainPinGpio = gpio;
+                data.additionalPinCount = def->additionalPinCount;
+                data.additionalPins =
+                    new ComplexComponentData::AdditionalPinValue[data.additionalPinCount];
+                for (uint8_t i = 0; i < def->additionalPinCount && i < def->additionalPinsCapacity; i++) {
+                    const AdditionalPinDef& ap = def->additionalPins[i];
+                    data.additionalPins[i].id = ap.id;
+                    data.additionalPins[i].gpio =
+                        (uint8_t)JSONParser::extractInt(pinConfig, ap.id, ap.defaultValue);
                 }
-            }
-        }
-
-        // Joystick 3 axes : enregistrer les GPIO Y et Z dans le handler (chargement NVS)
-        if (type == ComponentType::JOYSTICK3) {
-            int joyYPin = JSONParser::extractInt(pinConfig, "joyYPin", 255);
-            int joyZPin = JSONParser::extractInt(pinConfig, "joyZPin", 255);
-            Serial.printf("[ConfigLoader] Joystick3 pins: X=GPIO%d Y=GPIO%d Z=GPIO%d\n",
-                         gpio, joyYPin, joyZPin);
-            if (joyYPin < 255 && joyZPin < 255) {
-                ComplexHandler* handler = ComplexHandlerRegistry::getHandler("joystick3");
-                if (handler) {
-                    Joystick3Handler* jh = static_cast<Joystick3Handler*>(handler);
-                    jh->registerAxes(gpio, (uint8_t)joyYPin, (uint8_t)joyZPin);
-                } else {
-                    Serial.println("[ConfigLoader] ERREUR: handler 'joystick3' introuvable — axes Y/Z non enregistrés");
-                }
-            } else {
-                Serial.println("[ConfigLoader] ERREUR: joyYPin/joyZPin absents ou invalides en NVS — le composant ne sera pas traité");
+                if (!handler->addComponent(data))
+                    Serial.printf("[ConfigLoader] %s sur %s : le handler a refuse la restauration\n",
+                                  role.c_str(), pinLabelCStr);
+                delete[] data.additionalPins;
             }
         }
 

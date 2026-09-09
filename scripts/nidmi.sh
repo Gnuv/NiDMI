@@ -360,92 +360,19 @@ sync_files() {
     rm -rf $ARDUINO_LIB_DIR/src/* 2>/dev/null || true
     
     # Créer le dossier src/ et tous les sous-dossiers
-    mkdir -p $ARDUINO_LIB_DIR/src
-    mkdir -p $ARDUINO_LIB_DIR/src/{api,audio,components,components/basic,components/multiplexer,components/distance,components/environment,components/motion,components/color,components/interface,components/actuator,components/display,components/signal,config,hardware,managers,managers/complex,managers/complex/multiplexer,managers/complex/joystick,managers/complex/joystick3,mapping,midi,midi/handlers,network,osc,processors,server,ui,utils}
-    
-    # Copier les fichiers de la racine src/
-    cp -f $REPO_DIR/src/nidmi_config.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/nidmi_fw_version.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/nidmi_debug.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/Globals.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/NiDMI.h $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/NiDMI.cpp $ARDUINO_LIB_DIR/src/ 2>/dev/null || true
-    
-    # Copier les sous-dossiers
-    cp -f $REPO_DIR/src/api/*.cpp $ARDUINO_LIB_DIR/src/api/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/api/*.h $ARDUINO_LIB_DIR/src/api/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/audio/*.cpp $ARDUINO_LIB_DIR/src/audio/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/audio/*.h $ARDUINO_LIB_DIR/src/audio/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/*.h $ARDUINO_LIB_DIR/src/components/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/*.cpp $ARDUINO_LIB_DIR/src/components/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/basic/*.h $ARDUINO_LIB_DIR/src/components/basic/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/basic/*.cpp $ARDUINO_LIB_DIR/src/components/basic/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/multiplexer/*.h $ARDUINO_LIB_DIR/src/components/multiplexer/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/multiplexer/*.cpp $ARDUINO_LIB_DIR/src/components/multiplexer/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/distance/*.h $ARDUINO_LIB_DIR/src/components/distance/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/distance/*.cpp $ARDUINO_LIB_DIR/src/components/distance/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/environment/*.h $ARDUINO_LIB_DIR/src/components/environment/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/environment/*.cpp $ARDUINO_LIB_DIR/src/components/environment/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/motion/*.h $ARDUINO_LIB_DIR/src/components/motion/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/motion/*.cpp $ARDUINO_LIB_DIR/src/components/motion/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/color/*.h $ARDUINO_LIB_DIR/src/components/color/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/color/*.cpp $ARDUINO_LIB_DIR/src/components/color/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/interface/*.h $ARDUINO_LIB_DIR/src/components/interface/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/interface/*.cpp $ARDUINO_LIB_DIR/src/components/interface/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/actuator/*.h $ARDUINO_LIB_DIR/src/components/actuator/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/actuator/*.cpp $ARDUINO_LIB_DIR/src/components/actuator/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/display/*.h $ARDUINO_LIB_DIR/src/components/display/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/display/*.cpp $ARDUINO_LIB_DIR/src/components/display/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/signal/*.h $ARDUINO_LIB_DIR/src/components/signal/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/components/signal/*.cpp $ARDUINO_LIB_DIR/src/components/signal/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/config/*.cpp $ARDUINO_LIB_DIR/src/config/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/config/*.h $ARDUINO_LIB_DIR/src/config/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/hardware/*.cpp $ARDUINO_LIB_DIR/src/hardware/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/hardware/*.h $ARDUINO_LIB_DIR/src/hardware/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/managers/*.cpp $ARDUINO_LIB_DIR/src/managers/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/managers/*.h $ARDUINO_LIB_DIR/src/managers/ 2>/dev/null || true
-    # Copier les sous-dossiers de managers (complex, etc.)
-    if [ -d "$REPO_DIR/src/managers/complex" ]; then
-        cp -f $REPO_DIR/src/managers/complex/*.cpp $ARDUINO_LIB_DIR/src/managers/complex/ 2>/dev/null || true
-        cp -f $REPO_DIR/src/managers/complex/*.h $ARDUINO_LIB_DIR/src/managers/complex/ 2>/dev/null || true
-        if [ -d "$REPO_DIR/src/managers/complex/multiplexer" ]; then
-            cp -f $REPO_DIR/src/managers/complex/multiplexer/*.cpp $ARDUINO_LIB_DIR/src/managers/complex/multiplexer/ 2>/dev/null || true
-            cp -f $REPO_DIR/src/managers/complex/multiplexer/*.h $ARDUINO_LIB_DIR/src/managers/complex/multiplexer/ 2>/dev/null || true
-        fi
-        if [ -d "$REPO_DIR/src/managers/complex/joystick" ]; then
-            cp -f $REPO_DIR/src/managers/complex/joystick/*.cpp $ARDUINO_LIB_DIR/src/managers/complex/joystick/ 2>/dev/null || true
-            cp -f $REPO_DIR/src/managers/complex/joystick/*.h $ARDUINO_LIB_DIR/src/managers/complex/joystick/ 2>/dev/null || true
-        fi
-        if [ -d "$REPO_DIR/src/managers/complex/joystick3" ]; then
-            cp -f $REPO_DIR/src/managers/complex/joystick3/*.cpp $ARDUINO_LIB_DIR/src/managers/complex/joystick3/ 2>/dev/null || true
-            cp -f $REPO_DIR/src/managers/complex/joystick3/*.h $ARDUINO_LIB_DIR/src/managers/complex/joystick3/ 2>/dev/null || true
-        fi
-    fi
-    cp -f $REPO_DIR/src/midi/*.cpp $ARDUINO_LIB_DIR/src/midi/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/midi/*.h $ARDUINO_LIB_DIR/src/midi/ 2>/dev/null || true
-    # Copier les handlers MIDI
-    if [ -d "$REPO_DIR/src/midi/handlers" ]; then
-        cp -f $REPO_DIR/src/midi/handlers/*.cpp $ARDUINO_LIB_DIR/src/midi/handlers/ 2>/dev/null || true
-        cp -f $REPO_DIR/src/midi/handlers/*.h $ARDUINO_LIB_DIR/src/midi/handlers/ 2>/dev/null || true
-    fi
-    # Copier le moteur de mapping
-    if [ -d "$REPO_DIR/src/mapping" ]; then
-        cp -f $REPO_DIR/src/mapping/*.cpp $ARDUINO_LIB_DIR/src/mapping/ 2>/dev/null || true
-        cp -f $REPO_DIR/src/mapping/*.h $ARDUINO_LIB_DIR/src/mapping/ 2>/dev/null || true
-    fi
-    cp -f $REPO_DIR/src/network/*.cpp $ARDUINO_LIB_DIR/src/network/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/network/*.h $ARDUINO_LIB_DIR/src/network/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/osc/*.cpp $ARDUINO_LIB_DIR/src/osc/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/osc/*.h $ARDUINO_LIB_DIR/src/osc/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/processors/*.cpp $ARDUINO_LIB_DIR/src/processors/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/processors/*.h $ARDUINO_LIB_DIR/src/processors/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/server/*.cpp $ARDUINO_LIB_DIR/src/server/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/server/*.h $ARDUINO_LIB_DIR/src/server/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/ui/*.cpp $ARDUINO_LIB_DIR/src/ui/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/ui/*.h $ARDUINO_LIB_DIR/src/ui/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/utils/*.cpp $ARDUINO_LIB_DIR/src/utils/ 2>/dev/null || true
-    cp -f $REPO_DIR/src/utils/*.h $ARDUINO_LIB_DIR/src/utils/ 2>/dev/null || true
-    
+    # ── Copie RECURSIVE de src/ ────────────────────────────────────────────
+    # Avant : une liste de dossiers ecrite a la main (mkdir enumerant 30
+    # chemins, puis un « cp » par dossier). Tout NOUVEAU dossier etait donc
+    # invisible au build, EN SILENCE — vecu en ajoutant src/components/audio et
+    # src/managers/complex/dac : la compilation echouait sur un « No such file
+    # or directory » pointant la bibliotheque Arduino, pas le depot, ce qui
+    # envoie chercher au mauvais endroit.
+    # Une copie recursive n'a pas de liste a tenir a jour.
+    mkdir -p "$ARDUINO_LIB_DIR/src"
+    ( cd "$REPO_DIR/src" && find . -type d -exec mkdir -p "$ARDUINO_LIB_DIR/src/{}" \; )
+    ( cd "$REPO_DIR/src" && find . -type f \( -name '*.h' -o -name '*.cpp' -o -name '*.c' -o -name '*.hpp' \) \
+        -exec cp -f {} "$ARDUINO_LIB_DIR/src/{}" \; )
+
     # Copier les exemples
     mkdir -p $ARDUINO_LIB_DIR/examples
     cp -rf $REPO_DIR/examples/* $ARDUINO_LIB_DIR/examples/ 2>/dev/null || true

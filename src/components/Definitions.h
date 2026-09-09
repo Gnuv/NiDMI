@@ -22,6 +22,7 @@
 #include "basic/VelostatDef.h"
 #include "basic/TouchDef.h"
 #include "basic/JoystickDef.h"
+#include "audio/DacI2sDef.h"
 #include "basic/Joystick3Def.h"
 
 // === FAMILLE MULTIPLEXER ===

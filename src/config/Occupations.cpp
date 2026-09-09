@@ -23,16 +23,14 @@ bool cleExiste(Preferences& p, const char* cle) { return p.isKey(cle); }
 namespace Occupations {
 
 void rafraichir() {
+    /* L'audio occupe ses broches quand le DAC est DÉCLARÉ — plus quand un
+     * moteur se trouve mémorisé. C'est ce que l'utilisateur voit et manipule
+     * dans l'inventaire, et c'est la même règle que pour tout le reste : pas de
+     * déclaration, pas d'occupation, et les broches sont libres. */
     {
-        Preferences p;
-        if (p.begin("nidmi-audio", true)) {
-            const String choix = p.getString("moteur", "");
-            p.end();
-            s_audio = choix.length() && choix != "-1";
-        }
+        ComplexHandler* h = ComplexHandlerRegistry::getHandler("dac_i2s");
+        s_audio = h && h->getComponentCount() > 0;
     }
-    /* L'I2S peut aussi tourner sans rien de mémorisé (choix fait à chaud). */
-    if (AudioEngine::isStarted()) s_audio = true;
 
     Preferences p;
     if (p.begin("nidmi", true)) {

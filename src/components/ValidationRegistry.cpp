@@ -1,3 +1,4 @@
+#include "../audio/AudioEngine.h"   // broches imposees du bus I2S
 #include "ValidationRegistry.h"
 #include "ComponentRegistry.h"
 #include "../utils/PinMapper.h"
@@ -308,6 +309,30 @@ bool ValidationRegistry::hasComplexValidator(const char* componentId) {
     return false;
 }
 
+/* Le DAC I2S : ses trois broches sont imposees par le peripherique, donc la
+ * validation se resume a verifier qu'on lui a bien donne celles-la. Rien de
+ * particulier au-dela : c'est un composant comme un autre, avec des broches
+ * supplementaires (MESURES.md §47). */
+static ValidationResult validateDacComplex(const ComplexComponentData& data) {
+    ValidationResult result;
+    if (!data.def) return ValidationResult(false, "Définition du composant manquante");
+    if (data.mainPinGpio != (uint8_t)AudioEngine::PIN_BCLK)
+        return ValidationResult(false, "Le DAC se déclare sur le BCK (GPIO "
+                                       + String(AudioEngine::PIN_BCLK) + ")");
+    uint8_t lrck = 255, din = 255;
+    for (uint8_t i = 0; i < data.additionalPinCount; i++) {
+        const char* id = data.additionalPins[i].id;
+        if (!id) continue;
+        if      (!strcmp(id, "dacLrck")) lrck = data.additionalPins[i].gpio;
+        else if (!strcmp(id, "dacDin"))  din  = data.additionalPins[i].gpio;
+    }
+    if (lrck != (uint8_t)AudioEngine::PIN_LRCK)
+        return ValidationResult(false, "LRCK doit être le GPIO " + String(AudioEngine::PIN_LRCK));
+    if (din != (uint8_t)AudioEngine::PIN_DIN)
+        return ValidationResult(false, "DIN doit être le GPIO " + String(AudioEngine::PIN_DIN));
+    return result;
+}
+
 void ValidationRegistry::init() {
     // Note: Les composants simples (potentiomètre, bouton, LED, velostat) sont maintenant
     // validés dynamiquement via ComponentDefinition::pinType dans validate().
@@ -322,4 +347,5 @@ void ValidationRegistry::init() {
     registerComplexValidator("hc4051", validateMuxComplex);
     registerComplexValidator("joystick", validateJoystickComplex);
     registerComplexValidator("joystick3", validateJoystick3Complex);
+    registerComplexValidator("dac_i2s", validateDacComplex);
 }

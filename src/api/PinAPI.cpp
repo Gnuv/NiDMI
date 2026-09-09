@@ -499,8 +499,33 @@ void setupPinAPI(AsyncWebServer& server) {
          * part tel quel dans l'editeur, qui le rend copiable. */
         {
             Occupations::rafraichir();
-            const Occupations::Qui q = Occupations::qui(sigGpio);
-            if (!q.bus && Occupations::tenuCommeSupplementaire(sigGpio)) {
+            /* SA PROPRE BROCHE reste modifiable.
+             *
+             * Les controles ci-dessous portent sur le fait de PRENDRE une broche
+             * a quelqu'un d'autre. Rejouer la configuration de son propre
+             * composant — changer un script, un nom, une broche supplementaire —
+             * n'est pas une prise. Sans cette exemption, declarer le DAC le
+             * rendait aussitot immodifiable : « GPIO 1 est occupe par le bus
+             * audio (bck) », alors que c'est lui qui l'occupe.
+             *
+             * Changer de ROLE sur une broche occupee reste refuse : il faut
+             * supprimer d'abord, pour que le peripherique libere proprement ses
+             * broches supplementaires. */
+            bool memeComposant = false;
+            {
+                Preferences lecture;
+                if (lecture.begin("nidmi", true)) {
+                    const String cle = "pin_" + pinLabel;
+                    const String ancien = lecture.getString(cle.c_str(), "");
+                    lecture.end();
+                    if (ancien.length())
+                        memeComposant = (JSONParser::extractStr(ancien, "role", "\n") == role);
+                }
+            }
+            const Occupations::Qui q = memeComposant ? Occupations::Qui{nullptr, nullptr}
+                                                     : Occupations::qui(sigGpio);
+            if (memeComposant) { /* rien a verifier : c'est sa broche */ }
+            else if (!q.bus && Occupations::tenuCommeSupplementaire(sigGpio)) {
                 request->send(409, "application/json",
                     String("{\"status\":\"error\",\"message\":\"GPIO ") + String(sigGpio) +
                     " est deja une broche d'un autre composant (axe, ligne d'adresse...). "
@@ -743,7 +768,27 @@ void setupPinAPI(AsyncWebServer& server) {
                 if (request->hasParam(ap.id, true)) {
                     g = (uint8_t)request->getParam(ap.id, true)->value().toInt();
                 } else if (!ap.optional) {
-                    g = Occupations::premiereLibre(ap.pinType, sigGpio);
+                    /* Une definition qui NOMME sa broche par defaut decrit un
+                     * peripherique cable en dur — le LRCK et le DIN d'un DAC I2S
+                     * ne sont pas negociables. On respecte donc ce choix quand la
+                     * broche est libre, et on ne cherche ailleurs que sinon. Regle
+                     * generale : pas un cas particulier pour l'audio. */
+                    if (ap.defaultValue != 255) {
+                        /* La definition NOMME cette broche : c'est une contrainte
+                         * materielle (le LRCK d'un DAC I2S n'est pas negociable),
+                         * pas une preference. Si elle est prise, on REFUSE — en
+                         * choisir une autre donnerait un peripherique muet. */
+                        if (!Occupations::libre(ap.defaultValue)) {
+                            request->send(409, "application/json",
+                                String("{\"status\":\"error\",\"message\":\"") + def->displayName +
+                                " exige le GPIO " + String(ap.defaultValue) + " pour « " + ap.displayName +
+                                " », et cette broche est deja prise. La liberer d'abord.\"}");
+                            return;
+                        }
+                        g = ap.defaultValue;
+                    } else {
+                        g = Occupations::premiereLibre(ap.pinType, sigGpio);
+                    }
                     if (g == 255) {
                         request->send(409, "application/json",
                             String("{\"status\":\"error\",\"message\":\"") + def->displayName +
@@ -792,24 +837,15 @@ void setupPinAPI(AsyncWebServer& server) {
             return;
         }
         
-        Preferences preferences;
-        preferences.begin("nidmi", false);
-        String key = "pin_" + pinLabel;
-        size_t written = preferences.putString(key.c_str(), json);
-        preferences.end();
-
-        if (written == 0) {
-            Serial.printf("[PinAPI] ERREUR NVS pour %s\n", pinLabel.c_str());
-        }
-
-        /* Pas de nidmi_requestReloadPins() ICI : il y en a deja un a la fin de
-         * ce meme gestionnaire, present depuis l'origine (juste avant le
-         * request->send). J'en avais ajoute un second en croyant qu'il
-         * manquait — ma recherche s'etait arretee 200 lignes trop tot, avant
-         * le bloc des composants a broches multiples. Une recherche BORNEE ne
-         * prouve pas une absence : deuxieme fois dans cette session. */
-        
-        /* Si additionalPins présent, utiliser le handler générique pour ce type de composant */
+        /* VALIDER ET ENREGISTRER LE COMPOSANT AVANT D'ECRIRE EN MEMOIRE.
+         *
+         * Cet ensemble se trouvait APRES le putString : une configuration
+         * refusee par le validateur etait deja rangee en NVS, et la carte se
+         * retrouvait avec une broche qu'elle ne peut pas charger. Constate en
+         * changeant le LRCK du DAC : reponse 400 « LRCK doit etre le GPIO 2 »,
+         * et pourtant dacLrck valait 5 en memoire, DAC plus declare, son
+         * coupe. C'est l'ecart qu'on elimine partout ailleurs : la memoire ne
+         * doit JAMAIS contenir ce que la carte refuse d'executer. */
         if(hasAdditionalPins && def) {
             /* Obtenir le handler pour ce type de composant */
             ComplexHandler* handler = ComplexHandlerRegistry::getHandler(role.c_str());
@@ -933,6 +969,25 @@ void setupPinAPI(AsyncWebServer& server) {
                 if(data.midiParams) delete[] data.midiParams;
             }
         }
+
+        Preferences preferences;
+        preferences.begin("nidmi", false);
+        String key = "pin_" + pinLabel;
+        size_t written = preferences.putString(key.c_str(), json);
+        preferences.end();
+
+        if (written == 0) {
+            Serial.printf("[PinAPI] ERREUR NVS pour %s\n", pinLabel.c_str());
+        }
+
+        /* Pas de nidmi_requestReloadPins() ICI : il y en a deja un a la fin de
+         * ce meme gestionnaire, present depuis l'origine (juste avant le
+         * request->send). J'en avais ajoute un second en croyant qu'il
+         * manquait — ma recherche s'etait arretee 200 lignes trop tot, avant
+         * le bloc des composants a broches multiples. Une recherche BORNEE ne
+         * prouve pas une absence : deuxieme fois dans cette session. */
+        
+        /* Si additionalPins présent, utiliser le handler générique pour ce type de composant */
         
         /* Mettre à jour ConfigCache */
         g_configCache.setConfigClean(pinLabel, json);

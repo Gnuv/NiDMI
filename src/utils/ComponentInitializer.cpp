@@ -363,6 +363,15 @@ void ComponentInitializer::setupGpio(uint8_t gpio, ComponentType type, Component
     // touch-CAPABLE (ex. D2/GPIO3 sur S3) peut très bien être configurée comme un
     // BOUTON classique — dans ce cas pinMode(INPUT_PULLUP/PULLDOWN) doit s'appliquer
     // normalement, sinon aucun pull n'est jamais activé et la pin reste flottante.
+    /* Le DAC : on ne touche a AUCUNE de ses broches.
+     *
+     * C'est le peripherique I2S qui les configure (i2s.setPins). Y passer un
+     * pinMode — meme un INPUT anodin — les fait basculer de mux et prive l'I2S
+     * de son horloge de bit : le DMA ne se vide plus et une tache y reste pour
+     * toujours (MESURES.md §19 et §45). La regle « ne jamais sonder le BCK »
+     * vaut ici aussi. */
+    if (type == ComponentType::DAC_I2S) return;
+
     bool is_touch_type = (type == ComponentType::TOUCH);
 
     if (is_touch_type) {

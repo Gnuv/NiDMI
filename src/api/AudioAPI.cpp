@@ -1,3 +1,4 @@
+#include "../config/Occupations.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
 #include "APICommon.h"
@@ -96,17 +97,17 @@ void setupAudioAPI(AsyncWebServer& server) {
          * l'API repondait « Plaits indisponible (tas insuffisant ?) » pour une
          * broche occupee. Un message faux coute plus cher qu'une absence de
          * message — on verifie donc ici, avant, pour pouvoir nommer la cause. */
-        if (n >= 0) {
-            for (int broche : { AudioEngine::PIN_BCLK, AudioEngine::PIN_LRCK, AudioEngine::PIN_DIN }) {
-                if (g_componentManager.findComponentByGpio((uint8_t)broche) != 255) {
-                    request->send(409, "application/json",
-                        String("{\"status\":\"error\",\"message\":\"GPIO ") + String(broche) +
-                        " porte un composant : le bus audio ne peut pas demarrer. "
-                        "Liberer cette broche dans la zone I/O.\"}");
-                    return;
-                }
-            }
+        if (n >= 0 && !Occupations::audioDeclare()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"Aucun DAC declare : le son est desactive. "
+                "Declarer « DAC audio (I2S) » sur la broche D0 dans la zone I/O.\"}");
+            return;
         }
+        /* Plus de garde « une broche audio porte un composant » ici : une fois le
+         * DAC declare, /api/pins/set refuse tout autre composant sur ses trois
+         * broches, donc le seul composant qui peut s'y trouver est le DAC
+         * lui-meme — et la garde se declenchait justement sur lui. La
+         * declaration ci-dessus est la condition, et elle suffit. */
         if (AudioEngine::setEngine(n, /*persister=*/true)) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");
