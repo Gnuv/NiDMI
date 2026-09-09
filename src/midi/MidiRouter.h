@@ -53,6 +53,12 @@ public:
      * deux scripts ne pouvaient pas se parler par le registre. */
     void battreHorloge(uint32_t maintenant);
 
+    /* Un message OSC entrant, offert aux QUATRE emplacements. Contrairement au
+     * CC, ils ne sont pas montes en chaine ici : un message OSC n'est pas
+     * transforme de proche en proche, il est ECOUTE — chaque script decide seul
+     * s'il repond a cette adresse. */
+    void recevoirOsc(const char* adresse, float valeur);
+
 
     // Parametres du script, format "cle=valeur;cle=valeur". Un .nms lit ses
     // reglages par r("param","nom",min,max,defaut) : sans eux il retombe sur le

@@ -102,6 +102,12 @@ void ComponentManager::begin(MidiSender* sender) {
             
             // Ensuite, router les messages OSC vers les LEDs
             LedProcessor::handleOscMessage(configs, component_count, address, value, arg_string);
+
+            /* Enfin, les SCRIPTS : osc.in() ecoute ici. Le message traverse les
+             * quatre emplacements map, chacun libre d'y repondre ou non.
+             * Les broches, elles, sont pilotees par leur broche — comme pour le
+             * MIDI entrant, qui va aux emplacements et non aux broches. */
+            g_midiRouter.recevoirOsc(address.c_str(), value);
         }
     );
     

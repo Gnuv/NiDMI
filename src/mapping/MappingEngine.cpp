@@ -336,6 +336,20 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
 
     String args;
     // f(x) / i(x) — une constante, ou une lecture. Se declenche sur tout.
+    /* osc.in("/adresse") — la source qui repond a un message OSC entrant.
+     * Correspondance EXACTE ou par PREFIXE DE SEGMENT : "/x" repond a "/x" et
+     * a "/x/y", mais pas a "/xy". La valeur qui entre dans le pipeline est le
+     * premier argument du message. */
+    if (verbe(seg, "osc.in", args)) {
+        String adr = args; adr.trim();
+        if (adr.length() >= 2 && (adr[0] == '"' || adr[0] == '\''))
+            adr = adr.substring(1, adr.length() - 1);
+        if (e.type != Evt::Osc || !adr.length()) return non;
+        const String recue = String(e.adresse);
+        const String prefixe = adr + "/";
+        if (recue == adr || recue.startsWith(prefixe.c_str())) return { e.reel, true };
+        return non;
+    }
     if (verbe(seg, "f", args)) return { valeurArg(args.length() ? args : String("0")), true };
     if (verbe(seg, "i", args)) return { roundf(valeurArg(args.length() ? args : String("0"))), true };
     // r(...) / receive(...) — lecture du registre, se declenche sur tout.
@@ -1383,6 +1397,19 @@ void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t in
     Evenement e;
     e.type = type;
     e.instant = instant;                  // l'horloge est posee par executer()
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
+    if (n > 0) emettreVers(sender, liste, n);
+}
+
+void MappingEngine::battreOsc(const char* script, const char* adresse, float valeur,
+                              MidiSender* sender, Etat* etats, int nEtats) {
+    if (!script || script[0] == '\0' || !adresse) return;
+    Evenement e;
+    e.type = Evenement::Osc;
+    e.reel = valeur;
+    snprintf(e.adresse, sizeof e.adresse, "%s", adresse);
     Sortie liste[MAX_SORTIES];
     bool traite = false;
     const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);

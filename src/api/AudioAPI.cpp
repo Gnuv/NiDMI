@@ -475,6 +475,14 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         // tire loadbang(). Sans elles, le banc ne pouvait pas prouver metro().
         else if (genre == "tick")    { ev.type = MappingEngine::Evenement::Tick; ev.instant = (uint32_t)a; }
         else if (genre == "init")    { ev.type = MappingEngine::Evenement::Init; }
+        /* « osc » : un message OSC entrant, pour eprouver osc.in(). L'adresse
+         * arrive en clair ; le premier argument est lu en FLOTTANT, un OSC ne
+         * comptant pas en entiers de 0 a 127. */
+        else if (genre == "osc") {
+            ev.type = MappingEngine::Evenement::Osc;
+            ev.reel = par("a").toFloat();
+            snprintf(ev.adresse, sizeof ev.adresse, "%s", par("adresse").c_str());
+        }
         else if (genre != "capteur") {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"genre inconnu\"}");

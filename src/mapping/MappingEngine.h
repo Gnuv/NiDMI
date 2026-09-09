@@ -84,6 +84,9 @@ public:
     // donc une LISTE, comme dans le moteur web (outEvents) : n'en garder qu'une
     // seule etait une simplification qui se voyait des le premier script a deux
     // pipelines.
+    static const int MAX_ADRESSE_OSC = 40;
+    static const int MAX_ARGS_OSC_SUP = 3;   // en plus de `reel`, la valeur courante
+
     struct Evenement {
         /* `Tick` : le battement d'horloge. C'est lui qui fait tourner les
          * pipelines dont la source n'attend aucun MIDI — metro(), loadbang().
@@ -92,23 +95,26 @@ public:
          * (MESURES.md §57). */
         enum Type { Aucun, NoteOn, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm,
                     Tick,    // battement d'horloge : fait tourner metro()
-                    Init };  // une fois apres un chargement : fait tourner loadbang()
+                    Init,    // une fois apres un chargement : fait tourner loadbang()
+                    Osc };   // un message OSC entrant : fait tourner osc.in()
         Type    type     = Aucun;
         uint8_t canal    = 0;    // 1..16 (0 = inconnu)
         uint8_t a        = 0;    // note | numero de CC | note (polytouch) | programme
         uint8_t b        = 0;    // velocite | valeur de CC | pression
         int16_t valeur14 = 0;    // pitch bend, -8192..8191
+        /* OSC entrant : l'adresse, et le PREMIER argument. Le moteur de
+         * reference ne donne au pipeline que celui-la ; les suivants ne sont
+         * pas adressables, faute de syntaxe pour les nommer. */
+        char    adresse[MAX_ADRESSE_OSC] = {0};
+        float   reel     = 0;
         uint32_t instant = 0;    // millis() — n'a de sens que pour Tick
     };
 
-    /* Longueur d'une adresse OSC portee par une sortie. Choisie sur MESURE :
+    /* Longueur d'une adresse OSC. Choisie sur MESURE :
      * la tache MIDI garde 6204 octets de pile libres, et un tableau de seize
      * sorties elargi lui en coute environ 750. « /composition/piste/3/volume »
      * tient dans 40. Au-dela, le message est REFUSE — jamais tronque, sans quoi
      * il partirait vers une autre adresse que celle qu'on a ecrite. */
-    static const int MAX_ADRESSE_OSC = 40;
-    static const int MAX_ARGS_OSC_SUP = 3;   // en plus de `reel`, la valeur courante
-
     struct Sortie {
         enum Type { Note, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm, Print, Osc };
         Type    type     = Note;
@@ -165,6 +171,14 @@ public:
      * d'un DSL passe de script MIDI a script generaliste (DMX, OSC...). */
     static void battre(const char* script, Evenement::Type type, uint32_t instant,
                        MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
+
+    /* Un message OSC ENTRANT : fait tourner osc.in(). Meme office que battre()
+     * pour l'horloge — le moteur fabrique l'evenement, execute et emet. Un
+     * evenement OSC n'a pas de PASSAGE : rien ne ressort si aucun pipeline ne
+     * l'ecoute, contrairement a un message MIDI qu'un script ne doit pas
+     * avaler. C'est le moteur de reference qui en decide ainsi. */
+    static void battreOsc(const char* script, const char* adresse, float valeur,
+                          MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
 
     /* Les VERBES DE TEMPS — del(), et bientot makenote(), lag(), ramp() — ne
      * rendent pas leur valeur tout de suite : ils la mettent de cote et l'aval

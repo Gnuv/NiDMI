@@ -317,6 +317,15 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
     }
 }
 
+void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
+    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+        Emplacement& em = emplacements[e];
+        if (!em.contenu.length()) continue;
+        MappingEngine::battreOsc(em.contenu.c_str(), adresse, valeur, this,
+                                 em.etats, MappingEngine::MAX_PIPELINES_SCRIPT);
+    }
+}
+
 // ── Script nomme : contenu dans LittleFS, nom en NVS ───────────────────────
 namespace {
 constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
