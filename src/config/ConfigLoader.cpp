@@ -14,6 +14,7 @@
 #include "../utils/JSONParser.h"
 #include "../utils/PinMapper.h"
 #include "../utils/ComponentInitializer.h"  // Pour setupGpio
+#include "../mapping/ScriptStore.h"
 #include "../managers/complex/ComplexHandler.h"
 #include "../managers/complex/ComplexHandlerRegistry.h"
 #include "../managers/complex/joystick/JoystickHandler.h"
@@ -367,7 +368,24 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                          * broche), verifiee a l'ecriture par PinAPI. Le remede de fond
                          * — le script devient un fichier de mapfs et la configuration
                          * n'en garde que le nom — est le point 2 du §9.3. */
-                        String script = JSONParser::extractStr(pinConfig, "mappingScript", "");
+                        /* Le NOM d'abord : s'il est renseigne, le contenu vient
+                         * du fichier et l'inline eventuel est ignore. Un seul
+                         * endroit fait foi, jamais deux. */
+                        String script;
+                        const String nomFichier = JSONParser::extractStr(pinConfig, "scriptNom", "");
+                        if (nomFichier.length()) {
+                            strncpy(config->scriptNom, nomFichier.c_str(), sizeof(config->scriptNom) - 1);
+                            config->scriptNom[sizeof(config->scriptNom) - 1] = '\0';
+                            if (!ScriptStore::lire(config->scriptNom, script)) {
+                                /* Fichier absent : on le DIT et la broche reste muette,
+                                 * plutot que d'executer un reste d'ancien script. */
+                                Serial.printf("[ConfigLoader] %s : script '%s' introuvable dans mapfs — "
+                                              "la broche ne fera rien\n", pinLabelCStr, config->scriptNom);
+                                script = "";
+                            }
+                        } else {
+                            script = JSONParser::extractStr(pinConfig, "mappingScript", "");
+                        }
                         if (script.length() > 0) {
                             char* tampon = (char*)malloc(script.length() + 1);
                             if (tampon) {

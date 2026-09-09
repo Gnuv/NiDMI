@@ -210,6 +210,7 @@ void setupPinAPI(AsyncWebServer& server) {
             j += String("{\"gpio\":") + c->gpio
                + ",\"nom\":\"" + ech(String(c->name)) + "\""
                + ",\"mode\":\"" + (c->midiMode == MidiMode::SCRIPT ? "script" : "midi") + "\""
+               + ",\"scriptNom\":\"" + String(c->scriptNom) + "\""
                + ",\"script\":\"" + ech(String(c->mappingScript)) + "\"}";
         }
         j += "]}";
@@ -637,7 +638,11 @@ void setupPinAPI(AsyncWebServer& server) {
          * La limite se lit sur la structure, pas en dur : si le champ grandit,
          * le message suit. Remede de fond au point 2 du §9.3 — le script
          * devient un fichier et la config n'en garde que le nom. */
-        if (request->hasParam("mappingScript", true)) {
+        if (request->hasParam("mappingScript", true)
+            && !(request->hasParam("scriptNom", true)
+                 && request->getParam("scriptNom", true)->value().length())) {
+            /* La borne ne vaut que pour un script EN LIGNE, qui voyage en NVS.
+             * Un script de fichier n'en a aucune — c'est tout l'objet du §9.3. */
             const String sc = request->getParam("mappingScript", true)->value();
             /* La borne n'est plus la taille d'un champ fixe — le script est
              * desormais dimensionne au contenu (§9.3) — mais la place d'une
@@ -654,6 +659,7 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
         addParamEx("mappingScript", /*forcerChaine=*/true);
+        addParam("scriptNom");   // le script vient d'un fichier de mapfs (§9.3)
         /* Mode MIDI: RTP vs Mapping Script */
         addParam("midiMode");
         /* Pour composants avec axes (joystick, IMU), sauvegarder les types MIDI par axe */

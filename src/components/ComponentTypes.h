@@ -97,6 +97,20 @@ struct ComponentConfig {
      * quand le script vient d'ailleurs (une constante, un futur fichier). */
     const char* mappingScript;   // jamais nul
     char*       scriptPossede;   // tampon possede, ou nullptr
+
+    /* Le NOM du fichier .nms qui porte ce script, dans mapfs.
+     *
+     * Regle du projet, ecrite en tete de ScriptStore.h et reprise au §9.3 :
+     * le CONTENU des scripts va au systeme de fichiers (ce sont des fichiers,
+     * ils peuvent grossir), le NOM va en NVS (une chaine courte). Le script de
+     * broche ne la suivait pas — son texte vivait dans la configuration, borne
+     * par la taille d'une entree NVS.
+     *
+     * Vide = le script est en ligne dans la configuration (forme historique,
+     * toujours acceptee). Renseigne = le contenu vient du fichier, et la
+     * configuration ne porte plus que ce nom : plus de borne, et plusieurs
+     * broches peuvent partager le meme script. */
+    char scriptNom[32];
     char name[64];          // Nom personnalisé du composant (ex: "pot_volume", "btn_start")
     MidiMode midiMode;      // Mode MIDI: RTP config ou mapping script
     // Union pour les configurations spécifiques par type de composant
@@ -139,6 +153,7 @@ struct ComponentConfig {
         customInt2 = 0;
         mappingScript = "";
         scriptPossede = nullptr;
+        scriptNom[0] = '\0';
         name[0] = '\0';
         midiMode = MidiMode::RTP;  // Défaut: mode RTP classique
         pin_disconnected = false;
