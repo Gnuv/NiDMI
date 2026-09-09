@@ -620,6 +620,35 @@ void setupPinAPI(AsyncWebServer& server) {
         addParam("midiMessageType"); // Nouveau format
         addParam("rtpType"); // Ancien format pour compatibilité
         /* Champs personnalisés de mapping script */
+        /* SCRIPT TROP LONG : REFUSER, jamais tronquer.
+         *
+         * Le script d'une broche vit dans `char mappingScript[128]`
+         * (ComponentTypes.h), et ConfigLoader y copiait au strncpy : au-dela,
+         * la carte gardait la config ENTIERE en NVS et n'en executait que les
+         * 127 premiers caracteres, coupes au milieu d'un jeton, sans le moindre
+         * message. Le segment mutilé etait ensuite ignore par le moteur —
+         * silence sur silence. Et /api/pins/set relisant la carte, l'export de
+         * configuration emportait le script deja tronque : on sauvegardait
+         * moins que ce qu'on avait ecrit.
+         *
+         * Mesure : 174 caracteres ecrits, acceptes, conserves ; 127 executes
+         * (CONVERGENCE_NIDMI.md §9.3).
+         *
+         * La limite se lit sur la structure, pas en dur : si le champ grandit,
+         * le message suit. Remede de fond au point 2 du §9.3 — le script
+         * devient un fichier et la config n'en garde que le nom. */
+        if (request->hasParam("mappingScript", true)) {
+            const String sc = request->getParam("mappingScript", true)->value();
+            const unsigned maxi = sizeof(((ComponentConfig*)nullptr)->mappingScript) - 1;
+            if (sc.length() > maxi) {
+                request->send(409, "application/json",
+                    String("{\"status\":\"error\",\"message\":\"Script trop long : ")
+                    + String(sc.length()) + " caracteres, la carte en retient "
+                    + String(maxi) + " (" + String(sc.length() - maxi) +
+                    " de trop). Raccourcir, ou repartir le traitement sur plusieurs broches.\"}");
+                return;
+            }
+        }
         addParamEx("mappingScript", /*forcerChaine=*/true);
         /* Mode MIDI: RTP vs Mapping Script */
         addParam("midiMode");

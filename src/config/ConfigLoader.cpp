@@ -356,6 +356,16 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                     {
                         String script = JSONParser::extractStr(pinConfig, "mappingScript", "");
                         if (script.length() > 0) {
+                            /* Une configuration HERITEE peut depasser : l'ecriture
+                             * refuse desormais (PinAPI), mais rien ne rattrape ce qui
+                             * est deja en memoire. On le DIT plutot que de retrecir
+                             * sans un mot — c'est ainsi qu'un script perdait sa
+                             * derniere ligne sans que personne ne le sache. */
+                            if (script.length() > sizeof(config->mappingScript) - 1)
+                                Serial.printf("[ConfigLoader] %s : script de %u caracteres TRONQUE a %u — "
+                                              "le raccourcir pour qu'il s'execute en entier\n",
+                                              pinLabelCStr, (unsigned)script.length(),
+                                              (unsigned)(sizeof(config->mappingScript) - 1));
                             strncpy(config->mappingScript, script.c_str(), sizeof(config->mappingScript) - 1);
                             config->mappingScript[sizeof(config->mappingScript) - 1] = '\0';
                             hasMappingScript = true;
