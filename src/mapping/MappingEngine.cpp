@@ -931,7 +931,8 @@ static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, 
 }
 
 void MappingEngine::executerCapteur(const char* script, float valeur,
-                                    MidiSender* sender, Etat* etat, float brut) {
+                                    MidiSender* sender, Etat* etats, int nEtats,
+                                    float brut) {
     if (!script || script[0] == '\0') return;
 
     // « in » : la poignee conventionnelle sur la valeur qui vient de declencher
@@ -947,7 +948,7 @@ void MappingEngine::executerCapteur(const char* script, float valeur,
     Evenement e;                       // sans famille : seules r/f/i/litteral tirent
     Sortie liste[MAX_SORTIES];
     bool traite = false;
-    const int n = executer(script, e, liste, MAX_SORTIES, traite, etat, etat ? 1 : 0);
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
     emettreVers(sender, liste, n);
 }
 

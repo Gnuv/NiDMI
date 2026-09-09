@@ -83,7 +83,20 @@ struct ComponentConfig {
     uint8_t midiCcOnOffMin; // Valeur CC pour état OFF (0-127, défaut: 0) - pour boutons
     uint8_t midiCcOnOffMax; // Valeur CC pour état ON (0-127, défaut: 127) - pour boutons
     uint8_t midiVelocity;   // [correctif NiDMI] Vélocité Note On (1-127, défaut: 100) - pour boutons
-    char mappingScript[128]; // Script de mapping personnalisé (max 127 + \0)
+    /* Le script de mapping.
+     *
+     * C'etait `char mappingScript[128]` : une limite de 127 caracteres qui
+     * n'etait pas un choix mais la taille du champ, et qui TRONQUAIT EN SILENCE
+     * (MESURES.md §58, CONVERGENCE_NIDMI.md §9.3). C'est desormais un pointeur
+     * TOUJOURS VALIDE — il vise la chaine vide quand il n'y a pas de script —
+     * si bien qu'aucun des huit processeurs n'a eu a changer : ils lisent
+     * `config.mappingScript[0]` comme avant.
+     *
+     * `scriptPossede` est le tampon dont cette configuration est PROPRIETAIRE,
+     * dimensionne au contenu et libere par ComponentManager::clearAll(). Nul
+     * quand le script vient d'ailleurs (une constante, un futur fichier). */
+    const char* mappingScript;   // jamais nul
+    char*       scriptPossede;   // tampon possede, ou nullptr
     char name[64];          // Nom personnalisé du composant (ex: "pot_volume", "btn_start")
     MidiMode midiMode;      // Mode MIDI: RTP config ou mapping script
     // Union pour les configurations spécifiques par type de composant
@@ -124,7 +137,8 @@ struct ComponentConfig {
         customField2[0] = '\0';
         customInt1 = 0;
         customInt2 = 0;
-        mappingScript[0] = '\0';
+        mappingScript = "";
+        scriptPossede = nullptr;
         name[0] = '\0';
         midiMode = MidiMode::RTP;  // Défaut: mode RTP classique
         pin_disconnected = false;
@@ -170,11 +184,23 @@ struct ComponentState {
     uint32_t note_on_time; // Temps où la note a été jouée (pour auto-off)
     bool toggle_state;     // État pour mode toggle (true = note on, false = note off)
 
-    // Etat du script .nms de ce composant (toggle, counter, hysteresis, lp…).
-    // UN pipeline : mappingScript fait 128 octets, il n'en porte guere plus.
-    // Il vit ici plutot que dans le moteur parce qu'il y a jusqu'a 64
-    // composants, chacun avec son script : un tableau global les melangerait.
-    MappingEngine::Etat scriptEtat;
+    /* Etat du script .nms de ce composant (toggle, counter, hysteresis, lp,
+     * metro...). Il vit ici plutot que dans le moteur parce que chaque
+     * composant a le sien : un tableau global les melangerait.
+     *
+     * UN ETAT PAR PIPELINE. Il n'y en avait qu'UN, sur l'argument que
+     * « mappingScript fait 128 octets, il n'en porte guere plus » — argument
+     * qui tombe avec la limite (§9.3). Tous les pipelines partageaient donc le
+     * meme etat : deux toggle(), deux counter() ou deux metro() dans un meme
+     * script se seraient marches dessus SANS RIEN DIRE. Lever la limite sans
+     * lever ce partage aurait echange une panne visible contre une panne
+     * silencieuse.
+     *
+     * Quatre : un script de broche en porte trois dans l'usage courant (note on,
+     * note off, publication au registre). Au-dela, le moteur partage le dernier
+     * emplacement — degradation connue et commentee, pas un plantage. */
+    static constexpr uint8_t MAX_PIPELINES_BROCHE = 4;
+    MappingEngine::Etat scriptEtats[MAX_PIPELINES_BROCHE];
     bool prev_stable_state; // État stable précédent (après debounce) pour détecter Falling/Rising
     
     // Champs pour joystick (réutilise customInt1/customInt2 pour stocker les dernières valeurs normalisées)

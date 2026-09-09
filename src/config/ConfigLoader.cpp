@@ -354,23 +354,38 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                     // Mapping script: stocke la chaîne user-defined dans le ComponentConfig
                     bool hasMappingScript = false;
                     {
+                        /* Le script est DIMENSIONNE AU CONTENU.
+                         *
+                         * C'etait une copie tronquante dans un champ de 128 octets
+                         * (MESURES.md §58) : la limite de 127 caracteres n'etait pas
+                         * un choix, c'etait la taille du tableau — et le depassement
+                         * ne disait rien. On alloue desormais ce qu'il faut, et la
+                         * configuration en est proprietaire : ComponentManager::
+                         * clearAll() le libere, comme elle libere deja specificConfig.
+                         *
+                         * La borne restante est celle de la NVS (1900 octets par
+                         * broche), verifiee a l'ecriture par PinAPI. Le remede de fond
+                         * — le script devient un fichier de mapfs et la configuration
+                         * n'en garde que le nom — est le point 2 du §9.3. */
                         String script = JSONParser::extractStr(pinConfig, "mappingScript", "");
                         if (script.length() > 0) {
-                            /* Une configuration HERITEE peut depasser : l'ecriture
-                             * refuse desormais (PinAPI), mais rien ne rattrape ce qui
-                             * est deja en memoire. On le DIT plutot que de retrecir
-                             * sans un mot — c'est ainsi qu'un script perdait sa
-                             * derniere ligne sans que personne ne le sache. */
-                            if (script.length() > sizeof(config->mappingScript) - 1)
-                                Serial.printf("[ConfigLoader] %s : script de %u caracteres TRONQUE a %u — "
-                                              "le raccourcir pour qu'il s'execute en entier\n",
-                                              pinLabelCStr, (unsigned)script.length(),
-                                              (unsigned)(sizeof(config->mappingScript) - 1));
-                            strncpy(config->mappingScript, script.c_str(), sizeof(config->mappingScript) - 1);
-                            config->mappingScript[sizeof(config->mappingScript) - 1] = '\0';
-                            hasMappingScript = true;
+                            char* tampon = (char*)malloc(script.length() + 1);
+                            if (tampon) {
+                                memcpy(tampon, script.c_str(), script.length() + 1);
+                                config->scriptPossede = tampon;
+                                config->mappingScript = tampon;
+                                hasMappingScript = true;
+                            } else {
+                                /* Tas insuffisant : on le DIT. Un script muet sans
+                                 * explication est exactement ce qu'on passe la session
+                                 * a eliminer. */
+                                Serial.printf("[ConfigLoader] %s : %u octets refuses pour le script — "
+                                              "la broche ne l'executera pas\n",
+                                              pinLabelCStr, (unsigned)script.length() + 1);
+                                config->mappingScript = "";
+                            }
                         } else {
-                            config->mappingScript[0] = '\0';
+                            config->mappingScript = "";
                         }
                     }
 

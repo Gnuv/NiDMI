@@ -205,7 +205,8 @@ void PotentiometerProcessor::process(
         /* `filtered_value` : la lecture apres filtre et course utile, AVANT la
          * quantification en 0..127 — c'est ce que rend raw.in() (§55). */
         MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
-                                      midi_sender, &state.scriptEtat,
+                                      midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE,
                                       (float)filtered_value);
     }
 }

@@ -194,7 +194,8 @@ void ButtonProcessor::process(
         if (config.mappingScript[0] != '\0') {
             MappingEngine::executerCapteur(config.mappingScript,
                                            currentStableState ? 1.0f : 0.0f,
-                                           midi_sender, &state.scriptEtat);
+                                           midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE);
         } else {
             NIDMI_WEB_LOG("[Bouton] GPIO%d : aucun script — rien a emettre", (int)config.gpio);
         }

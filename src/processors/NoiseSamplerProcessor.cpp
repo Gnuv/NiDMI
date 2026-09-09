@@ -143,7 +143,8 @@ void NoiseSamplerProcessor::process(
         }
         if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
             MappingEngine::executerCapteur(config.mappingScript, (float)stable_midi_value,
-                                          midi_sender, &state.scriptEtat);
+                                          midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE);
         }
         return;
     }
@@ -188,7 +189,8 @@ void NoiseSamplerProcessor::process(
     // Mode script : exécuter même sans nom de composant.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         MappingEngine::executerCapteur(config.mappingScript, (float)midi_value,
-                                      midi_sender, &state.scriptEtat);
+                                      midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE);
     }
 }
 

@@ -639,7 +639,11 @@ void setupPinAPI(AsyncWebServer& server) {
          * devient un fichier et la config n'en garde que le nom. */
         if (request->hasParam("mappingScript", true)) {
             const String sc = request->getParam("mappingScript", true)->value();
-            const unsigned maxi = sizeof(((ComponentConfig*)nullptr)->mappingScript) - 1;
+            /* La borne n'est plus la taille d'un champ fixe — le script est
+             * desormais dimensionne au contenu (§9.3) — mais la place d'une
+             * configuration de broche en NVS, dont le script n'est qu'une
+             * partie. On garde une marge pour le reste du JSON. */
+            const unsigned maxi = NVS_MAX_PIN_CONFIG_SIZE - 400U;
             if (sc.length() > maxi) {
                 request->send(409, "application/json",
                     String("{\"status\":\"error\",\"message\":\"Script trop long : ")

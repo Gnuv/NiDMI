@@ -246,7 +246,8 @@ void JoystickProcessor::process(
     // Script mode must run even without a component name.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
-                                      midi_sender, &state.scriptEtat);
+                                      midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE);
     }
 }
 

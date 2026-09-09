@@ -174,7 +174,8 @@ void VelostatProcessor::process(
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         /* Idem : la lecture pleine resolution pour raw.in() (§55). */
         MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
-                                      midi_sender, &state.scriptEtat,
+                                      midi_sender, state.scriptEtats,
+                                      ComponentState::MAX_PIPELINES_BROCHE,
                                       (float)filtered_value);
     }
 }

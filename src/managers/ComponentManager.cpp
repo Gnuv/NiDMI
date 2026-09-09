@@ -575,6 +575,16 @@ void ComponentManager::clearAll() {
         c.specificConfig.specific = nullptr;
     }
 
+    /* Et le script, dont la configuration est proprietaire depuis qu'il est
+     * dimensionne au contenu (§9.3). Meme regle que specificConfig : liberer,
+     * puis remettre le pointeur sur la chaine vide — jamais nul, les huit
+     * processeurs lisent mappingScript[0] sans se poser de question. */
+    for (uint8_t i = 0; i < component_count; i++) {
+        ComponentConfig& c = configs[i];
+        if (c.scriptPossede) { free(c.scriptPossede); c.scriptPossede = nullptr; }
+        c.mappingScript = "";
+    }
+
     component_count = 0;
     // Réinitialiser les filtres
     for (uint8_t i = 0; i < MAX_COMPONENTS; i++) {

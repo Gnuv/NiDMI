@@ -61,7 +61,8 @@ public:
     // raw.in(). NAN (le defaut) signifie « rien de plus fin que `valeur` » —
     // le cas d'un contact, qui n'a que 0/1.
     static void executerCapteur(const char* script, float valeur,
-                                MidiSender* midi_sender, Etat* etat = nullptr,
+                                MidiSender* midi_sender,
+                                Etat* etats = nullptr, int nEtats = 0,
                                 float brut = NAN);
 
 
