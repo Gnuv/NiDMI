@@ -42,6 +42,13 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"load_percent\":" + String(m.cyclesParEch * 100.0f / 5000.0f, 1) + ",";
         json += "\"heap_min_ever\":"      + String(m.heapMiniJamais) + ",";
         json += "\"reset_reason\":\""      + String(m.causeResetTexte) + "\",";
+        /* Marges de PILE, en octets. Celle de la tache MIDI est relevee par
+         * elle-meme ; celle-ci est mesuree ici meme, donc c'est celle du
+         * serveur web. Les deux portent les tableaux de sortie du moteur. */
+        extern uint32_t g_margePileMidi;
+        json += "\"stack_midi_libre\":"   + String(g_margePileMidi) + ",";
+        json += "\"stack_web_libre\":"    +
+                String((uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)) + ",";
         // Garde-fou du chargement au boot : combien de démarrages consécutifs
         // sans que l'interface ait pu être servie, et si le chargement est coupé.
         json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
@@ -477,6 +484,15 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         // « capteur » : evenement sans famille, comme executerCapteur.
         if (genre == "capteur") FluxRegistry::update("in", (float)a);
 
+        /* Rend une sortie OSC sous la meme forme que le banc hote :
+         * les arguments en texte, a trois decimales, pour que deux moteurs qui
+         * ne comptent pas dans le meme flottant restent comparables. */
+        auto oscEnJson = [](const MappingEngine::Sortie& s) -> String {
+            String args = String(s.reel, 3);
+            for (int k = 0; k < s.nArgsSup; k++) args += "," + String(s.argsSup[k], 3);
+            return String("{\"t\":\"osc\",\"a\":\"") + s.adresse
+                 + "\",\"b\":\"" + args + "\",\"c\":" + String((int)s.hote) + "}";
+        };
         MappingEngine::Sortie liste[MappingEngine::MAX_SORTIES];
         bool traite = false;
         // Un COMPOSANT n'a qu'UN slot d'etat pour tous ses pipelines (il vit
@@ -537,8 +553,11 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
                 case MappingEngine::Sortie::PolyTouch: t = "ptouch";  break;
                 case MappingEngine::Sortie::Pgm:       t = "pgm";     break;
                 case MappingEngine::Sortie::Print:     t = "print";   break;
+                case MappingEngine::Sortie::Osc:       t = "osc";     break;
             }
-            if (o.type == MappingEngine::Sortie::Bend)
+            if (o.type == MappingEngine::Sortie::Osc)
+                j += oscEnJson(o);
+            else if (o.type == MappingEngine::Sortie::Bend)
                 j += String("{\"t\":\"bend\",\"a\":") + o.valeur14 + ",\"c\":" + o.canal + "}";
             else
                 j += String("{\"t\":\"") + t + "\",\"a\":" + o.a + ",\"b\":" + o.b

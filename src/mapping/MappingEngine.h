@@ -101,14 +101,28 @@ public:
         uint32_t instant = 0;    // millis() — n'a de sens que pour Tick
     };
 
+    /* Longueur d'une adresse OSC portee par une sortie. Choisie sur MESURE :
+     * la tache MIDI garde 6204 octets de pile libres, et un tableau de seize
+     * sorties elargi lui en coute environ 750. « /composition/piste/3/volume »
+     * tient dans 40. Au-dela, le message est REFUSE — jamais tronque, sans quoi
+     * il partirait vers une autre adresse que celle qu'on a ecrite. */
+    static const int MAX_ADRESSE_OSC = 40;
+    static const int MAX_ARGS_OSC_SUP = 3;   // en plus de `reel`, la valeur courante
+
     struct Sortie {
-        enum Type { Note, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm, Print };
+        enum Type { Note, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm, Print, Osc };
         Type    type     = Note;
         uint8_t canal    = 1;
         uint8_t a        = 0;    // note | numero de CC | note
         uint8_t b        = 0;    // velocite | valeur
         int16_t valeur14 = 0;    // pitch bend
-        float   reel     = 0;    // print() : la valeur telle quelle
+        float   reel     = 0;    // print() et osc : la valeur telle quelle
+        /* osc.out : l'adresse, les arguments FROIDS qui suivent la valeur
+         * courante, et l'octet d'hote optionnel (0 = la cible configuree). */
+        char    adresse[MAX_ADRESSE_OSC] = {0};
+        float   argsSup[MAX_ARGS_OSC_SUP] = {0, 0, 0};
+        uint8_t nArgsSup = 0;
+        uint8_t hote     = 0;
     };
 
     // Seize : deux pipelines qui emettent chacun un accord de quatre notes, et
@@ -178,6 +192,17 @@ public:
     // pousse une trame vers l'app ; au banc, il n'y a rien a installer.
     typedef void (*Impression)(const char* etiquette, float valeur);
     static void surImpression(Impression fn);
+
+    /* L'EMETTEUR OSC, pose de l'exterieur — comme l'impression. Le moteur ne
+     * connait aucun transport : il recoit un MidiSender pour le MIDI et cette
+     * fonction pour l'OSC. Non posee (le banc de conformite), rien ne part :
+     * une epreuve ne doit pas arroser le reseau de l'usager.
+     * `hote` : 0 = la cible configuree ; sinon le DERNIER OCTET a substituer
+     * dans cette cible — la lecture embarquee de osc.out(N, "/x"), qui vaut
+     * 127.0.0.N sur un poste de travail. */
+    typedef void (*EmetteurOsc)(const char* adresse, const float* args, int n,
+                                uint8_t hote);
+    static void surOsc(EmetteurOsc fn);
 
     // ── Enveloppes historiques ──────────────────────────────────────────────
     // executeMidiNote / executeMidiCc restent l'interface de MidiRouter : elles

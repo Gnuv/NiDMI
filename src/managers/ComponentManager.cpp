@@ -65,6 +65,28 @@ void ComponentManager::begin(MidiSender* sender) {
     telemetryQueue = xQueueCreate(32, sizeof(TelemetryWsMsg));  // 8->32 : moins d'overflow sur capteurs actifs
     /* Charger d'abord les MUX */
     loadMuxConfigFromNVS();
+    /* Le TRANSPORT de osc.out(). Le moteur de script ne connait aucun
+     * transport : on le lui pose, comme l'impression. Le banc de conformite ne
+     * le pose pas — une epreuve n'arrose pas le reseau de l'usager. */
+    MappingEngine::surOsc([](const char* adresse, const float* args, int n,
+                             uint8_t hote) {
+        OSCManager& o = g_componentManager.osc();
+        float copie[8];
+        if (n > (int)(sizeof copie / sizeof copie[0])) n = sizeof copie / sizeof copie[0];
+        for (int i = 0; i < n; i++) copie[i] = args[i];
+        if (!hote) { o.sendMultiFloat(String(adresse), copie, n); return; }
+        /* Octet d'hote : le meme reseau que la cible configuree, dernier octet
+         * substitue. Le moteur de reference y lit 127.0.0.N — un poste de
+         * travail ; ici la lecture qui a un sens est « le voisin de la cible ». */
+        const String cible = o.getTargetIP();
+        const int point = cible.lastIndexOf('.');
+        if (point < 0) { o.sendMultiFloat(String(adresse), copie, n); return; }
+        const uint16_t port = o.getTargetPort();
+        o.setTarget(cible.substring(0, point + 1) + String((int)hote), port);
+        o.sendMultiFloat(String(adresse), copie, n);
+        o.setTarget(cible, port);
+    });
+
     /* Puis charger les configs des pins */
     ConfigLoader::loadFromNVS(*this);
     
@@ -775,6 +797,8 @@ void ComponentManager::midiTask(void* parameter) {
     instance->midiTaskLoop();
 }
 
+uint32_t g_margePileMidi = 0;   // cf. /api/audio/status
+
 void ComponentManager::midiTaskLoop() {
     const TickType_t xFrequency = pdMS_TO_TICKS(10); // 10ms
     TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -792,6 +816,12 @@ void ComponentManager::midiTaskLoop() {
          * periode FIXE (10 ms) et ne s'est jamais bloquee, alors que la boucle
          * l'a fait (§42). Une horloge qui derive ou s'arrete est pire que pas
          * d'horloge du tout. */
+        /* MARGE DE PILE de cette tache, en octets. Publiee par /api/audio/status.
+         * Les tableaux de sortie du moteur de script vivent sur CETTE pile ;
+         * avant de les agrandir — une sortie OSC porte une adresse texte — il
+         * faut savoir ce qui reste. Mesure, pas estimation. */
+        g_margePileMidi = (uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
+
         g_midiRouter.battreHorloge(millis());
         /* Et la file des differes — del(), makenote()... — une seule fois pour
          * TOUS les scripts : broches comprises, qui n'ont pas d'horloge a elles. */

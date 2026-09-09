@@ -48,6 +48,11 @@ private:
     uint8_t component_count;
     MidiSender* midi_sender;
     OSCManager osc_manager;
+public:
+    /* L'emetteur OSC, pour que osc.out() d'un script trouve le transport.
+     * Le moteur de script ne connait aucun transport : on le lui POSE. */
+    OSCManager& osc() { return osc_manager; }
+private:
     OSCQueue osc_queue;
     
     // Multiplexeurs analogiques

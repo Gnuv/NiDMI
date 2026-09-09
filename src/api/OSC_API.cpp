@@ -1,5 +1,6 @@
 #include "APICommon.h"
 #include "../server/ServerCallbacks.h"
+#include "../managers/ComponentManager.h"
 #include <Preferences.h>
 
 void setupOSC_API(AsyncWebServer& server) {
@@ -22,10 +23,20 @@ void setupOSC_API(AsyncWebServer& server) {
             preferences.putString("osc_interface", interface);
             preferences.end();
             
-            /* Demander le rechargement OSC */
-            // TODO: Implémenter nidmi_requestReloadOsc() si nécessaire
-            // nidmi_requestReloadOsc();
-            
+            /* APPLIQUER TOUT DE SUITE au gestionnaire VIVANT.
+             *
+             * La route n'ecrivait qu'en NVS, et /api/osc/status relisait la
+             * NVS : la configuration PARAISSAIT prise alors que le gestionnaire
+             * continuait de viser l'ancienne cible. Il fallait redemarrer pour
+             * que ce que montrait l'app devienne vrai — le meme piege que la
+             * zone d'E/S, qui montrait une carte imaginaire (MESURES.md §40). */
+            OSCManager& o = g_componentManager.osc();
+            o.setTarget(target, (uint16_t)port);
+            o.setBroadcast(broadcast);
+            o.setInterface(interface == "sta"  ? OSC_INTERFACE_STA
+                         : interface == "both" ? OSC_INTERFACE_BOTH
+                                               : OSC_INTERFACE_AP);
+
             request->send(200, "application/json", "{\"status\":\"ok\"}");
         } else {
             request->send(400, "application/json", "{\"error\":\"target and port required\"}");
@@ -57,9 +68,19 @@ void setupOSC_API(AsyncWebServer& server) {
         String interface = preferences.getString("osc_interface", "ap");
         bool outputAll = preferences.getBool("osc_out_all", true);
         preferences.end();
+        /* Ce que la carte FAIT, a cote de ce qu'elle a RETENU. Les deux
+         * doivent coincider ; quand ils divergent, c'est visible plutot que
+         * silencieux. `enabled` dit si un osc.out() partira reellement. */
+        OSCManager& o = g_componentManager.osc();
         String json = "{";
         json += "\"target\":\"" + target + "\",";
         json += "\"port\":" + String(port) + ",";
+        json += "\"vivant\":{\"target\":\"" + o.getTargetIP() + "\","
+              + "\"port\":" + String(o.getTargetPort()) + ","
+              + "\"broadcast\":" + String(o.isBroadcastEnabled() ? "true" : "false") + ","
+              + "\"interface\":" + String((int)o.getInterface()) + ","
+              + "\"initialized\":" + String(o.isInitialized() ? "true" : "false") + ","
+              + "\"enabled\":" + String(o.isEnabled() ? "true" : "false") + "},";
         json += "\"broadcast\":" + String(broadcast ? "true" : "false") + ",";
         json += "\"interface\":\"" + interface + "\",";
         json += "\"output_all_enabled\":" + String(outputAll ? "true" : "false");

@@ -122,6 +122,7 @@ uint32_t g_horsLigneMaintenant = 0;
 
 
 MappingEngine::Impression g_impression = nullptr;
+MappingEngine::EmetteurOsc g_emetteurOsc = nullptr;
 
 // ── Outils de chaine ───────────────────────────────────────────────────────
 
@@ -255,6 +256,7 @@ int32_t versInt32(float v) {
 }  // namespace
 
 void MappingEngine::surImpression(Impression fn) { g_impression = fn; }
+void MappingEngine::surOsc(EmetteurOsc fn) { g_emetteurOsc = fn; }
 
 void MappingEngine::reinitialiser() {
     for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i].reinitialiser();
@@ -982,6 +984,48 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         emettre(sorties, max, n, s);
         return true;
     }
+    /* osc.out("/adresse"[, a, b, ...]) — emet un message OSC. La charge est
+     * [valeur courante, ...arguments froids]. Passage TRANSPARENT : le verbe
+     * rend la valeur, il peut donc se poser au milieu d'un pipeline.
+     *
+     * osc.out(N, "/adresse"[, ...]) — un NOMBRE NU en premier n'est pas une
+     * adresse : c'est un octet d'hote. Sur un poste de travail le moteur de
+     * reference y lit 127.0.0.N ; sur la carte, c'est le dernier octet a
+     * substituer dans la cible configuree. Meme valeur transportee, lecture
+     * adaptee au lieu. */
+    if (verbe(seg, "osc.out", a)) {
+        String m[2 + MappingEngine::MAX_ARGS_OSC_SUP];
+        const int k = decouperArgs(a, m, 2 + MappingEngine::MAX_ARGS_OSC_SUP);
+        if (k < 1) return true;
+        int i0 = 0;
+        uint8_t hote = 0;
+        if (estNombre(m[0])) {
+            const int oct = (int)lroundf(valeurArg(m[0]));
+            if (oct >= 0 && oct <= 255) { hote = (uint8_t)oct; i0 = 1; }
+        }
+        if (i0 >= k) return true;
+        String adr = m[i0];
+        if (adr.length() >= 2 && (adr[0] == '"' || adr[0] == '\''))
+            adr = adr.substring(1, adr.length() - 1);
+        if (!adr.length()) return true;
+        // REFUSER plutot que tronquer : une adresse coupee designe autre chose.
+        if ((int)adr.length() >= MappingEngine::MAX_ADRESSE_OSC) {
+            Serial.print("[nms] adresse OSC trop longue, message abandonne : ");
+            Serial.println(adr);
+            return true;
+        }
+        Sortie s;
+        s.type = Sortie::Osc;
+        s.reel = courant;
+        s.hote = hote;
+        strncpy(s.adresse, adr.c_str(), MappingEngine::MAX_ADRESSE_OSC - 1);
+        s.adresse[MappingEngine::MAX_ADRESSE_OSC - 1] = '\0';
+        for (int j = i0 + 1;
+             j < k && s.nArgsSup < MappingEngine::MAX_ARGS_OSC_SUP; j++)
+            s.argsSup[s.nArgsSup++] = valeurArg(m[j]);
+        emettre(sorties, max, n, s);
+        return true;
+    }
     if (verbe(seg, "bend.out", a)) {
         int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s; s.type = Sortie::Bend;
@@ -1287,6 +1331,14 @@ static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, 
             case MappingEngine::Sortie::PolyTouch: sender->sendKeyPressure(ch, s.a, s.b);   break;
             case MappingEngine::Sortie::Pgm:       sender->sendProgramChange(ch, s.a);      break;
             case MappingEngine::Sortie::Print:     break;                                   // deja au journal
+            case MappingEngine::Sortie::Osc: {
+                float args[1 + MappingEngine::MAX_ARGS_OSC_SUP];
+                int na = 0;
+                args[na++] = s.reel;                       // la valeur courante d'abord
+                for (int k = 0; k < s.nArgsSup; k++) args[na++] = s.argsSup[k];
+                if (g_emetteurOsc) g_emetteurOsc(s.adresse, args, na, s.hote);
+                break;
+            }
         }
     }
 }
