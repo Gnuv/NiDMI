@@ -44,6 +44,11 @@ bool ensureStarted();
 
 bool isStarted();
 
+// Ferme l'I2S et arrete la tache audio : les broches BCK/LRCK/DIN sont rendues.
+// A appeler quand le DAC cesse d'etre declare — setEngine(-1) ne suffit pas, il
+// ne fait que deselectionner le moteur (MESURES.md §51).
+bool arreter();
+
 // ── Restauration au boot ───────────────────────────────────────────────────
 // MESURES.md §11 (corrigé le 2026-09-03) : c'est l'ORDRE d'allocation qui
 // décide, pas la quantité. Allouer un engine sur un tas VIERGE laisse un bloc

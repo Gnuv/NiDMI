@@ -41,6 +41,7 @@ void relacher(const char* pinLabel, uint8_t gpio, const char* role) {
     if (audioAvant && !audioDeclare() && AudioEngine::isStarted()) {
         Serial.println("[Occupations] plus de DAC declare — le moteur audio est arrete");
         AudioEngine::setEngine(-1, /*persister=*/true);
+        AudioEngine::arreter();     // et FERMER l'I2S : sinon le son continue
     }
 }
 

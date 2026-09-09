@@ -31,6 +31,11 @@ I2SClass    i2s;
 TaskHandle_t tache      = nullptr;
 QueueHandle_t evenements = nullptr;
 volatile bool demarre    = false;
+/* Arret propre de la tache audio : elle rend la main d'elle-meme plutot que
+ * d'etre tuee. La tuer pendant un i2s.write() laisserait le DMA a moitie servi
+ * et le peripherique dans un etat qu'aucun i2s.end() ne rattrape. */
+volatile bool arretDemande = false;
+volatile bool tacheArretee = false;
 
 uint32_t heapAvant = 0, heapApres = 0, srReel = SAMPLE_RATE;
 volatile uint32_t nBlocs = 0, nRetards = 0;
@@ -250,6 +255,7 @@ void rendre() {
 
 void boucleAudio(void*) {
   for (;;) {
+    if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
 
@@ -436,6 +442,37 @@ void restaurerAuBoot() {
   Serial.printf("[audio] boot : apres chargement, tas %lu o, plus gros bloc %lu o\n",
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+}
+
+bool arreter() {
+  if (!demarre) return true;
+
+  /* FERMER L'I2S, pas seulement desactiver le moteur.
+   *
+   * setEngine(-1) ne fait que desélectionner : la tache continue de nourrir le
+   * DMA et le peripherique pilote toujours BCK/LRCK/DIN. Mesure au moment de la
+   * panne : DAC retire, bus {}, engine -1 — et pourtant started true avec les
+   * blocs qui montent (61894 -> 63118 en 3 s). L'utilisateur avait toujours du
+   * son, et les trois broches restaient pilotees alors que la carte les
+   * declarait libres. « Pas de DAC declare, pas d'audio » exige la fermeture. */
+  arretDemande = true;
+  tacheArretee = false;
+  for (int i = 0; i < 200 && !tacheArretee; i++) vTaskDelay(pdMS_TO_TICKS(5));
+  if (!tacheArretee) {
+    Serial.println("[audio] arret : la tache n'a pas rendu la main — on n'y touche pas");
+    arretDemande = false;
+    return false;
+  }
+  vTaskDelay(pdMS_TO_TICKS(20));      // laisser vTaskDelete s'achever
+
+  i2s.end();
+  if (evenements) { vQueueDelete(evenements); evenements = nullptr; }
+  tache = nullptr;
+  demarre = false;
+  arretDemande = false;
+  Serial.printf("[audio] arrete — I2S ferme, broches rendues, tas interne %lu o\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  return true;
 }
 
 void validerConfigBoot() {
