@@ -317,9 +317,28 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
     }
 }
 
+// ── Script nomme : contenu dans LittleFS, nom en NVS ───────────────────────
+namespace {
+constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
+constexpr const char* NVS_CLE_SCRIPT  = "script";
+}
+
+static String cleNvsEmplacement(uint8_t e) {
+    return e == 0 ? String(NVS_CLE_SCRIPT) : (String(NVS_CLE_SCRIPT) + String((int)e));
+}
+
+/* Le nom du fichier ou la carte range un script pousse EN LIGNE.
+ * Le tiret bas dit qu'il appartient a la carte, pas a l'utilisateur : il ne se
+ * confond pas avec transpose.nms ou grave5.nms. */
+static String fichierEmplacement(uint8_t e) {
+    return String("_emplacement") + String((int)e) + ".nms";
+}
+
 void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
     if (emplacement >= MAX_SCRIPTS_MAP) return;
     Emplacement& em = emplacements[emplacement];
+    const bool memeCode = (em.contenu == script);
+
     em.contenu = script;
     em.initEnAttente = true;          // nouveau script : son loadbang() est du
     /* L'etat par pipeline de CET emplacement n'a plus de sens : un counter
@@ -327,11 +346,50 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
      * d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note. On ne
      * touche PAS aux autres emplacements, qui n'ont pas change. */
     for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
-    /* Un script pousse EN LIGNE n'est plus celui du fichier : laisser le nom tel
-     * quel faisait annoncer « transpose.nms » alors qu'un autre code tournait. */
-    em.nom = script.length() ? String("(en ligne)") : String("");
-    Serial.printf("[MidiRouter] emplacement %u : script en ligne (%u o)\n",
-                  (unsigned)emplacement, (unsigned)script.length());
+
+    /* UN SCRIPT POUSSE EN LIGNE EST PERSISTE, comme les autres.
+     *
+     * Il ne l'etait pas : le contenu vivait en RAM et le nom valait « (en
+     * ligne) ». Au redemarrage il disparaissait — et la carte revenait au
+     * dernier script NOMME, donc a un AUTRE comportement, sans rien dire.
+     * Mesure : « note.in() : +(7) » pousse, puis redemarrage, puis
+     * transpose.nms de retour. C'est la negation de la regle du projet — ce qui
+     * tourne en headless doit etre ce qu'on a configure.
+     *
+     * On applique donc la regle du §9.3 ICI plutot que de demander a chaque
+     * client de le faire : le contenu part au fichier, le nom en NVS. Tout
+     * client en beneficie, pas seulement notre app.
+     *
+     * L'ecriture est evitee quand le code n'a pas change : l'app republie a
+     * chaque enregistrement, et la flash n'a pas a payer une republication
+     * identique. */
+    const String cle = cleNvsEmplacement(emplacement);
+    if (!script.length()) {
+        em.nom = "";
+        Preferences p;
+        if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(cle.c_str()); p.end(); }
+        Serial.printf("[MidiRouter] emplacement %u : vide\n", (unsigned)emplacement);
+        return;
+    }
+
+    const String fichier = fichierEmplacement(emplacement);
+    if (!memeCode || em.nom != fichier) {
+        if (ScriptStore::ecrire(fichier.c_str(), script)) {
+            em.nom = fichier;
+            Preferences p;
+            if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(cle.c_str(), em.nom); p.end(); }
+        } else {
+            /* mapfs pleine ou absente : le script TOURNE quand meme, mais il ne
+             * survivra pas au redemarrage. On le DIT — un comportement qui
+             * s'evapore sans message est ce qu'on passe la session a supprimer. */
+            em.nom = "(en ligne, NON persiste)";
+            Serial.printf("[MidiRouter] emplacement %u : ecriture de '%s' impossible — "
+                          "le script tourne mais ne survivra pas au redemarrage\n",
+                          (unsigned)emplacement, fichier.c_str());
+        }
+    }
+    Serial.printf("[MidiRouter] emplacement %u : %u o (%s)\n",
+                  (unsigned)emplacement, (unsigned)script.length(), em.nom.c_str());
 }
 
 // Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,
@@ -370,18 +428,10 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
 }
 
 
-// ── Script nomme : contenu dans LittleFS, nom en NVS ───────────────────────
-namespace {
-constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
-constexpr const char* NVS_CLE_SCRIPT  = "script";
-}
 
 /* La cle NVS d'un emplacement : « script » pour le premier — le nom historique,
  * qu'on garde pour ne pas perdre la configuration des cartes existantes — puis
  * « script1 », « script2 »... */
-static String cleNvsEmplacement(uint8_t e) {
-    return e == 0 ? String(NVS_CLE_SCRIPT) : (String(NVS_CLE_SCRIPT) + String((int)e));
-}
 
 bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emplacement) {
     if (emplacement >= MAX_SCRIPTS_MAP) return false;
