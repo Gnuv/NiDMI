@@ -1,3 +1,4 @@
+#include "../audio/AudioEngine.h"   // PIN_BCLK/LRCK/DIN : le bus audio est une occupation de broche
 #include "APICommon.h"
 #include "../components/basic/ButtonDef.h"
 #include "../utils/ComponentInitializer.h"
@@ -157,7 +158,24 @@ void setupPinAPI(AsyncWebServer& server) {
         
         json += "],";
         json += "\"bus\":{";
-        
+
+        /* Bus AUDIO (I2S).
+         *
+         * Il manquait, et c'est ce qui a coute le plus cher : l'app croyait
+         * D0/D1/D2 libres, on y a configure un capteur analogique, et le
+         * rechargement s'est bloque DEFINITIVEMENT. Sonder le GPIO1 (le BCK)
+         * avec pinMode/digitalRead le fait basculer de mux ; l'I2S perd son
+         * horloge de bit, le DMA ne se vide plus et la tache reste dans
+         * i2s.write(). Le meme piege avait deja ete paye au boot par le
+         * diagnostic tactile (MESURES.md §19) — la lecon n'avait pas ete
+         * etendue au test de broche flottante.
+         *
+         * Declare comme les autres bus : l'app grise ces broches et dit
+         * pourquoi, au lieu de laisser poser un composant qui bloquera. */
+        json += "\"audio\":{\"bck\":" + String(AudioEngine::PIN_BCLK)
+             + ",\"lrck\":" + String(AudioEngine::PIN_LRCK)
+             + ",\"din\":"  + String(AudioEngine::PIN_DIN) + "},";
+
         /* Bus I2C - Utiliser PinMapper pour obtenir les GPIO dynamiquement */
         json += "\"i2c\":{";
         uint8_t sda_gpio = PinMapper::labelToGpio("SDA");
@@ -506,6 +524,22 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
         
+        /* Broche du bus AUDIO : refuser l'ECRITURE, pas seulement le chargement.
+         *
+         * La carte refuse deja d'instancier un composant sur le BCK/LRCK/DIN de
+         * l'I2S (ComponentManager::addComponent). Si on laissait quand meme
+         * ecrire en NVS, la memoire contiendrait une broche que la carte
+         * n'execute pas — l'ecart precis qu'on vient d'eliminer ailleurs. On
+         * refuse donc ici, avec un message que l'editeur affiche tel quel. */
+        if (sigGpio == AudioEngine::PIN_BCLK || sigGpio == AudioEngine::PIN_LRCK ||
+            sigGpio == AudioEngine::PIN_DIN) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"GPIO " + String(sigGpio) +
+                " est une broche du bus audio (I2S) : la configurer couperait le son "
+                "et bloquerait la carte.\"}");
+            return;
+        }
+
         /* Echappement JSON COMPLET.
          *
          * L'ancien ne traitait que « \ » et « " ». Un script de mapping tient

@@ -1,3 +1,4 @@
+#include "../audio/AudioEngine.h"   // PIN_BCLK/LRCK/DIN
 #include "ComponentManager.h"
 #include "../server/WebDebugConsole.h"
 #include <Arduino.h> // For Serial.printf
@@ -323,6 +324,19 @@ bool ComponentManager::addComponent(uint8_t gpio, ComponentType type, uint8_t mi
         return false;
     }
     
+    /* Broche du bus AUDIO : REFUSER, plutot que de se bloquer dessus.
+     *
+     * setupGpio() y appelle isPinFloating(), qui sonde la broche en pull-up
+     * puis pull-down. Sur le BCK de l'I2S, ca coupe l'horloge de bit : le DMA
+     * ne se vide plus et une tache reste dans i2s.write() pour toujours. C'est
+     * le calage observe (« phase_precedente = add-gpio:1 »). Une configuration
+     * heritee ne doit pas pouvoir remettre la carte dans cet etat — d'ou le
+     * refus ici, en plus du grisage cote app (/api/pins/caps declare ce bus). */
+    if (gpio == AudioEngine::PIN_BCLK || gpio == AudioEngine::PIN_LRCK || gpio == AudioEngine::PIN_DIN) {
+        Serial.printf("[ComponentManager] GPIO %d refuse : broche du bus audio (I2S)\n", gpio);
+        return false;
+    }
+
     // Vérifier si le GPIO existe déjà
     if (findComponentByGpio(gpio) != 255) {
         Serial.printf("[ComponentManager] WARNING: GPIO %d already exists, skipping\n", gpio);
