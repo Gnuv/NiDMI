@@ -560,7 +560,20 @@ static void processContinuous(
     uint8_t midi_value = state.hysteresis.getValue();
     
     // Plage MIDI configurée
-    if (config.midiCcRangeMin != 0 || config.midiCcRangeMax != 127) {
+        /* PLAGE MIDI : intention MUSICALE, donc elle n'a pas sa place AVANT le
+         * script. La regle, ecrite une fois pour tous les composants :
+         *
+         *   ce qui releve de la LECTURE du capteur (anti-rebond, filtre,
+         *   course utile, hysteresis) reste sur la carte, toujours ;
+         *   ce qui releve de l'INTENTION musicale (plage, n° de note ou de CC,
+         *   mode du bouton, balayage) appartient au script.
+         *
+         * C'etait deja le choix fait pour le bouton, dont btnMode est
+         * deliberement ignore en mode script. Le potentiometre et le touch
+         * etaient les deux seuls a appliquer midiCcRange avant le script : trois
+         * regles differentes pour cinq composants, et rien qui le disait. */
+    if (config.midiMode != MidiMode::SCRIPT &&
+        (config.midiCcRangeMin != 0 || config.midiCcRangeMax != 127)) {
         midi_value = map(midi_value, 0, 127, config.midiCcRangeMin, config.midiCcRangeMax);
     }
     
