@@ -1,4 +1,5 @@
 #pragma once
+#include <math.h>   // NAN
 #include <Arduino.h>
 
 // Forward declaration
@@ -54,8 +55,12 @@ public:
     //
     // Ici, contrairement au MIDI entrant, un verbe .out EMET vraiment : un
     // capteur produit du MIDI, il n'en transforme pas.
+    // `brut` : la lecture du capteur dans sa RESOLUTION NATIVE, celle que lit
+    // raw.in(). NAN (le defaut) signifie « rien de plus fin que `valeur` » —
+    // le cas d'un contact, qui n'a que 0/1.
     static void executerCapteur(const char* script, float valeur,
-                                MidiSender* midi_sender, Etat* etat = nullptr);
+                                MidiSender* midi_sender, Etat* etat = nullptr,
+                                float brut = NAN);
 
     // ── Traitement d'un EVENEMENT MIDI ENTRANT ──────────────────────────────
     // execute() ci-dessus prend une seule valeur flottante : c'est le modele des

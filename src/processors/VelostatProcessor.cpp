@@ -172,8 +172,10 @@ void VelostatProcessor::process(
     }
     // Script mode must run even without a component name.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
+        /* Idem : la lecture pleine resolution pour raw.in() (§55). */
         MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
-                                      midi_sender, &state.scriptEtat);
+                                      midi_sender, &state.scriptEtat,
+                                      (float)filtered_value);
     }
 }
 

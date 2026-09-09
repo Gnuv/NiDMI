@@ -271,6 +271,20 @@ Source evaluerSource(const String& seg, const Evt& e) {
     if (verbe(seg, "i", args)) return { roundf(valeurArg(args.length() ? args : String("0"))), true };
     // r(...) / receive(...) — lecture du registre, se declenche sur tout.
     if (verbe(seg, "r", args) || verbe(seg, "receive", args)) return { valeurArg(seg), true };
+    /* raw.in() — la LECTURE DU CAPTEUR dans sa resolution native.
+     *
+     *   r("in")    valeur mise a l'echelle MIDI, 0..127
+     *   raw.in()   meme lecture avant cette mise a l'echelle : 0..4095 pour un
+     *              capteur analogique, 0/1 pour un contact.
+     *
+     * Ce n'est pas un contournement du conditionnement : filtre, course utile et
+     * hysteresis s'appliquent dans les deux cas — ils relevent de la lecture du
+     * capteur, pas de l'intention musicale (MESURES.md §55). Seule la
+     * quantification en 0..127 est ecartee, ce qui rend la pleine resolution
+     * disponible pour un pitch bend ou une rampe.
+     *
+     * « raw » est un nom RESERVE du registre. */
+    if (seg == "raw.in()") return { FluxRegistry::get("raw"), true };
 
     const bool note = (e.type == Evt::NoteOn || e.type == Evt::NoteOff);
     int f1, f2;
@@ -832,7 +846,7 @@ bool MappingEngine::executeMidiCc(const char* script,
 // Un script de capteur et un script de mapping disent desormais la meme chose.
 #ifndef NMS_BANC_HOTE
 void MappingEngine::executerCapteur(const char* script, float valeur,
-                                    MidiSender* sender, Etat* etat) {
+                                    MidiSender* sender, Etat* etat, float brut) {
     if (!script || script[0] == '\0') return;
 
     // « in » : la poignee conventionnelle sur la valeur qui vient de declencher
@@ -840,6 +854,10 @@ void MappingEngine::executerCapteur(const char* script, float valeur,
     // garantit qu'un composant sans nom reste scriptable. Ce n'est pas une
     // extension de la langue — r() existe deja.
     FluxRegistry::update("in", valeur);
+    /* Et la lecture native sous « raw », pour raw.in(). Quand l'appelant n'en
+     * fournit pas de distincte, les deux coincident — c'est le cas d'un contact,
+     * qui n'a rien de plus fin que 0/1. */
+    FluxRegistry::update("raw", isnan(brut) ? valeur : brut);
 
     Evenement e;                       // sans famille : seules r/f/i/litteral tirent
     Sortie liste[MAX_SORTIES];

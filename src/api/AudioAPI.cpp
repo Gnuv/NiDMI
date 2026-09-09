@@ -391,6 +391,14 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * L'etat de pipeline est le SIEN : essayer un script ne derange pas celui
      * qui tourne.                                                            */
     server.on("/api/mapping/essai", HTTP_POST, [](AsyncWebServerRequest *request){
+        /* `raw` : poser la valeur du registre que lit raw.in().
+         *
+         * Le banc de conformite compare la carte au moteur web. Sur la carte, le
+         * registre est VIVANT — un potentiometre y publie « raw » en continu —
+         * alors qu'il est vide cote web : sans ce parametre, l'ecart mesure
+         * l'environnement, pas la semantique (constate : 127 contre 5). */
+        if (request->hasParam("raw", true))
+            FluxRegistry::update("raw", request->getParam("raw", true)->value().toFloat());
         static MappingEngine::Etat etats[8];
         auto par = [&](const char* n) -> String {
             return request->hasParam(n, true) ? request->getParam(n, true)->value() : String("");
