@@ -352,10 +352,15 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
         const int n = args.length() ? (int)args.toInt() : 0;
         return { (n >= 0 && n < MappingEngine::MAX_INLETS) ? e.inlets[n] : 0.0f, true };
     }
-    /* raw.in([n]) — la meme lecture AVANT la mise a l'echelle MIDI : 0..4095
-     * pour un capteur analogique, 0/1 pour un contact. Le conditionnement
-     * (filtre, course utile, hysteresis) s'applique dans les deux cas — il
-     * releve de la lecture du capteur, pas de l'intention musicale. */
+    /* raw.in([n]) — la meme lecture dans la RESOLUTION NATIVE du capteur :
+     * 0..4095 pour un ADC 12 bits, 0/1 pour un contact, la ou in() rend un
+     * flottant NORMALISE de 0 a 1.
+     *
+     * Une entree ne porte AUCUNE echelle de protocole : la mise a l'echelle
+     * MIDI — comme celle du DMX ou de l'OSC — appartient au script, qui ecrit
+     * « in() : *(127) : ctl.out(1,7) ». Le conditionnement, lui (filtre, course
+     * utile, hysteresis), s'applique dans les deux cas : il releve de la lecture
+     * du capteur, pas de l'intention musicale. */
     if (verbe(seg, "raw.in", args)) {
         const int n = args.length() ? (int)args.toInt() : 0;
         return { (n >= 0 && n < MappingEngine::MAX_INLETS) ? e.raws[n] : 0.0f, true };
@@ -522,7 +527,15 @@ void emettre(Sortie* sorties, int max, int& n, const Sortie& s) {
     if (n < max) sorties[n++] = s;   // au-dela, on ecrete plutot que deborder
 }
 
-uint8_t sept(float v) { return (uint8_t)constrain((int)lroundf(v), 0, 127); }
+/* ARRONDI DU MOTEUR DE REFERENCE : la moitie va vers le HAUT, pas a l'oppose
+ * de zero. Math.round(-0.5) rend 0 en JavaScript, la ou lroundf(-0.5) rend -1.
+ * Sans egard, c'est invisible tant que les valeurs restent positives — et le
+ * banc l'a trouve sur « in() : *(16383) : -(8192) : bend.out(1) » avec une
+ * entree a mi-course : 8191,5 - 8192 = -0,5, donc 0 d'un cote et -1 de l'autre.
+ * Un demi-pas de pitch bend, mais un ECART de langage. */
+long arrondi(float v) { return (long)floorf(v + 0.5f); }
+
+uint8_t sept(float v) { return (uint8_t)constrain((int)arrondi(v), 0, 127); }
 
 // Evalue UN segment. Renvoie false si le segment bloque le pipeline — c'est le
 // `null` du moteur web (sel qui ne trouve pas, block, spigot ferme, change sans
@@ -981,7 +994,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
     if (verbe(seg, "noteoff.out", a)) {
         int chn; if (!canalSeul(a, 1, chn)) return true;
         const uint8_t ch = (uint8_t)chn;
-        const int v = (int)lroundf(courant);
+        const int v = (int)arrondi(courant);
         if (v == 128) {                       // 128 = toutes les notes
             for (int i = 0; i < 128; i++) {
                 Sortie s; s.type = Sortie::NoteOff; s.canal = ch; s.a = (uint8_t)i; s.b = 0;
@@ -1024,7 +1037,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         int i0 = 0;
         uint8_t hote = 0;
         if (estNombre(m[0])) {
-            const int oct = (int)lroundf(valeurArg(m[0]));
+            const int oct = (int)arrondi(valeurArg(m[0]));
             if (oct >= 0 && oct <= 255) { hote = (uint8_t)oct; i0 = 1; }
         }
         if (i0 >= k) return true;
@@ -1054,7 +1067,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         int ch; if (!canalSeul(a, 1, ch)) return true;
         Sortie s; s.type = Sortie::Bend;
         s.canal = (uint8_t)ch;
-        s.valeur14 = (int16_t)constrain((int)lroundf(courant), -8192, 8191);
+        s.valeur14 = (int16_t)constrain((int)arrondi(courant), -8192, 8191);
         emettre(sorties, max, n, s);
         return true;
     }

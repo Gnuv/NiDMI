@@ -142,9 +142,17 @@ void NoiseSamplerProcessor::process(
             FluxRegistry::update(config.name, (float)stable_midi_value);
         }
         if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-            MappingEngine::executerCapteur(config.mappingScript, (float)stable_midi_value,
+        /* NORMALISE 0..1. Une entree de composant ne porte AUCUNE echelle de
+         * protocole : la mise a l'echelle MIDI — comme la mise a l'echelle DMX
+         * ou OSC — appartient au script (« in() : *(127) : ctl.out(1,7) »).
+         * Sans cela le pipeline arrivait deja quantifie en 0..127, c'est-a-dire
+         * qu'un choix de protocole etait fige avant le premier verbe. La pleine
+         * resolution reste lisible par raw.in(). */
+            MappingEngine::executerCapteur(config.mappingScript,
+                                          (float)stable_midi_value / 127.0f,
                                           midi_sender, state.scriptEtats,
-                                      ComponentState::MAX_PIPELINES_BROCHE);
+                                      ComponentState::MAX_PIPELINES_BROCHE,
+                                          (float)stable_midi_value);
         }
         return;
     }
@@ -188,9 +196,17 @@ void NoiseSamplerProcessor::process(
     }
     // Mode script : exécuter même sans nom de composant.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-        MappingEngine::executerCapteur(config.mappingScript, (float)midi_value,
+        /* NORMALISE 0..1. Une entree de composant ne porte AUCUNE echelle de
+         * protocole : la mise a l'echelle MIDI — comme la mise a l'echelle DMX
+         * ou OSC — appartient au script (« in() : *(127) : ctl.out(1,7) »).
+         * Sans cela le pipeline arrivait deja quantifie en 0..127, c'est-a-dire
+         * qu'un choix de protocole etait fige avant le premier verbe. La pleine
+         * resolution reste lisible par raw.in(). */
+        MappingEngine::executerCapteur(config.mappingScript,
+                                      (float)midi_value / 127.0f,
                                       midi_sender, state.scriptEtats,
-                                      ComponentState::MAX_PIPELINES_BROCHE);
+                                      ComponentState::MAX_PIPELINES_BROCHE,
+                                      (float)midi_value);
     }
 }
 

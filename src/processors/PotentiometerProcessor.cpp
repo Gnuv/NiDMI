@@ -205,7 +205,14 @@ void PotentiometerProcessor::process(
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         /* `filtered_value` : la lecture apres filtre et course utile, AVANT la
          * quantification en 0..127 — c'est ce que rend raw.in() (§55). */
-        MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
+        /* NORMALISE 0..1. Une entree de composant ne porte AUCUNE echelle de
+         * protocole : la mise a l'echelle MIDI — comme la mise a l'echelle DMX
+         * ou OSC — appartient au script (« in() : *(127) : ctl.out(1,7) »).
+         * Sans cela le pipeline arrivait deja quantifie en 0..127, c'est-a-dire
+         * qu'un choix de protocole etait fige avant le premier verbe. La pleine
+         * resolution reste lisible par raw.in(). */
+        MappingEngine::executerCapteur(config.mappingScript,
+                                      (float)filtered_value / 4095.0f,
                                       midi_sender, state.scriptEtats,
                                       ComponentState::MAX_PIPELINES_BROCHE,
                                       (float)filtered_value);

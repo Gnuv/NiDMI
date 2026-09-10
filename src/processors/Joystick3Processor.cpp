@@ -265,9 +265,11 @@ void Joystick3Processor::process(
          * lui parvenait etait `last_value`, c'est-a-dire la valeur FILTREE
          * (0..4095), la ou in() promet une echelle MIDI : la lecture native va
          * desormais dans raw.in(n), a sa place. */
-        const float valeurs[3] = { (float)normToMidiValue(xNorm),
-                                   (float)normToMidiValue(yNorm),
-                                   (float)normToMidiValue(zNorm) };
+        /* NORMALISES 0..1 : xNorm est centre, de -127 a +127. Aucune echelle
+         * de protocole avant le script — c'est lui qui mettra a l'echelle. */
+        const float valeurs[3] = { ((float)xNorm + 127.0f) / 254.0f,
+                                   ((float)yNorm + 127.0f) / 254.0f,
+                                   ((float)zNorm + 127.0f) / 254.0f };
         const float bruts[3]   = { (float)xFiltered, (float)yFiltered, (float)zFiltered };
         MappingEngine::executerCapteur(config.mappingScript, valeurs, 3,
                                       midi_sender, state.scriptEtats,

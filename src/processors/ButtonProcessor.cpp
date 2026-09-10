@@ -192,6 +192,9 @@ void ButtonProcessor::process(
                       currentStableState ? "APPUI" : "RELACHE");
 
         if (config.mappingScript[0] != '\0') {
+            /* Deja NORMALISE : un contact vaut 0 ou 1, et 1 est bien le haut
+             * de l'echelle. Rien a diviser — mais la regle est la meme que pour
+             * les autres : aucune echelle de protocole avant le script. */
             MappingEngine::executerCapteur(config.mappingScript,
                                            currentStableState ? 1.0f : 0.0f,
                                            midi_sender, state.scriptEtats,
