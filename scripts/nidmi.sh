@@ -325,6 +325,33 @@ show_help() {
 }
 
 # Fonction de synchronisation
+# ── L'app embarquee est-elle EN RETARD sur le depot ? ────────────────────────
+#
+# L'app web voyage DANS le binaire (src/ui/app_archive.cpp, genere par
+# scripts/cartes/embarquer-app.py du depot nidmi). Rien ne le rappelait : on
+# pouvait modifier l'interface, construire, flasher — et la carte servait l'app
+# d'avant, sans le moindre signe. Constate : archive.js en 404 sur la carte
+# alors qu'il existait depuis des heures dans le depot.
+#
+# On ne construit donc plus sans le dire. AVERTISSEMENT, pas refus : construire
+# le firmware seul, sans toucher a l'UI, est legitime.
+verifier_app_embarquee() {
+    local nidmi="${NIDMI_APP_DIR:-$HOME/Documents/OSC CRReaM/nidmi}"
+    local arch="$REPO_DIR/src/ui/app_archive.cpp"
+    [ -f "$arch" ] || return 0
+    [ -d "$nidmi" ] || return 0
+    local recents
+    recents=$(find "$nidmi/nidmi.html" "$nidmi/js" "$nidmi/css" \
+                   -type f -newer "$arch" 2>/dev/null | grep -v "/\." | head -20)
+    [ -z "$recents" ] && return 0
+    echo ""
+    echo "⚠️  L'APP EMBARQUÉE EST EN RETARD sur le dépôt :"
+    echo "$recents" | sed "s|$nidmi/|      |"
+    echo "   La carte servirait cette version-là, sans rien dire."
+    echo "   Régénérer :  python3 '$nidmi/scripts/cartes/embarquer-app.py'"
+    echo ""
+}
+
 sync_files() {
     echo "🔄 Synchronisation des fichiers..."
     echo "   📁 Source: $REPO_DIR"
@@ -907,6 +934,7 @@ main() {
                "build")
                    echo "🚀 NiDMI - Synchronisation + Compilation + Stockage"
                    echo "========================================================"
+                   verifier_app_embarquee
                    sync_files
                    clean_cache
                    build_binary
