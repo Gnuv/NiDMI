@@ -72,12 +72,13 @@ public:
     static void executerCapteur(const char* script, const float* valeurs,
                                 int nValeurs, MidiSender* midi_sender,
                                 Etat* etats = nullptr, int nEtats = 0,
-                                const float* bruts = nullptr);
+                                const float* bruts = nullptr,
+                                const char* origine = nullptr);
     // Commodite pour les composants a UNE valeur — la plupart.
     static void executerCapteur(const char* script, float valeur,
                                 MidiSender* midi_sender,
                                 Etat* etats = nullptr, int nEtats = 0,
-                                float brut = NAN);
+                                float brut = NAN, const char* origine = nullptr);
 
 
 
@@ -125,6 +126,13 @@ public:
          * `raws` dans la résolution native du capteur. in(n) et raw.in(n) les
          * lisent ; ils ne passent PAS par le registre, qui est un bus PARTAGÉ
          * et ne doit contenir que ce qu'on y a mis expressément. */
+        /* QUI execute ce script. « pin:5 », « map:2 », « essai ». Portee par
+         * l'evenement plutot que passee en parametre : elle suit ainsi les
+         * REPRISES DIFFEREES, si bien qu'un print() derriere un del() reste
+         * attribue a la broche qui l'a declenche. Sans elle, la carte disait ce
+         * qu'elle imprimait sans jamais dire qui — et l'app attribuait tout au
+         * bloc map, y compris les print() des broches. */
+        char    origine[12] = {0};
         float   inlets[MAX_INLETS] = {0, 0, 0, 0};
         float   raws[MAX_INLETS]   = {0, 0, 0, 0};
         uint8_t nInlets  = 0;
@@ -191,7 +199,8 @@ public:
      * « que se passe-t-il quand il n'y a pas de note.in() ? » — heritage assume
      * d'un DSL passe de script MIDI a script generaliste (DMX, OSC...). */
     static void battre(const char* script, Evenement::Type type, uint32_t instant,
-                       MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
+                       MidiSender* sender, Etat* etats = nullptr, int nEtats = 0,
+                       const char* origine = nullptr);
 
     /* Un message OSC ENTRANT : fait tourner osc.in(). Meme office que battre()
      * pour l'horloge — le moteur fabrique l'evenement, execute et emet. Un
@@ -199,7 +208,8 @@ public:
      * l'ecoute, contrairement a un message MIDI qu'un script ne doit pas
      * avaler. C'est le moteur de reference qui en decide ainsi. */
     static void battreOsc(const char* script, const char* adresse, float valeur,
-                          MidiSender* sender, Etat* etats = nullptr, int nEtats = 0);
+                          MidiSender* sender, Etat* etats = nullptr, int nEtats = 0,
+                          const char* origine = nullptr);
 
     /* Les VERBES DE TEMPS — del(), et bientot makenote(), lag(), ramp() — ne
      * rendent pas leur valeur tout de suite : ils la mettent de cote et l'aval
@@ -225,7 +235,7 @@ public:
     // c'est ce qui le rend eprouvable hors carte. print() delegue donc a un
     // rappel que l'appelant installe. Sur la carte il ecrit au journal et
     // pousse une trame vers l'app ; au banc, il n'y a rien a installer.
-    typedef void (*Impression)(const char* etiquette, float valeur);
+    typedef void (*Impression)(const char* origine, const char* etiquette, float valeur);
     static void surImpression(Impression fn);
 
     /* L'EMETTEUR OSC, pose de l'exterieur — comme l'impression. Le moteur ne

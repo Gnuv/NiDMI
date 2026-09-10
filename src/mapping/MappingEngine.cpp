@@ -957,7 +957,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         if (etiquette.length() >= 2 && etiquette[0] == '"')
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
-            g_impression(etiquette.length() ? etiquette.c_str() : "out", courant);
+            g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out", courant);
         return true;
     }
     if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) return true;
@@ -1396,11 +1396,13 @@ void MappingEngine::battreDifferes(uint32_t maintenant, MidiSender* sender) {
  * aurait pietines. C'est in(n) et raw.in(n) qui les lisent, maintenant. */
 void MappingEngine::executerCapteur(const char* script, const float* valeurs,
                                     int nValeurs, MidiSender* sender,
-                                    Etat* etats, int nEtats, const float* bruts) {
+                                    Etat* etats, int nEtats, const float* bruts,
+                                    const char* origine) {
     if (!script || script[0] == '\0' || !valeurs || nValeurs <= 0) return;
 
     Evenement e;
     e.type = Evenement::Capteur;       // sans famille : aucun passage transparent
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
     e.nInlets = (uint8_t)((nValeurs > MAX_INLETS) ? MAX_INLETS : nValeurs);
     for (int i = 0; i < e.nInlets; i++) {
         e.inlets[i] = valeurs[i];
@@ -1417,9 +1419,10 @@ void MappingEngine::executerCapteur(const char* script, const float* valeurs,
 /* Commodite pour les composants a UNE valeur — la plupart. */
 void MappingEngine::executerCapteur(const char* script, float valeur,
                                     MidiSender* sender, Etat* etats, int nEtats,
-                                    float brut) {
+                                    float brut, const char* origine) {
     const float v = valeur, b = brut;
-    executerCapteur(script, &v, 1, sender, etats, nEtats, isnan(brut) ? nullptr : &b);
+    executerCapteur(script, &v, 1, sender, etats, nEtats,
+                    isnan(brut) ? nullptr : &b, origine);
 }
 
 /* Le battement d'horloge : fait tourner les pipelines qui n'attendent aucun
@@ -1427,10 +1430,12 @@ void MappingEngine::executerCapteur(const char* script, float valeur,
  * capteur : un script generaliste (DMX, OSC, MIDI) n'a pas a savoir d'ou vient
  * le declencheur. */
 void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t instant,
-                           MidiSender* sender, Etat* etats, int nEtats) {
+                           MidiSender* sender, Etat* etats, int nEtats,
+                           const char* origine) {
     if (!script || script[0] == '\0') return;
     Evenement e;
     e.type = type;
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
     e.instant = instant;                  // l'horloge est posee par executer()
     Sortie liste[MAX_SORTIES];
     bool traite = false;
@@ -1439,10 +1444,12 @@ void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t in
 }
 
 void MappingEngine::battreOsc(const char* script, const char* adresse, float valeur,
-                              MidiSender* sender, Etat* etats, int nEtats) {
+                              MidiSender* sender, Etat* etats, int nEtats,
+                              const char* origine) {
     if (!script || script[0] == '\0' || !adresse) return;
     Evenement e;
     e.type = Evenement::Osc;
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
     e.reel = valeur;
     snprintf(e.adresse, sizeof e.adresse, "%s", adresse);
     Sortie liste[MAX_SORTIES];

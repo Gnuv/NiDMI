@@ -193,10 +193,14 @@ void ButtonProcessor::process(
             /* Deja NORMALISE : un contact vaut 0 ou 1, et 1 est bien le haut
              * de l'echelle. Rien a diviser — mais la regle est la meme que pour
              * les autres : aucune echelle de protocole avant le script. */
+            /* QUI imprime. La carte disait ce qu'elle imprimait sans jamais dire
+             * d'ou cela venait, et l'app attribuait tout au bloc map — les print()
+             * des broches compris. */
+            char org[12]; snprintf(org, sizeof org, "pin:%u", (unsigned)config.gpio);
             MappingEngine::executerCapteur(config.mappingScript,
                                            currentStableState ? 1.0f : 0.0f,
                                            midi_sender, state.scriptEtats,
-                                      ComponentState::MAX_PIPELINES_BROCHE);
+                                      ComponentState::MAX_PIPELINES_BROCHE, NAN, org);
         } else {
             NIDMI_WEB_LOG("[Bouton] GPIO%d : aucun script — rien a emettre", (int)config.gpio);
         }

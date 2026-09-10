@@ -305,15 +305,18 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
          * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
          * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
          * en tache bloquee. */
+        /* QUI execute : « map:0 »..« map:3 ». Sans cela un print() d'emplacement
+         * arrivait a l'app sans origine, indistinguable de celui d'une broche. */
+        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         if (em.initEnAttente) {
             em.initEnAttente = false;
             MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
                                   maintenant, this, em.etats,
-                                  MappingEngine::MAX_PIPELINES_SCRIPT);
+                                  MappingEngine::MAX_PIPELINES_SCRIPT, org);
         }
         MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
                               maintenant, this, em.etats,
-                              MappingEngine::MAX_PIPELINES_SCRIPT);
+                              MappingEngine::MAX_PIPELINES_SCRIPT, org);
     }
 }
 
@@ -321,8 +324,9 @@ void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
     for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
         Emplacement& em = emplacements[e];
         if (!em.contenu.length()) continue;
+        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         MappingEngine::battreOsc(em.contenu.c_str(), adresse, valeur, this,
-                                 em.etats, MappingEngine::MAX_PIPELINES_SCRIPT);
+                                 em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
     }
 }
 

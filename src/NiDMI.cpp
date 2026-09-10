@@ -267,10 +267,18 @@ void nidmi_begin() {
      * restait vide alors que le script tournait tres bien. La carte pousse
      * maintenant une trame « NMS_PRINT:<etiquette>\x1f<valeur> » que l'app
      * affiche dans la console du bloc concerne. */
-    MappingEngine::surImpression([](const char* etiquette, float valeur) {
-        NIDMI_WEB_LOG("[nms] %s : %.4f\n", etiquette, valeur);
-        char trame[96];
-        snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%.4f", etiquette, valeur);
+    MappingEngine::surImpression([](const char* origine, const char* etiquette,
+                                   float valeur) {
+        /* L'ORIGINE D'ABORD. La trame ne portait que l'etiquette et la valeur :
+         * l'app ne pouvait donc pas savoir QUI avait imprime, et attribuait
+         * tout au bloc map dont le script tourne sur la carte — les print() des
+         * broches compris. Trois champs desormais : « pin:5 », « map:2 » ou
+         * « essai », puis l'etiquette, puis la valeur. */
+        const char* org = (origine && origine[0]) ? origine : "?";
+        NIDMI_WEB_LOG("[%s] %s : %.4f", org, etiquette, valeur);
+        char trame[112];
+        snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
+                 org, etiquette, valeur);
         serverCore.websocket().textAll(trame);
     });
 

@@ -492,6 +492,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         }
         else if (genre == "capteur") {
             ev.type = MappingEngine::Evenement::Capteur;
+            snprintf(ev.origine, sizeof ev.origine, "essai");
             auto listeFlottants = [](const String& t, float* out, int max) -> int {
                 int n = 0, i = 0;
                 while (i <= (int)t.length() && n < max) {

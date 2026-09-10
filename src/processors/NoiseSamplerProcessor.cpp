@@ -148,11 +148,13 @@ void NoiseSamplerProcessor::process(
          * Sans cela le pipeline arrivait deja quantifie en 0..127, c'est-a-dire
          * qu'un choix de protocole etait fige avant le premier verbe. La pleine
          * resolution reste lisible par raw.in(). */
+            /* QUI imprime — cf. les autres processeurs. */
+            char org[12]; snprintf(org, sizeof org, "pin:%u", (unsigned)config.gpio);
             MappingEngine::executerCapteur(config.mappingScript,
                                           (float)stable_midi_value / 127.0f,
                                           midi_sender, state.scriptEtats,
                                       ComponentState::MAX_PIPELINES_BROCHE,
-                                          (float)stable_midi_value);
+                                          (float)stable_midi_value, org);
         }
         return;
     }
@@ -202,11 +204,13 @@ void NoiseSamplerProcessor::process(
          * Sans cela le pipeline arrivait deja quantifie en 0..127, c'est-a-dire
          * qu'un choix de protocole etait fige avant le premier verbe. La pleine
          * resolution reste lisible par raw.in(). */
+        /* QUI imprime — cf. les autres processeurs. */
+        char org[12]; snprintf(org, sizeof org, "pin:%u", (unsigned)config.gpio);
         MappingEngine::executerCapteur(config.mappingScript,
                                       (float)midi_value / 127.0f,
                                       midi_sender, state.scriptEtats,
                                       ComponentState::MAX_PIPELINES_BROCHE,
-                                      (float)midi_value);
+                                      (float)midi_value, org);
     }
 }
 

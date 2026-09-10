@@ -257,9 +257,11 @@ void JoystickProcessor::process(
         const float valeurs[2] = { ((float)xNorm + 127.0f) / 254.0f,
                                    ((float)yNorm + 127.0f) / 254.0f };
         const float bruts[2]   = { (float)xFiltered, (float)yFiltered };
+        /* QUI imprime — cf. les autres processeurs. */
+        char org[12]; snprintf(org, sizeof org, "pin:%u", (unsigned)config.gpio);
         MappingEngine::executerCapteur(config.mappingScript, valeurs, 2,
                                       midi_sender, state.scriptEtats,
-                                      ComponentState::MAX_PIPELINES_BROCHE, bruts);
+                                      ComponentState::MAX_PIPELINES_BROCHE, bruts, org);
     }
 }
 
