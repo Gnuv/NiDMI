@@ -21,6 +21,10 @@ void nidmi_web_debug_init(AsyncWebSocket* ws);
 void nidmi_web_debug_handle_ws_text(AsyncWebSocketClient* client, const String& message);
 void nidmi_web_debug_append_line(const char* line);
 bool nidmi_web_debug_is_supported();
+/* Draine le rattrapage d'historique HORS du rappel WebSocket : emettre vers un
+ * client pendant qu'on traite sa trame le deconnecte. A appeler depuis la
+ * boucle principale. */
+void nidmi_web_debug_pump();
 
 #else
 
@@ -28,6 +32,7 @@ inline void nidmi_web_debug_init(AsyncWebSocket*) {}
 inline void nidmi_web_debug_handle_ws_text(AsyncWebSocketClient*, const String&) {}
 inline void nidmi_web_debug_append_line(const char*) {}
 inline bool nidmi_web_debug_is_supported() { return false; }
+inline void nidmi_web_debug_pump() {}
 
 #endif
 

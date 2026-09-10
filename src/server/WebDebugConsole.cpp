@@ -44,15 +44,23 @@ static void send_debug_log(AsyncWebSocketClient* client, const char* line) {
     }
 }
 
-static void flush_history_to(AsyncWebSocketClient* client) {
-    if (!client) {
-        return;
-    }
-    for (uint16_t i = 0; i < g_size; ++i) {
-        uint16_t idx = (g_start + i) % kRingLines;
-        send_debug_log(client, g_ring[idx]);
-    }
-}
+/* LE RATTRAPAGE D'HISTORIQUE SE FAIT HORS DU RAPPEL, UNE LIGNE A LA FOIS.
+ *
+ * Il se faisait ICI, dans le rappel WS_EVT_DATA, en poussant les 48 lignes du
+ * tampon d'un coup. Deux fautes, et la connexion en mourait a tous les coups :
+ *   - emettre vers un client PENDANT qu'on traite sa propre trame corrompt son
+ *     etat dans ESPAsyncWebServer ;
+ *   - 48 messages d'affilee debordent la file du client, que la bibliotheque
+ *     ferme alors sans ceremonie.
+ * Symptome : le socket se fermait 71 ms apres « DEBUG_CONSOLE:1 », code 1006,
+ * sans trame de fermeture. Sans l'abonnement il vivait tres bien — c'etait donc
+ * l'abonnement lui-meme qui tuait la connexion, et la console restait vide
+ * alors que la carte parlait.
+ *
+ * On memorise donc l'ID du client (jamais son POINTEUR, qui pend des qu'il se
+ * deconnecte) et la boucle principale draine, en respectant canSend(). */
+static uint32_t g_flushClient = 0;
+static uint16_t g_flushIndex  = 0;
 
 void nidmi_web_debug_init(AsyncWebSocket* ws) {
     g_ws = ws;
@@ -62,18 +70,29 @@ bool nidmi_web_debug_is_supported() {
     return true;
 }
 
+void nidmi_web_debug_pump() {
+    if (!g_flushClient || !g_ws) return;
+    AsyncWebSocketClient* c = g_ws->client(g_flushClient);
+    if (!c || c->status() != WS_CONNECTED) { g_flushClient = 0; return; }
+    if (!c->canSend()) return;                 // file pleine : on repassera
+    if (g_flushIndex >= g_size) {
+        c->text("DEBUG_CONSOLE_STATE:1");      // l'accuse ferme le rattrapage
+        g_flushClient = 0;
+        return;
+    }
+    send_debug_log(c, g_ring[(g_start + g_flushIndex) % kRingLines]);
+    ++g_flushIndex;
+}
+
 void nidmi_web_debug_handle_ws_text(AsyncWebSocketClient* client, const String& message) {
     if (message == "DEBUG_CONSOLE:1") {
         g_subscribe = true;
-        flush_history_to(client);
-        if (client) {
-            client->text("DEBUG_CONSOLE_STATE:1");
-        }
+        /* On NOTE, on n'emet pas : la boucle principale s'en charge. */
+        g_flushClient = client ? client->id() : 0;
+        g_flushIndex  = 0;
     } else if (message == "DEBUG_CONSOLE:0") {
         g_subscribe = false;
-        if (client) {
-            client->text("DEBUG_CONSOLE_STATE:0");
-        }
+        g_flushClient = 0;
     }
 }
 

@@ -394,6 +394,9 @@ void nidmi_loop() {
     }
     
     processComponents();
+    /* Le rattrapage de la console web : une ligne par tour, hors du rappel
+     * WebSocket (voir WebDebugConsole.cpp). */
+    nidmi_web_debug_pump();
 }
 
 // Instance globale
