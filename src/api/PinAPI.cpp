@@ -123,6 +123,14 @@ void setupPinAPI(AsyncWebServer& server) {
         String mcuName = PinMapper::getMcuName();
         mcuName.toLowerCase();
         json += "\"board\":\"" + mcuName + "\",";
+        /* La LIMITE RÉELLE d'un script de broche EN LIGNE, dite par celui qui
+         * la fait respecter. L'app l'affichait en dur — « la carte n'en retient
+         * que 127 » — un chiffre hérité du temps ou le script vivait dans un
+         * char[128]. Il est faux depuis que le tampon est dimensionné au
+         * contenu et que la route REFUSE au-delà : l'usager se croyait borné a
+         * 127 caractères quand la carte en accepte plus de dix fois autant.
+         * Un chiffre en dur dans l'app est un chiffre qui ment tot ou tard. */
+        json += "\"scriptMaxInline\":" + String((unsigned)(NVS_MAX_PIN_CONFIG_SIZE - 400U)) + ",";
         json += "\"pins\":[";
         
         const PinMapping* mappings = PinMapper::getAllMappings();
