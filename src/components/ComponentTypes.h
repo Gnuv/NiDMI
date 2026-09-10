@@ -175,6 +175,9 @@ struct ComponentState {
 
     // --- Télémétrie pour monitoring SVG (RAW vs MIDI) ---
     // RAW = valeur "brute" à afficher en mode RAW (touch 32 bits, MPR121 mask 0..4095, etc.)
+    /* Le declencheur PLEINE RESOLUTION du script (voir SeuilFin). Distinct de
+     * `hysteresis`, qui reste le declencheur du chemin MIDI direct. */
+    SeuilFin seuilScript;
     uint32_t last_raw_value_u32;
     // MIDI = valeur "fonctionnelle" (data1 OSC en mode MIDI, selon OscMidiHandler ou conventions directes)
     uint8_t last_midi_value_u8;

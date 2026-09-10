@@ -2,6 +2,33 @@
 
 #include <Arduino.h>
 
+/* SEUIL PLEINE RESOLUTION — le declencheur d'un script.
+ *
+ * `Hysteresis` ci-dessous reduit 12 bits vers 7 : son etat EST un niveau MIDI.
+ * Tant qu'un script servait a fabriquer du MIDI, declencher sur ce niveau
+ * suffisait. Ce n'est plus le cas : un script peut piloter de l'OSC, du DMX, du
+ * CV, ou simplement calculer — et il ne pouvait alors pas voir un geste plus fin
+ * qu'un cent-vingt-septieme de la course, alors meme que raw.in() lui promet la
+ * resolution native. La quantification MIDI decidait de l'EXECUTION du pipeline,
+ * un cran au-dessus de la ou on l'avait deja retiree.
+ *
+ * Ce seuil-ci garde la valeur CONDITIONNEE (0..4095) et une zone morte en LSB.
+ * Defaut 8 sur 4096, soit 0,2 % de la course : assez pour taire le tremblement
+ * du dernier bit d'un ADC, assez fin pour rendre 512 pas la ou le MIDI en donne
+ * 128. */
+struct SeuilFin {
+    uint16_t precedente = 0xFFFF;      // 0xFFFF = jamais lue
+    bool update(uint16_t entree, uint16_t zoneMorte = 8) {
+        if (precedente == 0xFFFF) { precedente = entree; return true; }
+        const uint16_t d = (entree > precedente) ? (entree - precedente)
+                                                 : (precedente - entree);
+        if (d < zoneMorte) return false;
+        precedente = entree;
+        return true;
+    }
+    uint16_t valeur() const { return precedente; }
+};
+
 // Hystérésis unifiée pour tous les composants - méthode Control-Surface
 // Réduit directement la résolution de 12 bits (0-4095) vers 7 bits (0-127)
 // BITS = nombre de bits de "zone morte" pour l'hystérésis (typiquement 2)

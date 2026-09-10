@@ -150,13 +150,32 @@ void PotentiometerProcessor::process(
     }
     
     // ===== TRAITEMENT STANDARD pour GPIO normales (autres types) =====
-    // Appliquer l'hystérésis directement sur filtered_value (0-4095)
-    // L'hystérésis réduit automatiquement vers 0-127 (méthode Control-Surface)
-    if (!state.hysteresis.update(filtered_value)) {
-        return; // Valeur stable, rien à faire
+    /* DEUX DECLENCHEURS, SELON LA DESTINATION.
+     *
+     * Le seul declencheur etait l'hysteresis 12 -> 7 bits : le pipeline ne
+     * tournait que lorsque la valeur QUANTIFIEE EN MIDI changeait. Tant qu'un
+     * script servait a fabriquer du MIDI, c'etait sans consequence. Ce n'est
+     * plus le cas — un script peut piloter de l'OSC, du DMX, du CV, ou
+     * simplement calculer — et il ne pouvait alors pas voir un geste plus fin
+     * qu'un cent-vingt-septieme de la course, alors que raw.in() lui promet la
+     * resolution native. La quantification MIDI decidait de l'EXECUTION, un cran
+     * au-dessus de la ou on l'avait deja retiree des valeurs (§71.5).
+     *
+     * En mode SCRIPT on declenche donc sur la valeur CONDITIONNEE, zone morte en
+     * LSB : 512 pas utiles au lieu de 128. Le chemin MIDI direct, lui, garde son
+     * hysteresis — quantifier pour du MIDI y a un sens. */
+    const bool enScript = (config.midiMode == MidiMode::SCRIPT
+                           && config.mappingScript[0] != '\0');
+    if (enScript) {
+        if (!state.seuilScript.update(filtered_value)) return;   // geste trop petit
+    } else {
+        if (!state.hysteresis.update(filtered_value)) {
+            return; // Valeur stable, rien à faire
+        }
     }
-    
-    uint8_t midi_value = state.hysteresis.getValue();  // Déjà 0-127
+
+    uint8_t midi_value = enScript ? (uint8_t)(filtered_value >> 5)
+                                  : state.hysteresis.getValue();  // Déjà 0-127
     
     // Appliquer la plage MIDI si configurée (pas plage complète 0-127)
         /* PLAGE MIDI : intention MUSICALE, donc elle n'a pas sa place AVANT le
@@ -177,8 +196,9 @@ void PotentiometerProcessor::process(
         midi_value = map(midi_value, 0, 127, config.midiCcRangeMin, config.midiCcRangeMax);
     }
     
-    // Comparer avec la dernière valeur ENVOYÉE (comme le MUX)
-    if (midi_value == state.last_value) {
+    /* Second garde, MIDI lui aussi : en mode script il annulerait le premier.
+     * `midi_value` n'y sert plus qu'a la telemetrie. */
+    if (!enScript && midi_value == state.last_value) {
         return; // Pas de changement, ne pas envoyer
     }
     
