@@ -609,8 +609,24 @@ void couperSon() {
   sampleActif = false;                    // l'echantillon s'arrete net
 }
 
+/* UNE NOTE NE DEMARRE PLUS LE MOTEUR. Comme noteOff, elle ne joue que si un
+ * moteur a ete CHARGE deliberement — par setEngine(n>=0), setSampler ou un bip
+ * de test, qui appellent ensureStarted() chacun a leur tour.
+ *
+ * Elle le demarrait, au titre de l'echo « le boitier s'entend lui-meme ». Le
+ * cout, mesure : la PREMIERE note emise par un script de broche demarrait
+ * l'I2S, qui garde ~16 ko et ne les rend jamais (/api/audio/stop repond « ok »
+ * sans rien liberer). Le plus grand bloc contigu tombait de 30 708 a 11 764
+ * octets — c'est lui, et non le tas total, qui decide si AsyncTCP peut
+ * constituer ses tampons. Un appui sur un bouton coutait donc, definitivement,
+ * la marge reseau de la carte, et l'OTA devenait capricieux dans la foulee
+ * (MESURES.md §72.2).
+ *
+ * Et c'est la volonte de l'usager : pas de son tant qu'un moteur audio n'a pas
+ * ete charge. Un boitier qui chante sans qu'on le lui ait demande est une
+ * surprise, pas une fonction. */
 void noteOn(uint8_t note, uint8_t velocity) {
-  if (!ensureStarted()) return;
+  if (!demarre) return;
   Evenement e{note, velocity};
   xQueueSend(evenements, &e, 0);            // jamais bloquant : on préfère
 }                                           // perdre une note qu'un paquet TCP
