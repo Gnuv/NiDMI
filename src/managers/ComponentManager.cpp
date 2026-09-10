@@ -880,15 +880,25 @@ void ComponentManager::midiTaskLoop() {
                         filter_ptr = nullptr;
                     }
                     
-                    // Capteur mono-pin dont la pin a été détectée dans le vide au setup
-                    // (voir ComponentInitializer::setupGpio) : on garde la config mais on
-                    // n'émet rien, plutôt que d'envoyer le bruit d'une entrée flottante.
-                    // Les joysticks ne lèvent jamais ce drapeau (exclus de la détection).
-                    if (config.pin_disconnected) {
-                        index++;
-                        processed++;
-                        continue;
-                    }
+                    /* LE DIAGNOSTIC INFORME, IL NE DECIDE PLUS.
+                     *
+                     * Ici, un capteur juge « en l'air » au setup etait SAUTE —
+                     * son script compris — pour ne pas emettre le bruit d'une
+                     * entree flottante. Deux raisons de ne plus le faire :
+                     *
+                     *  - le test se trompe. Les axes des joysticks en ont ete
+                     *    EXCLUS pour cette raison (ComponentInitializer.cpp), et
+                     *    il a ensuite museles un potentiometre parfaitement
+                     *    cable : lecture 2205/4095, amplitude 1,4 % — une entree
+                     *    flottante ne se tient pas ainsi. Il s'est meme
+                     *    contredit d'un demarrage a l'autre sur la meme broche ;
+                     *  - il decidait EN SILENCE. Une broche muette ressemblait a
+                     *    un script qui ne marche pas, et rien ne permettait de
+                     *    distinguer les deux sans un build special.
+                     *
+                     * Le verdict reste calcule et publie (`jugee_en_l_air` de
+                     * /api/pins/actif et /api/pins/list) : il vaut comme
+                     * AVERTISSEMENT a l'ecran. Le composant, lui, tourne. */
 
                     // Appeler le processeur enregistré pour ce type de composant
                     if (filter_ptr || !def || def->pinType != PinType::PIN_ANALOG) {

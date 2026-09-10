@@ -157,11 +157,9 @@ void ButtonProcessor::process(
         state.last_midi_value_u8 = (uint8_t)state.last_value;
         state.last_telemetry_ts = now;
 
-        if (config.name && config.name[0] != '\0') {
-            // Keep script source logical (0/1), not MIDI-scaled (0/127),
-            // so arithmetic like *(100) produces expected velocities.
-            FluxRegistry::update(config.name, currentStableState ? 1.0f : 0.0f);
-        }
+        /* PLUS DE PUBLICATION D'OFFICE AU BUS — celle-ci avait echappe au
+         * premier passage. Le registre ne doit contenir que ce qu'on y a mis
+         * expressement : « in() : s("bouton1") ». */
 
         /* Le script decide, pas nous.
          *
