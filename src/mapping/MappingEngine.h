@@ -235,7 +235,11 @@ public:
     // c'est ce qui le rend eprouvable hors carte. print() delegue donc a un
     // rappel que l'appelant installe. Sur la carte il ecrit au journal et
     // pousse une trame vers l'app ; au banc, il n'y a rien a installer.
-    typedef void (*Impression)(const char* origine, const char* etiquette, float valeur);
+    /* `graphe` : la valeur est destinee a une COURBE, pas au journal texte.
+     * Un flux continu ne se lit pas en chiffres ; c'est au SCRIPT de le dire,
+     * par graph() plutot que print(), et non a l'hote de le deviner. */
+    typedef void (*Impression)(const char* origine, const char* etiquette,
+                               float valeur, bool graphe);
     static void surImpression(Impression fn);
 
     /* L'EMETTEUR OSC, pose de l'exterieur — comme l'impression. Le moteur ne

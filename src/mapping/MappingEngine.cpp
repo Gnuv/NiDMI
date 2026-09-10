@@ -957,7 +957,21 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         if (etiquette.length() >= 2 && etiquette[0] == '"')
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
-            g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out", courant);
+            g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
+                         courant, false);
+        return true;
+    }
+    /* graph([etiquette]) — la meme valeur, mais EN COURBE. Pendant exact de
+     * print(), passage transparent comme lui. DECLARE, jamais devine : l'hote a
+     * d'abord essaye d'extraire un nombre des lignes de print(), une heuristique
+     * qui tracait ce qu'on n'avait pas demande et saturait l'affichage. */
+    if (verbe(seg, "graph", a)) {
+        String etiquette = a; etiquette.trim();
+        if (etiquette.length() >= 2 && etiquette[0] == '"')
+            etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
+        if (g_impression)
+            g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
+                         courant, true);
         return true;
     }
     if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) return true;
