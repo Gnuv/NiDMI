@@ -306,8 +306,20 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json", j);
     });
     server.on("/api/cues", HTTP_POST, [](AsyncWebServerRequest *request){
-        String texte;
-        if (request->hasParam("cues", true)) texte = request->getParam("cues", true)->value();
+        /* `cues` ABSENT = on NE TOUCHE PAS a la liste.
+         *
+         * L'absence valait chaine vide, donc EFFACAIT tout : une requete mal
+         * formee — un nom de parametre errone, par exemple — repondait 200 et
+         * rendait une liste vide. Constate en direct, sur les cues de l'usager.
+         * Exactement le defaut deja corrige sur /api/midi/script ; il etait
+         * reste ici. Pour EFFACER, on envoie donc `cues` explicitement vide. */
+        if (!request->hasParam("cues", true)) {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"parametre 'cues' absent — "
+                "rien n'a ete modifie. Envoyer 'cues' vide pour effacer.\"}");
+            return;
+        }
+        const String texte = request->getParam("cues", true)->value();
         const bool ok = Cues::ecrireTout(texte);
         request->send(ok ? 200 : 507, "application/json",
                       String("{\"status\":\"") + (ok ? "ok" : "error")
