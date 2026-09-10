@@ -252,15 +252,26 @@ void Joystick3Processor::process(
     state.last_value = xFiltered;
     state.last_time = millis();
 
-    // Update FluxRegistry only when the component has a declared name.
-    if (config.name && config.name[0] != '\0') {
-        FluxRegistry::update(config.name, (float)state.last_value);
-    }
+    /* PLUS DE PUBLICATION D'OFFICE AU BUS. Le registre est un bus PARTAGE :
+     * il ne doit contenir que ce qu'on y a mis expressement — « in() : s("x") ».
+     * Y publier l'entree de chaque composant remplissait un espace commun de
+     * valeurs que personne n'avait demande a partager. Le script lit desormais
+     * ses entrees par in(n) / raw.in(n), qui ne passent pas par le registre. */
     // Script mode must run even without a component name.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
-        MappingEngine::executerCapteur(config.mappingScript, (float)state.last_value,
+        /* LES TROIS AXES, dans l'ordre des inlets : in(0)=X, in(1)=Y, in(2)=Z.
+         * Le script ne voyait que X — Y et Z existaient, partaient en MIDI et en
+         * OSC par ce processeur, et restaient invisibles au script. Et ce qui
+         * lui parvenait etait `last_value`, c'est-a-dire la valeur FILTREE
+         * (0..4095), la ou in() promet une echelle MIDI : la lecture native va
+         * desormais dans raw.in(n), a sa place. */
+        const float valeurs[3] = { (float)normToMidiValue(xNorm),
+                                   (float)normToMidiValue(yNorm),
+                                   (float)normToMidiValue(zNorm) };
+        const float bruts[3]   = { (float)xFiltered, (float)yFiltered, (float)zFiltered };
+        MappingEngine::executerCapteur(config.mappingScript, valeurs, 3,
                                       midi_sender, state.scriptEtats,
-                                      ComponentState::MAX_PIPELINES_BROCHE);
+                                      ComponentState::MAX_PIPELINES_BROCHE, bruts);
     }
 }
 

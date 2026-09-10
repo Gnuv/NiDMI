@@ -438,14 +438,9 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * L'etat de pipeline est le SIEN : essayer un script ne derange pas celui
      * qui tourne.                                                            */
     server.on("/api/mapping/essai", HTTP_POST, [](AsyncWebServerRequest *request){
-        /* `raw` : poser la valeur du registre que lit raw.in().
-         *
-         * Le banc de conformite compare la carte au moteur web. Sur la carte, le
-         * registre est VIVANT — un potentiometre y publie « raw » en continu —
-         * alors qu'il est vide cote web : sans ce parametre, l'ecart mesure
-         * l'environnement, pas la semantique (constate : 127 contre 5). */
-        if (request->hasParam("raw", true))
-            FluxRegistry::update("raw", request->getParam("raw", true)->value().toFloat());
+        /* `in` et `raw` : les ENTREES du composant et leurs lectures natives,
+         * en virgules. Elles ne passent plus par le registre — celui-ci est un
+         * bus PARTAGE, et in(n)/raw.in(n) lisent ce que le composant donne. */
         static MappingEngine::Etat etats[8];
         auto par = [&](const char* n) -> String {
             return request->hasParam(n, true) ? request->getParam(n, true)->value() : String("");
@@ -495,14 +490,34 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
             ev.reel = par("a").toFloat();
             snprintf(ev.adresse, sizeof ev.adresse, "%s", par("adresse").c_str());
         }
-        else if (genre != "capteur") {
+        else if (genre == "capteur") {
+            ev.type = MappingEngine::Evenement::Capteur;
+            auto listeFlottants = [](const String& t, float* out, int max) -> int {
+                int n = 0, i = 0;
+                while (i <= (int)t.length() && n < max) {
+                    int j = t.indexOf(',', i);
+                    if (j < 0) j = t.length();
+                    if (j > i) out[n++] = t.substring(i, j).toFloat();
+                    i = j + 1;
+                }
+                return n;
+            };
+            float vs[MappingEngine::MAX_INLETS], rs[MappingEngine::MAX_INLETS];
+            int nv = listeFlottants(par("in"), vs, MappingEngine::MAX_INLETS);
+            if (!nv) { vs[0] = par("a").toFloat(); nv = 1; }
+            const int nr = listeFlottants(par("raw"), rs, MappingEngine::MAX_INLETS);
+            ev.nInlets = (uint8_t)nv;
+            for (int i = 0; i < nv; i++) {
+                ev.inlets[i] = vs[i];
+                ev.raws[i]   = (i < nr) ? rs[i] : vs[i];
+            }
+        }
+        else {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"genre inconnu\"}");
             return;
         }
-        ev.canal = (uint8_t)c;
-        // « capteur » : evenement sans famille, comme executerCapteur.
-        if (genre == "capteur") FluxRegistry::update("in", (float)a);
+        if (ev.type != MappingEngine::Evenement::Capteur) ev.canal = (uint8_t)c;
 
         /* Rend une sortie OSC sous la meme forme que le banc hote :
          * les arguments en texte, a trois decimales, pour que deux moteurs qui

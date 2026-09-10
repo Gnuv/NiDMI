@@ -270,10 +270,11 @@ void ButtonProcessor::process(
         // Pour toggle, on ne fait rien au Rising
     }
     
-    // Update FluxRegistry only when the component has a declared name.
-    if (config.name && config.name[0] != '\0') {
-        FluxRegistry::update(config.name, currentStableState ? 1.0f : 0.0f);
-    }
+    /* PLUS DE PUBLICATION D'OFFICE AU BUS. Le registre est un bus PARTAGE :
+     * il ne doit contenir que ce qu'on y a mis expressement — « in() : s("x") ».
+     * Y publier l'entree de chaque composant remplissait un espace commun de
+     * valeurs que personne n'avait demande a partager. Le script lit desormais
+     * ses entrees par in(n) / raw.in(n), qui ne passent pas par le registre. */
     state.last_time = now;
 }
 static void processWrapper(

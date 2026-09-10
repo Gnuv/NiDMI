@@ -219,7 +219,14 @@ void setupPinAPI(AsyncWebServer& server) {
                + ",\"nom\":\"" + ech(String(c->name)) + "\""
                + ",\"mode\":\"" + (c->midiMode == MidiMode::SCRIPT ? "script" : "midi") + "\""
                + ",\"scriptNom\":\"" + String(c->scriptNom) + "\""
-               + ",\"script\":\"" + ech(String(c->mappingScript)) + "\"}";
+               + ",\"script\":\"" + ech(String(c->mappingScript)) + "\""
+               /* JUGE EN L'AIR : le composant est alors ENTIEREMENT saute par la
+                * boucle temps reel — son script compris. Rien ne le disait, et
+                * une broche muette ressemblait a un script qui ne marche pas.
+                * Le test lui-meme a un passe de FAUX POSITIFS : les axes des
+                * joysticks en ont ete exclus pour cette raison
+                * (ComponentInitializer.cpp). Qu'il se voie. */
+               + ",\"jugee_en_l_air\":" + String(c->pin_disconnected ? "true" : "false") + "}";
         }
         j += "]}";
         request->send(200, "application/json", j);

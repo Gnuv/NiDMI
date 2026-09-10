@@ -69,6 +69,11 @@ public:
     // `brut` : la lecture du capteur dans sa RESOLUTION NATIVE, celle que lit
     // raw.in(). NAN (le defaut) signifie « rien de plus fin que `valeur` » —
     // le cas d'un contact, qui n'a que 0/1.
+    static void executerCapteur(const char* script, const float* valeurs,
+                                int nValeurs, MidiSender* midi_sender,
+                                Etat* etats = nullptr, int nEtats = 0,
+                                const float* bruts = nullptr);
+    // Commodite pour les composants a UNE valeur — la plupart.
     static void executerCapteur(const char* script, float valeur,
                                 MidiSender* midi_sender,
                                 Etat* etats = nullptr, int nEtats = 0,
@@ -84,6 +89,14 @@ public:
     // donc une LISTE, comme dans le moteur web (outEvents) : n'en garder qu'une
     // seule etait une simplification qui se voyait des le premier script a deux
     // pipelines.
+    /* Les ENTRÉES d'un composant, portées PAR VALEUR dans l'événement.
+     * Par valeur et non par pointeur : une reprise différée (del, makenote)
+     * garde une copie de l'événement et la rejoue plus tard — des pointeurs
+     * vers la pile de l'appelant seraient alors pendants. Quatre suffisent aux
+     * composants d'aujourd'hui (un joystick trois axes en use trois) ; la
+     * constante bougera le jour où l'un en demandera davantage. */
+    static const int MAX_INLETS = 4;
+
     static const int MAX_ADRESSE_OSC = 40;
     static const int MAX_ARGS_OSC_SUP = 3;   // en plus de `reel`, la valeur courante
 
@@ -96,7 +109,8 @@ public:
         enum Type { Aucun, NoteOn, NoteOff, Cc, Bend, Touch, PolyTouch, Pgm,
                     Tick,    // battement d'horloge : fait tourner metro()
                     Init,    // une fois apres un chargement : fait tourner loadbang()
-                    Osc };   // un message OSC entrant : fait tourner osc.in()
+                    Osc,     // un message OSC entrant : fait tourner osc.in()
+                    Capteur };  // un composant : fait tourner in() / inlet()
         Type    type     = Aucun;
         uint8_t canal    = 0;    // 1..16 (0 = inconnu)
         uint8_t a        = 0;    // note | numero de CC | note (polytouch) | programme
@@ -107,6 +121,13 @@ public:
          * pas adressables, faute de syntaxe pour les nommer. */
         char    adresse[MAX_ADRESSE_OSC] = {0};
         float   reel     = 0;
+        /* Ce que le composant donne à ce tour. `inlets` à l'échelle MIDI,
+         * `raws` dans la résolution native du capteur. in(n) et raw.in(n) les
+         * lisent ; ils ne passent PAS par le registre, qui est un bus PARTAGÉ
+         * et ne doit contenir que ce qu'on y a mis expressément. */
+        float   inlets[MAX_INLETS] = {0, 0, 0, 0};
+        float   raws[MAX_INLETS]   = {0, 0, 0, 0};
+        uint8_t nInlets  = 0;
         uint32_t instant = 0;    // millis() — n'a de sens que pour Tick
     };
 

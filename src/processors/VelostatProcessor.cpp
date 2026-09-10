@@ -166,10 +166,11 @@ void VelostatProcessor::process(
         }
     }
     
-    // Update FluxRegistry only when the component has a declared name.
-    if (config.name && config.name[0] != '\0') {
-        FluxRegistry::update(config.name, (float)state.last_value);
-    }
+    /* PLUS DE PUBLICATION D'OFFICE AU BUS. Le registre est un bus PARTAGE :
+     * il ne doit contenir que ce qu'on y a mis expressement — « in() : s("x") ».
+     * Y publier l'entree de chaque composant remplissait un espace commun de
+     * valeurs que personne n'avait demande a partager. Le script lit desormais
+     * ses entrees par in(n) / raw.in(n), qui ne passent pas par le registre. */
     // Script mode must run even without a component name.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         /* Idem : la lecture pleine resolution pour raw.in() (§55). */

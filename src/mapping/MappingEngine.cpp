@@ -336,6 +336,31 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
 
     String args;
     // f(x) / i(x) — une constante, ou une lecture. Se declenche sur tout.
+    /* in([n]) — L'ENTREE de ce composant. `inlet([n])` en est l'alias exact.
+     *
+     * Ce que faisait r("in"), mais en le DISANT. r() lit le bus PARTAGE ; rien
+     * dans son texte ne distinguait une lecture locale d'une lecture de bus, et
+     * un s("in") ecrit ailleurs serait entre en collision avec l'entree du
+     * composant. Le vocabulaire vient de Pd et de Max : un objet recoit par ses
+     * inlets, numerotes a partir de 0, de gauche a droite.
+     *
+     * Un composant a plusieurs donnees les expose dans cet ordre — pour un
+     * joystick, in(0)=X, in(1)=Y, in(2)=Z. Sans inlet a ce rang on rend 0
+     * PLUTOT QUE DE NE PAS TIRER : un pipeline qui lit un axe absent doit
+     * donner une valeur neutre, pas disparaitre en silence. */
+    if (verbe(seg, "in", args) || verbe(seg, "inlet", args)) {
+        const int n = args.length() ? (int)args.toInt() : 0;
+        return { (n >= 0 && n < MappingEngine::MAX_INLETS) ? e.inlets[n] : 0.0f, true };
+    }
+    /* raw.in([n]) — la meme lecture AVANT la mise a l'echelle MIDI : 0..4095
+     * pour un capteur analogique, 0/1 pour un contact. Le conditionnement
+     * (filtre, course utile, hysteresis) s'applique dans les deux cas — il
+     * releve de la lecture du capteur, pas de l'intention musicale. */
+    if (verbe(seg, "raw.in", args)) {
+        const int n = args.length() ? (int)args.toInt() : 0;
+        return { (n >= 0 && n < MappingEngine::MAX_INLETS) ? e.raws[n] : 0.0f, true };
+    }
+
     /* osc.in("/adresse") — la source qui repond a un message OSC entrant.
      * Correspondance EXACTE ou par PREFIXE DE SEGMENT : "/x" repond a "/x" et
      * a "/x/y", mais pas a "/xy". La valeur qui entre dans le pipeline est le
@@ -396,21 +421,6 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
         st.metroProchain += (uint32_t)ms;
         return { 1.0f, true };
     }
-    /* raw.in() — la LECTURE DU CAPTEUR dans sa resolution native.
-     *
-     *   r("in")    valeur mise a l'echelle MIDI, 0..127
-     *   raw.in()   meme lecture avant cette mise a l'echelle : 0..4095 pour un
-     *              capteur analogique, 0/1 pour un contact.
-     *
-     * Ce n'est pas un contournement du conditionnement : filtre, course utile et
-     * hysteresis s'appliquent dans les deux cas — ils relevent de la lecture du
-     * capteur, pas de l'intention musicale (MESURES.md §55). Seule la
-     * quantification en 0..127 est ecartee, ce qui rend la pleine resolution
-     * disponible pour un pitch bend ou une rampe.
-     *
-     * « raw » est un nom RESERVE du registre. */
-    if (seg == "raw.in()") return { FluxRegistry::get("raw"), true };
-
     const bool note = (e.type == Evt::NoteOn || e.type == Evt::NoteOff);
     int f1, f2;
 
@@ -1365,26 +1375,38 @@ void MappingEngine::battreDifferes(uint32_t maintenant, MidiSender* sender) {
     if (n > 0) emettreVers(sender, liste, n);
 }
 
-void MappingEngine::executerCapteur(const char* script, float valeur,
-                                    MidiSender* sender, Etat* etats, int nEtats,
-                                    float brut) {
-    if (!script || script[0] == '\0') return;
+/* Un COMPOSANT donne ses valeurs a son script. Elles ne passent PLUS par le
+ * registre : celui-ci est un bus PARTAGE, et il ne doit contenir que ce qu'on y
+ * a mis expressement — « in() : s("bouton1") ». Y publier d'office l'entree de
+ * chaque composant remplissait un espace commun de valeurs que personne n'avait
+ * demande a partager, sous des noms reserves (« in », « raw ») qu'un s("in")
+ * aurait pietines. C'est in(n) et raw.in(n) qui les lisent, maintenant. */
+void MappingEngine::executerCapteur(const char* script, const float* valeurs,
+                                    int nValeurs, MidiSender* sender,
+                                    Etat* etats, int nEtats, const float* bruts) {
+    if (!script || script[0] == '\0' || !valeurs || nValeurs <= 0) return;
 
-    // « in » : la poignee conventionnelle sur la valeur qui vient de declencher
-    // le script. Le composant publie deja sous SON nom quand il en a un ; ceci
-    // garantit qu'un composant sans nom reste scriptable. Ce n'est pas une
-    // extension de la langue — r() existe deja.
-    FluxRegistry::update("in", valeur);
-    /* Et la lecture native sous « raw », pour raw.in(). Quand l'appelant n'en
-     * fournit pas de distincte, les deux coincident — c'est le cas d'un contact,
-     * qui n'a rien de plus fin que 0/1. */
-    FluxRegistry::update("raw", isnan(brut) ? valeur : brut);
-
-    Evenement e;                       // sans famille : seules r/f/i/litteral tirent
+    Evenement e;
+    e.type = Evenement::Capteur;       // sans famille : aucun passage transparent
+    e.nInlets = (uint8_t)((nValeurs > MAX_INLETS) ? MAX_INLETS : nValeurs);
+    for (int i = 0; i < e.nInlets; i++) {
+        e.inlets[i] = valeurs[i];
+        /* Sans lecture native distincte, les deux coincident : c'est le cas d'un
+         * contact, qui n'a rien de plus fin que 0/1. */
+        e.raws[i] = (bruts && !isnan(bruts[i])) ? bruts[i] : valeurs[i];
+    }
     Sortie liste[MAX_SORTIES];
     bool traite = false;
     const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
     emettreVers(sender, liste, n);
+}
+
+/* Commodite pour les composants a UNE valeur — la plupart. */
+void MappingEngine::executerCapteur(const char* script, float valeur,
+                                    MidiSender* sender, Etat* etats, int nEtats,
+                                    float brut) {
+    const float v = valeur, b = brut;
+    executerCapteur(script, &v, 1, sender, etats, nEtats, isnan(brut) ? nullptr : &b);
 }
 
 /* Le battement d'horloge : fait tourner les pipelines qui n'attendent aucun
