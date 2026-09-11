@@ -1,4 +1,5 @@
 #include "WebDebugConsole.h"
+#include "ServerCore.h"
 #include <cstdarg>
 #include <cstdio>
 
@@ -100,8 +101,16 @@ void nidmi_web_debug_append_line(const char* line) {
     if (!line || !line[0]) {
         return;
     }
-    ring_push(line);
+    ring_push(line);                       // TOUJOURS : c'est l'historique
     if (!g_subscribe || !g_ws) {
+        return;
+    }
+    /* Meme regle que print()/graph() : si le client ne suit pas, on jette la
+     * ligne plutot que de l'empiler. Elle reste dans le tampon circulaire, donc
+     * un client qui s'abonne ensuite la retrouvera — on ne perd que l'instant,
+     * pas la trace. C'est CE chemin, combine au flot de textAll, qui fermait la
+     * socket a 26 ms (MESURES §84). */
+    if (!nidmi_ws_peut_emettre(*g_ws)) {
         return;
     }
     char msg[kLineCap + 16];

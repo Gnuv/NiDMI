@@ -276,6 +276,10 @@ void nidmi_begin() {
          * « essai », puis l'etiquette, puis la valeur. */
         const char* org = (origine && origine[0]) ? origine : "?";
         char trame[112];
+        /* Un graphe n'a pas d'historique : s'il ne part pas, il n'existe pas.
+         * On sort donc AVANT de formater — en headless, la cible, ce chemin ne
+         * coute plus rien du tout. */
+        if (graphe && !nidmi_ws_peut_emettre(serverCore.websocket())) return;
         if (graphe) {
             /* PAS dans le journal texte : c'est tout l'objet de graph(). Une
              * valeur continue qui defile en chiffres noie le journal — vingt
@@ -283,10 +287,16 @@ void nidmi_begin() {
             snprintf(trame, sizeof(trame), "NMS_GRAPH:%s\x1f%s\x1f%.4f",
                      org, etiquette, valeur);
         } else {
+            /* Le journal de bord AVANT la garde, et toujours : c'est
+             * l'historique qu'un client rejouera en s'abonnant plus tard. Une
+             * trace qu'on n'emet pas n'est pas une trace qu'on efface. */
             NIDMI_WEB_LOG("[%s] %s : %.4f", org, etiquette, valeur);
             snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
                      org, etiquette, valeur);
         }
+        /* Personne n'ecoute, ou quelqu'un ne suit pas : on JETTE. Voir
+         * ServerCore.h — empiler pour ne rien perdre, c'est perdre tout. */
+        if (!nidmi_ws_peut_emettre(serverCore.websocket())) return;
         serverCore.websocket().textAll(trame);
     });
 

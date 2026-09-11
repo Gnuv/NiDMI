@@ -52,4 +52,29 @@ public:
     void update();
 };
 
+/* ── ÉMETTRE, OU JETER — jamais empiler ────────────────────────────────────
+ *
+ * Trois chemins envoyaient sur la WebSocket sans jamais demander si quelqu'un
+ * ecoutait ni si ce quelqu'un suivait : print()/graph(), la console de
+ * debogage, la telemetrie de broche. Mesure (MESURES §84) : un script emettant
+ * cent trames par seconde FERME la socket du client a 26 ms, code 1006, des
+ * qu'il s'abonne a la console — le rattrapage d'historique et le flot de
+ * textAll remplissent la meme file, et AsyncWebSocket ferme ce qui deborde.
+ * L'app ne se reconnectait pas : le moniteur restait muet sans rien dire.
+ *
+ * Deux questions, dans cet ordre :
+ *   1. count() == 0      personne n'ecoute. En headless — la cible — on ne
+ *                        formate meme pas. C'est le §9.5 : rien ne part sans
+ *                        abonnement d'un client.
+ *   2. !availableForWriteAll()   quelqu'un ne suit pas. On JETTE la trame.
+ *
+ * Le second point est le coeur du correctif, et c'est un choix de conception :
+ * ces flux sont des VISUALISATIONS. Perdre des points de courbe est correct —
+ * l'oeil ne les verra pas ; perdre la connexion ne l'est pas. Empiler pour ne
+ * rien perdre, c'est perdre tout.
+ *
+ * L'en-tete de la bibliotheque recommande exactement ces appels avant
+ * d'envoyer (AsyncWebSocket.h, commentaire ligne 280). */
+bool nidmi_ws_peut_emettre(AsyncWebSocket& ws);
+
 // Note: L'instance globale serverCore est déclarée dans Globals.h

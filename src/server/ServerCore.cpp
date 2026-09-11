@@ -265,3 +265,10 @@ BluetoothManager& ServerCore::bluetooth() {
 UsbMidiManager& ServerCore::usbMidi() { 
     return usbMidiInstance; 
 }
+
+/* Voir ServerCore.h pour le pourquoi. Deux questions, pas une : « quelqu'un
+ * ecoute-t-il ? » puis « suit-il ? ». */
+bool nidmi_ws_peut_emettre(AsyncWebSocket& ws) {
+    if (ws.count() == 0) return false;          // headless : personne n'ecoute
+    return ws.availableForWriteAll();           // un client a la traine : on jette
+}

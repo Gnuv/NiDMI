@@ -221,8 +221,12 @@ void ComponentManager::update() {
     if (telemetryQueue) {
         TelemetryWsMsg tm;
         uint8_t drained = 0;
+        /* Meme garde que les deux autres chemins d'emission : on DRAINE la file
+         * dans tous les cas — sinon elle deborde et bloque le producteur — mais
+         * on n'emet que si quelqu'un ecoute ET suit. Voir ServerCore.h. */
+        const bool emettre = nidmi_ws_peut_emettre(serverCore.websocket());
         while (drained < 32 && xQueueReceive(telemetryQueue, &tm, 0) == pdTRUE) {
-            serverCore.websocket().textAll(tm.payload);
+            if (emettre) serverCore.websocket().textAll(tm.payload);
             drained++;
         }
     }
