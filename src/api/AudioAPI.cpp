@@ -168,13 +168,19 @@ void setupAudioAPI(AsyncWebServer& server) {
         lire("decay",      p.decay);
         lire("lpg_colour", p.lpgColour);
         AudioEngine::setParams(p);
+        /* Le VOLUME ne vit pas dans Params : c'est un gain de sortie, pas un
+         * parametre de Plaits. Il voyage sur la meme route parce qu'il change
+         * pour les memes raisons — une cue qui rappelle son etat. */
+        if (request->hasParam("volume", true))
+            AudioEngine::setVolume(request->getParam("volume", true)->value().toFloat());
         const AudioEngine::Params a = AudioEngine::params();
         String json = "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine());
         json += ",\"harmonics\":"  + String(a.harmonics, 3);
         json += ",\"timbre\":"     + String(a.timbre, 3);
         json += ",\"morph\":"      + String(a.morph, 3);
         json += ",\"decay\":"      + String(a.decay, 3);
-        json += ",\"lpg_colour\":" + String(a.lpgColour, 3) + "}";
+        json += ",\"lpg_colour\":" + String(a.lpgColour, 3);
+        json += ",\"volume\":"     + String(AudioEngine::volume(), 3) + "}";
         request->send(200, "application/json", json);
     });
 

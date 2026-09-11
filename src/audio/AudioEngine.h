@@ -155,6 +155,20 @@ const char* samplerNom();
 void setParams(const Params& p);
 Params params();
 
+/* ── VOLUME DE SORTIE, 0..1 ────────────────────────────────────────────────
+ * La carte n'en avait aucun : `Params` ne portait que les cinq continus de
+ * Plaits. Le volume de piste vivait donc uniquement dans le navigateur, et une
+ * composition qui baisse un fader sonnait a plein sur la carte — autrement dit
+ * le fader n'etait qu'un reglage de repetition (MESURES §96.4).
+ *
+ * Applique sur l'entrelace juste avant la porte de silence, donc AVANT la
+ * mesure de crete : « niveauCrete » continue de dire ce qui part reellement
+ * vers le DAC, ce qui est tout l'objet de cette mesure.
+ * A 1.0 exactement, la boucle de multiplication est sautee — le cas courant ne
+ * paie rien. */
+void  setVolume(float v);       // borne a [0,1]
+float volume();
+
 // Métrologie — répond à la question §12.7 de CONVERGENCE_NIDMI.md : combien de
 // tas reste-t-il réellement une fois WiFi + serveur async + app embarquée en
 // place ? Le plus gros bloc contigu compte autant que le total : Plaits demande

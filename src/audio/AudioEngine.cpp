@@ -65,6 +65,7 @@ int16_t entrelace[FRAMES * 2];
 // seul tenant disponibles, contre ~24 ko nécessaires.
 plaits::Voice*       plaitsVoix   = nullptr;
 char*                plaitsMem    = nullptr;      // shared_buffer[16384] de plaits.cc
+volatile float       gVolume      = 1.0f;         // 0..1, cf. AudioEngine.h
 plaits::Patch        plaitsPatch;
 plaits::Modulations  plaitsMod;
 plaits::Voice::Frame plaitsTrames[FRAMES];
@@ -270,6 +271,20 @@ void boucleAudio(void*) {
       rendre();
     }
     cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
+    /* VOLUME. Avant la porte, donc avant la mesure de crete : ce qu'on mesure
+     * reste ce qui part vraiment. A 1.0 on ne touche a rien — le cas courant ne
+     * paie pas une multiplication par echantillon. */
+    {
+      const float g = gVolume;
+      if (g < 0.999f) {
+        for (size_t i = 0; i < FRAMES * 2; i++) {
+          float v = (float)entrelace[i] * g;
+          if (v >  32767.f) v =  32767.f;
+          if (v < -32768.f) v = -32768.f;
+          entrelace[i] = (int16_t)v;
+        }
+      }
+    }
     // Porte de silence (STOP) : Plaits rend en continu et ignore le note-off.
     if (gSilence) memset(entrelace, 0, sizeof(entrelace));
     // Niveau crete de ce qui part REELLEMENT vers le DAC (donc apres la porte).
@@ -747,6 +762,15 @@ Params params() {
   return Params{ plaitsPatch.harmonics, plaitsPatch.timbre, plaitsPatch.morph,
                  plaitsPatch.decay, plaitsPatch.lpg_colour };
 }
+
+/* Volume de sortie, 0..1 — voir AudioEngine.h. Borne ici et nulle part ailleurs :
+ * une valeur hors plage venue du reseau ne doit pas atteindre la boucle audio. */
+void setVolume(float v) {
+  if (!(v >= 0.f)) v = 0.f;          // attrape aussi NaN
+  if (v > 1.f)     v = 1.f;
+  gVolume = v;
+}
+float volume() { return gVolume; }
 
 Metriques metriques() {
   Metriques m{};

@@ -52,6 +52,12 @@ void _appliquer(const Cue& c) {
     AudioEngine::setEngine(c.engine, false);      // false : une cue n'ecrit pas la NVS
     if (c.params.length()) {
       AudioEngine::Params p = AudioEngine::params();
+      /* Le VOLUME voyage dans la meme chaine de parametres mais ne vit pas dans
+       * `Params` : c'est un gain de SORTIE, pas un reglage de Plaits. On le
+       * retient a part, et on ne l'applique que s'il etait present — une cue
+       * qui n'en parle pas ne doit pas remettre le gain a une valeur par
+       * defaut, elle doit laisser celui d'avant. */
+      float volumeCue = -1.f;
       int debut = 0;
       while (debut < (int)c.params.length()) {
         int fin = c.params.indexOf(';', debut);
@@ -66,10 +72,12 @@ void _appliquer(const Cue& c) {
           else if (cle == "morph")      p.morph     = v;
           else if (cle == "decay")      p.decay     = v;
           else if (cle == "lpg_colour") p.lpgColour = v;
+          else if (cle == "volume")     volumeCue   = v;
         }
         debut = fin + 1;
       }
       AudioEngine::setParams(p);
+      if (volumeCue >= 0.f) AudioEngine::setVolume(volumeCue);
     }
   }
   Serial.printf("[cues] %d « %s » duree=%.1fs script=%s engine=%d\n",
