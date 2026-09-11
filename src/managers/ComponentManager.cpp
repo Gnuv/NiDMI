@@ -805,17 +805,52 @@ void ComponentManager::midiTask(void* parameter) {
 
 uint32_t g_margePileMidi = 0;   // cf. /api/audio/status
 
+/* ── GIGUE D'ORDONNANCEMENT ────────────────────────────────────────────────
+ * Cette tache a une periode FIXE (vTaskDelayUntil, 10 ms). Si une autre tache
+ * plus prioritaire la preempte, l'intervalle reel s'allonge — et c'est une note
+ * en retard. Or le serveur web (async_tcp) tourne a la priorite 10, celle-ci a
+ * 4 : il la preempte par construction. La regle du projet dit l'inverse (l'UI
+ * web cede, jamais le MIDI — CONVERGENCE §1.5), d'ou cette mesure : on ne
+ * corrigera l'ordonnancement qu'apres avoir constate un prejudice, pas sur la
+ * foi d'un tableau de priorites.
+ * On mesure l'ECART a la periode visee, pas l'intervalle : c'est le retard qui
+ * s'entend. vTaskDelayUntil rattrape au tour suivant, donc un tour long est
+ * suivi d'un tour court — les deux comptent comme de la gigue.            */
+volatile uint32_t g_gigueMidiMaxUs   = 0;   // pire ecart a 10 ms, en us
+volatile uint32_t g_gigueMidiTours   = 0;   // tours comptes dans la fenetre
+volatile uint32_t g_gigueMidiRetards = 0;   // tours ou l'ecart depasse 5 ms
+volatile uint32_t g_gigueMidiCumulUs = 0;   // somme des ecarts, pour la moyenne
+void nidmi_gigue_midi_reset(){
+    g_gigueMidiMaxUs = g_gigueMidiTours = g_gigueMidiRetards = g_gigueMidiCumulUs = 0;
+}
+
 void ComponentManager::midiTaskLoop() {
     const TickType_t xFrequency = pdMS_TO_TICKS(10); // 10ms
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    
+    const uint32_t PERIODE_US = 10000;
+    uint32_t precedent = 0;                 // us du tour precedent, 0 = amorcage
+
     for(;;) {
         if (_nvsWriteInProgress || !midi_sender) {
             _tempsReelEnPause = true;      // acquittement lu par pauseRealtimeTasks()
             vTaskDelay(pdMS_TO_TICKS(10));
+            precedent = 0;   // une PAUSE n'est pas de la gigue : on repart a zero
             continue;
         }
         _tempsReelEnPause = false;
+
+        /* L'ecart a la periode visee. `precedent == 0` = premier tour, ou reprise
+         * apres pause : on ne mesure rien, on amorce. */
+        const uint32_t maintenantUs = micros();
+        if (precedent) {
+            const uint32_t d = maintenantUs - precedent;           // intervalle reel
+            const uint32_t ecart = (d > PERIODE_US) ? (d - PERIODE_US) : (PERIODE_US - d);
+            if (ecart > g_gigueMidiMaxUs) g_gigueMidiMaxUs = ecart;
+            if (ecart > 5000) g_gigueMidiRetards++;
+            g_gigueMidiCumulUs += ecart;
+            g_gigueMidiTours++;
+        }
+        precedent = maintenantUs;
         
         /* Le battement d'horloge du script map (metro, loadbang).
          * Ici plutot que dans la boucle principale : cette tache tourne a

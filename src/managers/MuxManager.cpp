@@ -600,15 +600,39 @@ void MuxManager::muxTask(void* parameter) {
     instance->muxTaskLoop();
 }
 
+/* Gigue d'ordonnancement de la tache ADC — meme mesure que pour MidiTask, meme
+ * raison (CONVERGENCE §1.5). Celle-ci est a la priorite 5, le serveur web a 10.
+ * Publiee par /api/diag/gigue. */
+volatile uint32_t g_gigueMuxMaxUs   = 0;
+volatile uint32_t g_gigueMuxTours   = 0;
+volatile uint32_t g_gigueMuxRetards = 0;
+volatile uint32_t g_gigueMuxCumulUs = 0;
+void nidmi_gigue_mux_reset(){
+    g_gigueMuxMaxUs = g_gigueMuxTours = g_gigueMuxRetards = g_gigueMuxCumulUs = 0;
+}
+
 void MuxManager::muxTaskLoop() {
     const TickType_t xFrequency = pdMS_TO_TICKS(5); // 5ms = 200Hz
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    
+    const uint32_t PERIODE_US = 5000;
+    uint32_t precedent = 0;
+
     for(;;) {
         if (g_componentManager.isNvsWriteInProgress()) {
             vTaskDelay(pdMS_TO_TICKS(10));
+            precedent = 0;          // une pause n'est pas de la gigue
             continue;
         }
+        const uint32_t maintenantUs = micros();
+        if (precedent) {
+            const uint32_t d = maintenantUs - precedent;
+            const uint32_t ecart = (d > PERIODE_US) ? (d - PERIODE_US) : (PERIODE_US - d);
+            if (ecart > g_gigueMuxMaxUs) g_gigueMuxMaxUs = ecart;
+            if (ecart > 2500) g_gigueMuxRetards++;     // la moitie de la periode
+            g_gigueMuxCumulUs += ecart;
+            g_gigueMuxTours++;
+        }
+        precedent = maintenantUs;
         // Mettre à jour un multiplexeur par tour (round-robin)
         static uint8_t current_mux = 0;
         

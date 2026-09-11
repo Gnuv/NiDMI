@@ -444,6 +444,55 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * La reponse est un litteral en flash (VocabulaireEmbarque.h, genere par
      * scripts/generer-vocabulaire.py depuis MappingEngine.cpp) : la route ne
      * construit rien, pas un octet de tas pris a AsyncTCP.                    */
+    /* ── GIGUE D'ORDONNANCEMENT ───────────────────────────────────────────
+     * « Si quelque chose doit ralentir, c'est l'UI web — jamais le MIDI »
+     * (CONVERGENCE §1.5). Or le serveur web tourne a la priorite 10 et les
+     * taches temps reel a 5 (ADC) et 4 (MIDI) : il les preempte PAR
+     * CONSTRUCTION. L'inversion est certaine ; le prejudice, lui, se mesure.
+     *
+     * Les deux taches ont une periode fixe (vTaskDelayUntil). On publie donc
+     * l'ECART a cette periode : pire cas, moyenne, et nombre de tours ou
+     * l'ecart depasse la moitie de la periode. `?reset=1` ouvre une fenetre
+     * propre — mesurer au repos, puis sous charge, et comparer.
+     *
+     * La lecture elle-meme est une requete HTTP, donc une charge : c'est
+     * pourquoi on RESET avant la charge et on LIT apres, jamais pendant.   */
+    server.on("/api/diag/gigue", HTTP_GET, [](AsyncWebServerRequest *request){
+        extern volatile uint32_t g_gigueMidiMaxUs, g_gigueMidiTours,
+                                 g_gigueMidiRetards, g_gigueMidiCumulUs;
+        extern volatile uint32_t g_gigueMuxMaxUs, g_gigueMuxTours,
+                                 g_gigueMuxRetards, g_gigueMuxCumulUs;
+        extern void nidmi_gigue_midi_reset();
+        extern void nidmi_gigue_mux_reset();
+        if (request->hasParam("reset")) {
+            nidmi_gigue_midi_reset();
+            nidmi_gigue_mux_reset();
+            request->send(200, "application/json", "{\"reset\":true}");
+            return;
+        }
+        const uint32_t nMidi = g_gigueMidiTours, nMux = g_gigueMuxTours;
+        String json = "{";
+        /* CE gestionnaire s'execute DANS la tache async_tcp : il peut donc dire
+         * sa propre priorite et son coeur. Un reglage qu'on croit pose et qui ne
+         * l'est pas est pire que pas de reglage — ici la carte le prouve
+         * elle-meme, au lieu qu'on deduise d'un drapeau de compilation. */
+        json += "\"web\":{\"tache\":\"" + String(pcTaskGetName(nullptr)) + "\"";
+        json += ",\"priorite\":"  + String((unsigned)uxTaskPriorityGet(nullptr));
+        json += ",\"coeur\":"     + String((int)xPortGetCoreID());
+        json += "},\"temps_reel\":{\"mux\":5,\"midi\":4,\"audio\":11},";
+        json += "\"midi\":{\"periode_us\":10000";
+        json += ",\"tours\":"     + String(nMidi);
+        json += ",\"max_us\":"    + String(g_gigueMidiMaxUs);
+        json += ",\"moy_us\":"    + String(nMidi ? (g_gigueMidiCumulUs / nMidi) : 0);
+        json += ",\"retards\":"   + String(g_gigueMidiRetards) + "},";
+        json += "\"mux\":{\"periode_us\":5000";
+        json += ",\"tours\":"     + String(nMux);
+        json += ",\"max_us\":"    + String(g_gigueMuxMaxUs);
+        json += ",\"moy_us\":"    + String(nMux ? (g_gigueMuxCumulUs / nMux) : 0);
+        json += ",\"retards\":"   + String(g_gigueMuxRetards) + "}}";
+        request->send(200, "application/json", json);
+    });
+
     server.on("/api/mapping/vocabulaire", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json", VOCABULAIRE_EMBARQUE_JSON);
     });
