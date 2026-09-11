@@ -216,8 +216,18 @@ void ComponentManager::update() {
     // Le traitement des composants directs (non-MUX) est maintenant dans la tâche MIDI sur Core 0
     // On ne garde ici que le traitement réseau/OSC qui doit rester sur Core 1
 
-    // Drainer la queue télémétrie (remplie par midiTaskLoop sur Core 0)
-    // textAll() est appelé ici sur Core 1, où vit le serveur web — thread-safe.
+    /* Drainer la file de telemetrie, remplie par midiTaskLoop sur le coeur 0.
+     *
+     * ⚠️ Ce commentaire disait : « textAll() est appele ici sur Core 1, ou vit
+     * le serveur web — thread-safe ». C'est FAUX, et le raisonnement a fait des
+     * degats ailleurs : print()/graph() s'en sont crus dispenses et appelaient
+     * textAll() depuis le coeur 0. Le meme coeur n'est PAS la meme tache —
+     * loopTask est preemptee par async_tcp a n'importe quelle instruction.
+     *
+     * La vraie raison de passer par une file est ailleurs, et elle tient :
+     * ce drain tourne dans loopTask, LA MEME TACHE qui appelle
+     * ws.cleanupClients() — donc rien n'efface la liste de clients pendant
+     * qu'on l'itere. Voir ServerCore.h. */
     if (telemetryQueue) {
         TelemetryWsMsg tm;
         uint8_t drained = 0;

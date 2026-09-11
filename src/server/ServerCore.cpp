@@ -1,4 +1,5 @@
 #include "ServerCore.h"
+#include "../Globals.h"
 #include <ESPmDNS.h>
 #include <Preferences.h>
 // setupWebAPI est déclaré plus bas et défini dans WebAPI.cpp
@@ -13,6 +14,7 @@ ServerCore::ServerCore()
     : server(80), ws("/ws") {}
 
 void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode) {
+    nidmi_ws_file_init();   // avant tout client : voir ServerCore.h
     /* Événements WiFi : visibilité des drops STA (avec la RAISON, indisponible par polling)
      * et de l'obtention d'IP. Log Serial uniquement — pas d'accès WebSocket depuis la tâche
      * event WiFi, pour éviter les races avec la tâche serveur (AsyncWebSocket). */
@@ -268,7 +270,63 @@ UsbMidiManager& ServerCore::usbMidi() {
 
 /* Voir ServerCore.h pour le pourquoi. Deux questions, pas une : « quelqu'un
  * ecoute-t-il ? » puis « suit-il ? ». */
+/* ⚠️ N'appeler que depuis loopTask : count() et availableForWriteAll() itèrent
+ * le std::list de clients, que cleanupClients() efface depuis cette meme tache.
+ * Voir ServerCore.h. */
 bool nidmi_ws_peut_emettre(AsyncWebSocket& ws) {
     if (ws.count() == 0) return false;          // headless : personne n'ecoute
     return ws.availableForWriteAll();           // un client a la traine : on jette
+}
+
+/* ── La file de sortie ─────────────────────────────────────────────────────
+ * Statique : pas un octet pris au tas, dont le plus gros bloc contigu decide
+ * si AsyncTCP peut encore recevoir une image OTA. 24 x 216 = 5,2 ko en .bss. */
+namespace {
+    constexpr size_t   kTrameMax   = 216;   // « DEBUG_LOG: » + 200 = le pire cas
+    constexpr UBaseType_t kFileLen = 24;
+    struct TrameWs { char t[kTrameMax]; };
+
+    StaticQueue_t  g_fileTCB;
+    uint8_t        g_fileStock[kFileLen * sizeof(TrameWs)];
+    QueueHandle_t  g_fileWs = nullptr;
+    volatile int      g_clientsWs = 0;
+    volatile uint32_t g_jetees   = 0;
+}
+
+void nidmi_ws_file_init() {
+    if (!g_fileWs)
+        g_fileWs = xQueueCreateStatic(kFileLen, sizeof(TrameWs), g_fileStock, &g_fileTCB);
+}
+void nidmi_ws_client_arrive() { g_clientsWs++; }
+void nidmi_ws_client_parti()  { if (g_clientsWs > 0) g_clientsWs--; }
+
+/* Un COMPTEUR, pas la liste : lisible depuis n'importe quelle tache sans
+ * toucher a ce que la bibliotheque modifie. C'est ce qui permet a un producteur
+ * sur le coeur 0 de sortir immediatement en headless. */
+bool nidmi_ws_quelqu_un_ecoute() { return g_clientsWs > 0; }
+uint32_t nidmi_ws_trames_jetees() { return g_jetees; }
+
+bool nidmi_ws_pousser(const char* trame) {
+    if (!trame || !trame[0] || !g_fileWs) return false;
+    TrameWs m;
+    strlcpy(m.t, trame, sizeof m.t);
+    /* File pleine = le client ne suit pas. ON JETTE, sans attendre : bloquer
+     * ici bloquerait MidiTask, et une note en retard vaut pire qu'une courbe
+     * trouee. */
+    if (xQueueSend(g_fileWs, &m, 0) != pdTRUE) { g_jetees++; return false; }
+    return true;
+}
+
+void nidmi_ws_drainer() {
+    if (!g_fileWs) return;
+    AsyncWebSocket& ws = serverCore.websocket();
+    /* On vide la file MEME si l'on n'emet pas : la laisser pleine ferait jeter
+     * les trames suivantes a tort, et masquerait le retour d'un client. */
+    const bool emettre = nidmi_ws_peut_emettre(ws);
+    TrameWs m;
+    uint8_t n = 0;
+    while (n < kFileLen && xQueueReceive(g_fileWs, &m, 0) == pdTRUE) {
+        if (emettre) ws.textAll(m.t);
+        n++;
+    }
 }

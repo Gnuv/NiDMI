@@ -105,17 +105,19 @@ void nidmi_web_debug_append_line(const char* line) {
     if (!g_subscribe || !g_ws) {
         return;
     }
-    /* Meme regle que print()/graph() : si le client ne suit pas, on jette la
-     * ligne plutot que de l'empiler. Elle reste dans le tampon circulaire, donc
-     * un client qui s'abonne ensuite la retrouvera — on ne perd que l'instant,
-     * pas la trace. C'est CE chemin, combine au flot de textAll, qui fermait la
-     * socket a 26 ms (MESURES §84). */
-    if (!nidmi_ws_peut_emettre(*g_ws)) {
+    /* NIDMI_WEB_LOG est appele depuis N'IMPORTE QUELLE tache — MidiTask
+     * comprise. On ne touche donc pas a la socket ici : on POUSSE, loopTask
+     * draine (ServerCore.h). File pleine = le client ne suit pas, la ligne est
+     * jetee — elle reste dans le tampon circulaire, donc un client qui s'abonne
+     * ensuite la retrouvera : on ne perd que l'instant, pas la trace. C'est CE
+     * chemin, combine au flot de textAll, qui fermait la socket a 26 ms
+     * (MESURES §84). */
+    if (!nidmi_ws_quelqu_un_ecoute()) {
         return;
     }
     char msg[kLineCap + 16];
     snprintf(msg, sizeof(msg), "DEBUG_LOG:%s", line);
-    g_ws->textAll(msg);
+    nidmi_ws_pousser(msg);
 }
 
 #endif

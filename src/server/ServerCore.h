@@ -77,4 +77,41 @@ public:
  * d'envoyer (AsyncWebSocket.h, commentaire ligne 280). */
 bool nidmi_ws_peut_emettre(AsyncWebSocket& ws);
 
+/* ── UNE SEULE TACHE TOUCHE LA SOCKET ──────────────────────────────────────
+ *
+ * AsyncWebSocket garde ses clients dans un std::list, et — verifie ligne a
+ * ligne dans la bibliotheque 3.9.4 — TOUS ses verrous appartiennent a
+ * AsyncWebSocketClient (la file de messages d'UN client). Le membre
+ * AsyncWebSocket::_lock, lui, n'est JAMAIS pris : la LISTE est nue.
+ *
+ * Or nous l'effacons nous-memes : ServerCore::update() appelle
+ * ws.cleanupClients(), qui fait _clients.erase(), et update() tourne dans
+ * loopTask. Pendant ce temps print()/graph() appelaient textAll() depuis
+ * MidiTask, sur le coeur 0 : une iteration de liste pendant qu'un autre fil
+ * en retire un maillon. C'est un acces a de la memoire rendue, et il ne se
+ * manifeste qu'a la deconnexion d'un client — une fois par soiree, en concert.
+ *
+ * ATTENTION au raisonnement qui avait ete pose ici : la telemetrie passait par
+ * une file « pour appeler textAll sur le coeur 1, ou vit le serveur web —
+ * thread-safe ». C'est FAUX. Le meme coeur n'est pas la meme tache : loopTask
+ * (priorite 1) est preemptee par async_tcp (priorite 10) a n'importe quelle
+ * instruction, y compris au milieu d'une iteration. L'affinite de coeur
+ * n'exclut que le parallelisme vrai, pas l'entrelacement.
+ *
+ * Regle, donc : ON POUSSE depuis n'importe quelle tache, ON DRAINE depuis
+ * loopTask et de nulle part ailleurs — la meme qui appelle cleanupClients().
+ * La file est ALLOUEE STATIQUEMENT : le plus gros bloc contigu est la ressource
+ * rare de cette carte, une file de 5 ko prise au tas la grignoterait.
+ *
+ * Reste hors de notre portee : la bibliotheque ajoute et retire des clients
+ * depuis sa propre tache sans verrou. On ne peut pas l'en empecher ; on peut
+ * cesser d'y ajouter notre propre course. */
+bool nidmi_ws_quelqu_un_ecoute();          // sans toucher a la liste : un compteur
+bool nidmi_ws_pousser(const char* trame);  // depuis N'IMPORTE QUELLE tache
+void nidmi_ws_drainer();                   // loopTask UNIQUEMENT
+uint32_t nidmi_ws_trames_jetees();         // ce qu'on a perdu, pour le dire
+void nidmi_ws_file_init();                 // appele par ServerCore::begin()
+void nidmi_ws_client_arrive();             // depuis le rappel WebSocket
+void nidmi_ws_client_parti();
+
 // Note: L'instance globale serverCore est déclarée dans Globals.h

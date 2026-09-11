@@ -171,8 +171,13 @@ String getDefaultConfig(String pin) {
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
         Serial.println("WebSocket client connected");
+        /* Un COMPTEUR, tenu ici. Il permet aux producteurs des autres taches de
+         * savoir si quelqu'un ecoute SANS toucher au std::list de clients, que
+         * la bibliotheque modifie sans verrou. Voir ServerCore.h. */
+        nidmi_ws_client_arrive();
     } else if (type == WS_EVT_DISCONNECT) {
         Serial.println("WebSocket client disconnected");
+        nidmi_ws_client_parti();
         g_pinMonitoringEnabled = false;
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo *info = (AwsFrameInfo*)arg;

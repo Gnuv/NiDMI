@@ -276,10 +276,14 @@ void nidmi_begin() {
          * « essai », puis l'etiquette, puis la valeur. */
         const char* org = (origine && origine[0]) ? origine : "?";
         char trame[112];
-        /* Un graphe n'a pas d'historique : s'il ne part pas, il n'existe pas.
-         * On sort donc AVANT de formater — en headless, la cible, ce chemin ne
-         * coute plus rien du tout. */
-        if (graphe && !nidmi_ws_peut_emettre(serverCore.websocket())) return;
+        /* ⚠️ CE RAPPEL S'EXECUTE DANS MidiTask, SUR LE COEUR 0. Il ne doit donc
+         * PAS toucher a la WebSocket : cleanupClients() efface la liste de
+         * clients depuis loopTask, et l'iterer d'ici est un acces a de la
+         * memoire rendue (ServerCore.h). On POUSSE dans une file, loopTask
+         * draine. Le compteur, lui, se lit sans risque de partout.
+         * Un graphe n'a pas d'historique : s'il ne part pas il n'existe pas, on
+         * sort donc AVANT de formater — en headless ce chemin ne coute rien. */
+        if (graphe && !nidmi_ws_quelqu_un_ecoute()) return;
         if (graphe) {
             /* PAS dans le journal texte : c'est tout l'objet de graph(). Une
              * valeur continue qui defile en chiffres noie le journal — vingt
@@ -294,10 +298,11 @@ void nidmi_begin() {
             snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
                      org, etiquette, valeur);
         }
-        /* Personne n'ecoute, ou quelqu'un ne suit pas : on JETTE. Voir
-         * ServerCore.h — empiler pour ne rien perdre, c'est perdre tout. */
-        if (!nidmi_ws_peut_emettre(serverCore.websocket())) return;
-        serverCore.websocket().textAll(trame);
+        /* Personne n'ecoute : on s'arrete la. Sinon on POUSSE — file pleine =
+         * le client ne suit pas, la trame est jetee sans bloquer cette tache.
+         * Empiler pour ne rien perdre, c'est perdre tout. */
+        if (!nidmi_ws_quelqu_un_ecoute()) return;
+        nidmi_ws_pousser(trame);
     });
 
     /* MIDI USB ENTRANT -> moteur audio.
@@ -422,6 +427,10 @@ void nidmi_loop() {
     processComponents();
     /* Le rattrapage de la console web : une ligne par tour, hors du rappel
      * WebSocket (voir WebDebugConsole.cpp). */
+    /* LA SEULE FENETRE ou l'on ecrit sur la WebSocket : loopTask, la meme tache
+     * que ws.cleanupClients() de serverCore.update(). Tout le reste du firmware
+     * POUSSE dans la file. Voir ServerCore.h. */
+    nidmi_ws_drainer();
     nidmi_web_debug_pump();
 }
 
