@@ -205,3 +205,64 @@ pip3 install esptool
 # Ou utiliser celui inclus avec Arduino IDE
 find ~/Library/Arduino15/packages/esp32/tools/esptool_py -name esptool.py
 ```
+
+## Variant `--usb-net` : interface web par le câble USB (S3)
+
+```bash
+./scripts/nidmi.sh upload --usb-net
+```
+
+Sert l'UI par le câble USB (CDC-NCM) **en parallèle** de l'USB-MIDI et du WiFi,
+sur le même connecteur. Sans l'option, le firmware est inchangé. S3 seulement :
+le C3 n'a pas d'USB-OTG.
+
+L'UI n'a rien de spécial à faire — `AsyncWebServer` écoute sur `INADDR_ANY` et
+`web/js/websocket.js` construit son URL depuis `window.location`.
+
+| accès | adresse |
+|---|---|
+| câble USB | `http://192.168.7.1/` |
+| AP WiFi | `http://192.168.4.1/` |
+| STA | IP fournie par le réseau |
+| mDNS | `http://nidmi.local/` — résout vers **toutes** les interfaces actives |
+
+### Mesures (macOS 26.5, XIAO ESP32S3)
+
+```
+page          200, 15 077 o en 34 ms
+bundle JS     200, 33 743 o en 64 ms — ~525 ko/s, stable sur 5 tirs
+API           /api/pins/list 3878 o en 22 ms ; les autres 6-8 ms
+WebSocket     connexion 9 ms, aller-retour 1.9-2.1 ms, fermeture propre
+ping          1.3-1.8 ms
+route         défaut inchangée : brancher l'instrument ne détourne rien
+```
+
+### Produire les binaires étiquetés
+
+```bash
+./scripts/nidmi.sh build --usb-net
+```
+
+```
+bin/nidmi-s3-usbnet.bin           image applicative — pour l'OTA
+bin/nidmi-s3-usbnet.merged.bin    bootloader + partitions + app — ESP Web Tools
+```
+
+Combinable avec `--variant` : `--variant on --usb-net` donne
+`nidmi-s3-usbmidi-on-usbnet`. Sans aucune des deux options, aucun binaire
+étiqueté n'est produit — le comportement d'avant est inchangé.
+
+Le firmware s'identifie lui-même : `NIDMI_FW_VARIANT` vaut `usbmidi-on+usbnet`,
+exposé par l'API et visible dans l'UI. Utile pour savoir ce qui tourne
+réellement sur une carte sans avoir à la reflasher pour vérifier.
+
+### Deux points à connaître
+
+**Le lien met plus longtemps à monter qu'avec un firmware minimal.** Le boot de
+NiDMI est lourd (WiFi, STA, MIDI, composants) et l'annonce de lien n'est émise
+que depuis `nidmi_loop()`. Compter plusieurs dizaines de secondes avant que
+l'hôte obtienne son bail DHCP, contre ~2 s sur un firmware nu.
+
+**Les trois slots mDNS sont saturés** : `STA` + `AP` + `ETH` (le lien USB prend
+la clé `ETH_DEF`). `CONFIG_MDNS_MAX_INTERFACES` vaut 3 dans les libs Arduino, il
+n'y a pas de quatrième interface possible. Voir `nidmi-core/docs/USB_NET.md`.

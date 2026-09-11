@@ -7,6 +7,7 @@
 #include "midi/CcMap.h"
 #include "mapping/MappingEngine.h"
 #include "network/UsbMidiManager.h"
+#include "network/UsbNetBootstrap.h"
 #include "server/WebDebugConsole.h"
 #include "Globals.h"
 #include <Preferences.h>
@@ -319,6 +320,18 @@ void nidmi_begin() {
         [](uint8_t ch, uint8_t cc, uint8_t val) { g_midiRouter.ccEntrant(ch, cc, val); }
     );
     NIDMI_WEB_LOG("[MEM] apres MidiRouter: %d\n", (int)ESP.getFreeHeap());
+
+    // Interface réseau sur le câble USB. Impérativement APRÈS MidiRouter :
+    // c'est lui qui appelle USB.begin(), et TinyUSB n'assemble sa
+    // configuration qu'une fois. Le descripteur NCM, lui, a été enregistré
+    // pendant l'initialisation statique (instance globale dans
+    // UsbNetBootstrap.cpp), donc bien avant.
+    if (nidmi_usbnet::enabled()) {
+        if (nidmi_usbnet::begin()) {
+            NIDMI_WEB_LOG("[UsbNet] %s", nidmi_usbnet::statusLine().c_str());
+        }
+        NIDMI_WEB_LOG("[MEM] apres UsbNet: %d\n", (int)ESP.getFreeHeap());
+    }
     
     // Initialiser RTP-MIDI
     serverCore.rtpMidi().begin(serverName.c_str());
@@ -347,6 +360,10 @@ void nidmi_begin() {
     Serial.print("  AP PASS: "); Serial.println(apPass);
     Serial.print("  AP IP: "); Serial.println(WiFi.softAPIP());
     Serial.print("  mDNS: http://"); Serial.print(host); Serial.println(".local/");
+    if (nidmi_usbnet::enabled()) {
+        Serial.print("  USB net: http://"); Serial.print(nidmi_usbnet::ip());
+        Serial.print("/  (aussi http://"); Serial.print(host); Serial.println(".local/)");
+    }
     Serial.print("  RTP-MIDI: "); Serial.println(serverCore.rtpMidi().isReady() ? "Initialized" : "Failed");
     Serial.print("  Bluetooth: "); Serial.println(serverCore.bluetooth().isInitialized() ? "Initialized" : "Failed");
     Serial.printf("Touch Enabled: %s\n", touchEnabled ? "true" : "false");
@@ -417,7 +434,12 @@ void nidmi_loop() {
     }
 
     serverCore.update();
-    
+
+    // Porte l'annonce de lien vers l'hôte et l'activation mDNS sur le lien USB.
+    // Ces deux annonces doivent être répétées : émises une seule fois elles se
+    // perdent si l'hôte n'a pas fini de se configurer, et rien ne le signale.
+    nidmi_usbnet::update();
+
     // Recharger pins si demandé (débounce 500 ms pour grouper les sauvegardes séquentielles)
     if (g_requestReloadPins && (millis() - g_reloadRequestTime >= 500)) {
         g_requestReloadPins = false;
