@@ -47,9 +47,6 @@ void ButtonProcessor::process(
         // 0 = not armed yet, >0 = armed timestamp.
         state.note_on_time = 0;
         state.last_time = now;
-        if (config.name && config.name[0] != '\0') {
-            FluxRegistry::update(config.name, pressed ? 1.0f : 0.0f);
-        }
         return;
     }
     
@@ -89,9 +86,6 @@ void ButtonProcessor::process(
             state.last_button_state = pressed;
             state.prev_stable_state = currentStableState;
             state.last_change_time = now;
-            if (config.name && config.name[0] != '\0') {
-                FluxRegistry::update(config.name, currentStableState ? 1.0f : 0.0f);
-            }
             Serial.printf("[ButtonProcessor] GPIO%d script arme (stable=%d)\n", config.gpio, currentStableState ? 1 : 0);
         }
     }

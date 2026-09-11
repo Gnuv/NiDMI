@@ -13,7 +13,8 @@
  *
  * Échantillonne une source de bruit externe sur une entrée ADC.
  * Mode sample-and-hold (latch toutes les rateMs) ou continu (lissé),
- * conversion MIDI/OSC + publication FluxRegistry + script de mapping.
+ * conversion MIDI/OSC + script de mapping. (La publication automatique au
+ * registre a ete retiree : publier se declare dans le script, s("nom").)
  */
 class NoiseSamplerProcessor {
 public:

@@ -138,9 +138,6 @@ void NoiseSamplerProcessor::process(
 
         MidiOutputCoordinator::sendOsc(osc_queue, config, stable_midi_value, filtered_value);
 
-        if (config.name && config.name[0] != '\0') {
-            FluxRegistry::update(config.name, (float)stable_midi_value);
-        }
         if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         /* NORMALISE 0..1. Une entree de composant ne porte AUCUNE echelle de
          * protocole : la mise a l'echelle MIDI — comme la mise a l'echelle DMX
@@ -192,10 +189,12 @@ void NoiseSamplerProcessor::process(
     state.last_midi_value_u8 = midi_value;
     state.last_telemetry_ts = state.last_time;
 
-    // Publication FluxRegistry : routable par d'autres composants via r("nom").
-    if (config.name && config.name[0] != '\0') {
-        FluxRegistry::update(config.name, (float)midi_value);
-    }
+    /* PUBLICATION AUTOMATIQUE RETIREE : la valeur partait au registre sous
+     * config.name, lisible par r("nom") ailleurs. Decision prise avec le
+     * passage a in()/inlet() — on ne publie plus automatiquement, publier se
+     * DECLARE dans le script : « in() : s("nom") », ou on le voit. Le
+     * potentiometre avait ete converti le premier ; celui-ci suivait encore
+     * l'ancienne regle. */
     // Mode script : exécuter même sans nom de composant.
     if (config.midiMode == MidiMode::SCRIPT && config.mappingScript[0] != '\0') {
         /* NORMALISE 0..1. Une entree de composant ne porte AUCUNE echelle de
