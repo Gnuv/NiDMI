@@ -38,9 +38,94 @@ bool _ligneUtile(const String& l) {
   return t.length() && !t.startsWith("#");
 }
 
+/* ── AUTOMATION : LES COURBES DE LA CUE COURANTE ───────────────────────────
+ * Reechantillonnees par l'app (voir CueStore.h), donc ici : un tableau de
+ * nombres par parametre, et une interpolation lineaire sur la duree de la cue.
+ * STATIQUE et borne : 6 parametres x 32 points = 768 octets en .bss. Le tas de
+ * cette carte est la ressource rare ; une automation ne doit pas y toucher. */
+namespace {
+  constexpr uint8_t kMaxCourbes = 6;     // les cinq continus de Plaits + volume
+  constexpr uint8_t kMaxPoints  = 32;
+  struct Courbe {
+    char    param[12] = {0};
+    uint8_t n = 0;
+    float   v[kMaxPoints] = {0};
+  };
+  Courbe  _courbes[kMaxCourbes];
+  uint8_t _nCourbes = 0;
+  uint32_t _dernierAppliqueMs = 0;
+
+  void _oublierCourbes() { _nCourbes = 0; }
+
+  /* "harmonics:0.1,0.2;volume:1.0,0.9" — analyse a l'ACTIVATION de la cue,
+   * jamais dans la boucle : un changement de cue est rare, la boucle ne l'est
+   * pas. */
+  void _analyserCourbes(const String& spec) {
+    _oublierCourbes();
+    int debut = 0;
+    while (debut < (int)spec.length() && _nCourbes < kMaxCourbes) {
+      int fin = spec.indexOf(';', debut);
+      if (fin < 0) fin = spec.length();
+      String bloc = spec.substring(debut, fin);
+      debut = fin + 1;
+      const int deuxPoints = bloc.indexOf(':');
+      if (deuxPoints <= 0) continue;
+      String nom = bloc.substring(0, deuxPoints); nom.trim();
+      if (!nom.length() || nom.length() >= (int)sizeof(Courbe::param)) continue;
+      Courbe& co = _courbes[_nCourbes];
+      co = Courbe{};
+      strlcpy(co.param, nom.c_str(), sizeof co.param);
+      String liste = bloc.substring(deuxPoints + 1);
+      int d2 = 0;
+      while (d2 < (int)liste.length() && co.n < kMaxPoints) {
+        int f2 = liste.indexOf(',', d2);
+        if (f2 < 0) f2 = liste.length();
+        co.v[co.n++] = liste.substring(d2, f2).toFloat();
+        d2 = f2 + 1;
+      }
+      if (co.n) _nCourbes++;
+    }
+  }
+
+  /* Valeur de la courbe a l'avancement t (0..1), par interpolation lineaire.
+   * Un seul point = une constante ; hors bornes = les extremites. */
+  float _valeurA(const Courbe& co, float t) {
+    if (co.n == 0) return 0.f;
+    if (co.n == 1) return co.v[0];
+    if (t <= 0.f)  return co.v[0];
+    if (t >= 1.f)  return co.v[co.n - 1];
+    const float x = t * (co.n - 1);
+    const uint8_t i = (uint8_t)x;
+    const float f = x - (float)i;
+    return co.v[i] + (co.v[i + 1] - co.v[i]) * f;
+  }
+
+  void _appliquerAutomation(float t) {
+    if (!_nCourbes) return;
+    AudioEngine::Params p = AudioEngine::params();
+    bool toucheParams = false;
+    for (uint8_t k = 0; k < _nCourbes; k++) {
+      const float v = _valeurA(_courbes[k], t);
+      const char* n = _courbes[k].param;
+      if      (!strcmp(n, "harmonics"))  { p.harmonics = v; toucheParams = true; }
+      else if (!strcmp(n, "timbre"))     { p.timbre    = v; toucheParams = true; }
+      else if (!strcmp(n, "morph"))      { p.morph     = v; toucheParams = true; }
+      else if (!strcmp(n, "decay"))      { p.decay     = v; toucheParams = true; }
+      else if (!strcmp(n, "lpg_colour")) { p.lpgColour = v; toucheParams = true; }
+      else if (!strcmp(n, "volume"))     { AudioEngine::setVolume(v); }
+    }
+    if (toucheParams) AudioEngine::setParams(p);
+  }
+}
+
 // Applique a la carte ce que la cue decrit. C'est ICI que « changer de cue »
 // prend un sens materiel — et nulle part dans le navigateur.
 void _appliquer(const Cue& c) {
+  /* Les courbes d'abord : analysees ICI, a l'activation, jamais dans la boucle.
+   * Une cue sans automation en vide la table — sinon la courbe de la cue
+   * precedente continuerait de tirer les parametres, exactement le comportement
+   * fantome corrige ailleurs (§89.1). */
+  _analyserCourbes(c.env);
   // 1. Le script .nms d'abord : il transforme le MIDI, donc il doit etre en
   //    place avant que la moindre note n'arrive.
   g_midiRouter.chargerScriptNomme(c.script.c_str(), false);
@@ -121,6 +206,7 @@ bool lire(int index, Cue& sortie) {
     sortie.engine = e.length() ? e.toInt() : -1;
     sortie.params = _champ(l, 4);
     sortie.paramsScript = _champ(l, 5);
+    sortie.env          = _champ(l, 6);   // absent sur une cue sans automation
     trouve = true;
     break;
   }
@@ -183,7 +269,20 @@ void suivant() {
 
 void boucle() {
   if (!_lecture || _dureeCourante <= 0.0f) return;   // 0 = infinie, on attend un GO
-  if ((millis() - _debutMs) >= (uint32_t)(_dureeCourante * 1000.0f)) suivant();
+
+  /* L'AUTOMATION, bridee a 50 Hz. `boucle()` tourne a chaque tour de
+   * nidmi_loop — soit des milliers de fois par seconde. Appliquer a ce
+   * rythme-la reecrirait le patch de Plaits pour rien : 20 ms suffisent
+   * largement a l'oreille, et c'est deja plus fin que le tick du sequenceur du
+   * navigateur. */
+  const uint32_t maintenant = millis();
+  if (_nCourbes && (maintenant - _dernierAppliqueMs) >= 20) {
+    _dernierAppliqueMs = maintenant;
+    const float t = (float)(maintenant - _debutMs) / (_dureeCourante * 1000.0f);
+    _appliquerAutomation(t < 0.f ? 0.f : (t > 1.f ? 1.f : t));
+  }
+
+  if ((maintenant - _debutMs) >= (uint32_t)(_dureeCourante * 1000.0f)) suivant();
 }
 
 bool  enLecture()   { return _lecture; }

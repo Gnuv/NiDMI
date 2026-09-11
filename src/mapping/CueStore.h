@@ -11,6 +11,17 @@
 //   script vide    = passage direct du MIDI
 //   engine -1      = pas d'audio  (une carte sans audio n'ecrit que ca)
 //   params         = "harmonics=0.2;timbre=0.5", facultatif
+//   env            = "harmonics:0.1,0.2,...;volume:1.0,0.9,...", facultatif
+//
+// LES ENVELOPPES SONT REECHANTILLONNEES PAR L'APP, pas evaluees ici.
+// Une enveloppe y est une liste de points PLUS des courbes de Bezier par
+// segment, etendue sur plusieurs cues avec des zones ponderees par la largeur
+// et la duree de chacune. Reecrire cela en C++ serait une seconde
+// implementation a faire diverger — et la carte n'a rien a y gagner.
+// L'app sait evaluer la courbe : elle echantillonne la portion qui concerne
+// CETTE cue et n'envoie que des nombres. On interpole lineairement entre eux
+// sur la duree de la cue. La carte ne connait donc ni Bezier ni disposition
+// multi-cues, et l'app reste seule maitresse de la forme.
 // Les lignes vides et celles commencant par '#' sont ignorees.
 //
 // POURQUOI PAS DU JSON : le firmware n'a pas de bibliotheque JSON (il parse a
@@ -34,6 +45,7 @@ struct Cue {
   int     engine  = -1;      // -1 = pas d'audio
   String  params;            // "cle=valeur;cle=valeur"
   String  paramsScript;      // reglages du .nms, meme format ("semitones=12")
+  String  env;               // enveloppes : "param:v0,v1,...;param2:..." (cf. plus bas)
 };
 
 // ── Magasin ───────────────────────────────────────────────────────────────
