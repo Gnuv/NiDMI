@@ -352,6 +352,21 @@ verifier_app_embarquee() {
     echo ""
 }
 
+# Le vocabulaire que la carte PUBLIE (/api/mapping/vocabulaire) est derive de
+# MappingEngine.cpp. Ajouter un verbe sans regenerer, c'est livrer une carte qui
+# execute l'objet mais le declare inconnu — et l'app, qui la croit sur parole,
+# le colorierait en rouge. On regenere donc AVANT chaque build, et on le DIT
+# quand ca change : c'est le signe qu'un verbe est arrive depuis la derniere fois.
+generer_vocabulaire() {
+    local entete="$REPO_DIR/src/mapping/VocabulaireEmbarque.h"
+    local avant=""
+    [ -f "$entete" ] && avant=$(cat "$entete")
+    python3 "$REPO_DIR/scripts/generer-vocabulaire.py" || return 0
+    if [ "$avant" != "$(cat "$entete")" ]; then
+        echo "   ↻ vocabulaire embarque mis a jour — a commiter avec le moteur"
+    fi
+}
+
 sync_files() {
     echo "🔄 Synchronisation des fichiers..."
     echo "   📁 Source: $REPO_DIR"
@@ -382,6 +397,8 @@ sync_files() {
     _fw_variant=$([ "${_usb_midi_flag:-0}" = "1" ] && echo "usbmidi-on" || echo "usbmidi-off")
     printf '#pragma once\n#define NIDMI_FW_VERSION "%s"\n#define NIDMI_FW_VARIANT "%s"\n' "$_fw_ver" "$_fw_variant" > "$REPO_DIR/src/nidmi_fw_version.h"
     echo "   🏷️  Version firmware: $_fw_ver ($_fw_variant)"
+
+    generer_vocabulaire
 
     # Nettoyer les anciens fichiers source (pour éviter les conflits après réorganisation)
     rm -rf $ARDUINO_LIB_DIR/src/* 2>/dev/null || true

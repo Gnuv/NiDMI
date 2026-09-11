@@ -6,6 +6,7 @@
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
 #include "../mapping/MappingEngine.h"
+#include "../mapping/VocabulaireEmbarque.h"
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
@@ -425,6 +426,26 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"len\":")
                           + g_midiRouter.scriptMidi().length() + "}");
+    });
+
+    /* ── CE QUE CETTE CARTE-CI EXECUTE ───────────────────────────────────
+     * L'app colorie les scripts de broche et previent quand un objet « n'est
+     * pas execute par la carte ». Elle le SAVAIT EN DUR : une liste de dix
+     * noms ecrite a la main, figee au temps ou le moteur n'en executait que
+     * dix, si bien qu'elle signalait comme inexistants des objets parfaitement
+     * executes ici — `in` et `graph`, mesure faite.
+     *
+     * Une liste recopiee derive, et une liste copiee DEPUIS UN AUTRE DEPOT
+     * decrit de surcroit un firmware de reference, pas LA carte branchee, qui
+     * peut tourner une version plus ancienne. Donc la carte le dit elle-meme.
+     * C'est la regle du projet — la page montre l'etat exact de ce qui tourne —
+     * appliquee au langage : l'app ne suppose plus, elle demande.
+     *
+     * La reponse est un litteral en flash (VocabulaireEmbarque.h, genere par
+     * scripts/generer-vocabulaire.py depuis MappingEngine.cpp) : la route ne
+     * construit rien, pas un octet de tas pris a AsyncTCP.                    */
+    server.on("/api/mapping/vocabulaire", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", VOCABULAIRE_EMBARQUE_JSON);
     });
 
     /* ── Essai a blanc d'un script .nms ───────────────────────────────────
