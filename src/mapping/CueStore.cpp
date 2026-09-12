@@ -3,6 +3,7 @@
 #include "../midi/MidiRouter.h"
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
+#include "../server/ServerCore.h"     // nidmi_ws_pousser : la carte ANNONCE son etat
 #include <LittleFS.h>
 
 namespace Cues {
@@ -266,6 +267,31 @@ String contenu() {
   return out;
 }
 
+/* ── LA CARTE ANNONCE SON TRANSPORT ────────────────────────────────────────
+ *
+ * UN SEUL SEQUENCEUR, et il est ici. L'app n'en tient plus : elle envoie des
+ * instructions (play, stop, go, goto) et REFLETE ce que la carte lui dit. C'est
+ * la regle du projet — « tout s'execute sur la carte ; le navigateur ne fait que
+ * preparer » — appliquee au transport, ou elle ne l'etait pas : le navigateur
+ * avait son propre tick, decidait des changements de cue, et poussait ensuite le
+ * contenu. Deux sequenceurs pour une composition.
+ *
+ * ON POUSSE UN EVENEMENT, ON NE SE FAIT PAS SONDER. Sonder est precisement ce
+ * qui fait giguer la carte (MESURES §82 : ce qui coute, c'est le nombre de
+ * paquets recus). Un changement de cue est rare ; entre deux, l'app interpole
+ * sa barre de progression — elle connait la duree — et se resynchronise a
+ * chaque annonce.
+ *
+ * Appele depuis loopTask (aller/demarrer/arreter/suivant y sont tous), donc
+ * `nidmi_ws_pousser` est sur : il ne fait qu'empiler dans une file statique. */
+static void _annoncer() {
+  if (!nidmi_ws_quelqu_un_ecoute()) return;   // personne n'ecoute : rien a dire
+  char trame[72];
+  snprintf(trame, sizeof trame, "NIDMI_CUE:%d\x1f%s\x1f%.2f\x1f%d",
+           _index, _lecture ? "1" : "0", restantSec(), nombre());
+  nidmi_ws_pousser(trame);
+}
+
 bool aller(int index) {
   Cue c;
   if (!lire(index, c)) return false;
@@ -273,6 +299,7 @@ bool aller(int index) {
   _dureeCourante = c.duree;
   _debutMs = millis();
   _appliquer(c);
+  _annoncer();
   return true;
 }
 
@@ -284,6 +311,7 @@ void demarrer() {
    * menent au meme drapeau : une carte headless ne doit pas avoir sa propre
    * idee de « en lecture ». */
   g_midiRouter.fixerTransport(true);
+  _annoncer();
   Serial.println("[cues] lecture");
 }
 
@@ -291,6 +319,7 @@ void arreter() {
   _lecture = false;
   AudioEngine::couperSon();
   g_midiRouter.fixerTransport(false);   // idem : l'horloge des scripts s'arrete
+  _annoncer();
   Serial.println("[cues] arret");
 }
 
