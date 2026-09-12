@@ -283,18 +283,30 @@ void setupAudioAPI(AsyncWebServer& server) {
      * "/api/cues/play". Enregistre en premier, il a avale les commandes de
      * transport — un POST /api/cues/play a ete traite comme un envoi de liste
      * et a EFFACE les cues. Les routes SPECIFIQUES passent donc d'abord. */
+    /* ── UNE INSTRUCTION REND L'ETAT QU'ELLE PRODUIT ──────────────────────
+     * L'app applique CETTE reponse, sans attendre l'annonce WebSocket. Sinon
+     * le transport dependrait d'une socket : si elle est tombee — et elle
+     * tombe, la carte ferme quand son bloc contigu s'effondre — la carte
+     * jouerait pendant que l'ecran resterait fige, et « le bouton play ne
+     * fonctionne plus ». L'annonce reste utile pour ce que la carte decide
+     * SEULE (l'enchainement minute) ; elle n'est plus le seul chemin. */
     server.on("/api/cues/play", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::demarrer();
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
+        request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
     });
     server.on("/api/cues/stop", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::arreter();
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
+        request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
     });
     server.on("/api/cues/go", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::suivant();
-        request->send(200, "application/json",
-                      String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant() + "}");
+        request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
     });
     server.on("/api/cues/goto", HTTP_POST, [](AsyncWebServerRequest *request){
         const int i = request->hasParam("i", true)
@@ -302,7 +314,9 @@ void setupAudioAPI(AsyncWebServer& server) {
         const bool ok = Cues::aller(i);
         request->send(ok ? 200 : 404, "application/json",
                       String("{\"status\":\"") + (ok ? "ok" : "hors liste")
-                      + "\",\"index\":" + Cues::indexCourant() + "}");
+                      + "\",\"index\":" + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
     });
     server.on("/api/cues/texte", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "text/plain; charset=utf-8", Cues::contenu());
