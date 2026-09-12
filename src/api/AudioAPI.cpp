@@ -624,6 +624,33 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json", json);
     });
 
+    /* ── LE BUS INTER-BLOCS, RENDU VISIBLE ────────────────────────────────
+     * s("nom") ecrit ici, r("nom") y lit. C'est le SEUL lien entre un script de
+     * broche et un script map — et il etait entierement invisible : quand ca ne
+     * marchait pas, rien ne disait si l'ecriture avait eu lieu, sous quel nom,
+     * ni avec quelle valeur. On cherchait donc dans les deux scripts a la fois,
+     * sans moyen de trancher.
+     *
+     * Trois choses que la seule lecture du code ne donne pas :
+     *   - le NOM tel qu'il est arrive (strlcpy borne a 16 : « potentiometre_1 »
+     *     et « potentiometre_2 » deviennent la MEME entree) ;
+     *   - la VALEUR, qui dit l'echelle — in() rend 0..1, et un r() suivi d'un
+     *     ctl.out() sort alors 0 ou 1, ce qui ressemble a « rien recu » ;
+     *   - le NOMBRE d'entrees : 32 places, partagees par toutes les broches et
+     *     tous les maillons.
+     * Lecture seule, hors du chemin temps reel. */
+    server.on("/api/diag/registre", HTTP_GET, [](AsyncWebServerRequest *request){
+        String json = "{\"n\":" + String(FluxRegistry::count)
+                    + ",\"capacite\":32,\"max_nom\":15,\"entrees\":[";
+        for (int i = 0; i < FluxRegistry::count && i < 32; i++) {
+            if (i) json += ",";
+            json += "{\"nom\":\"" + String(FluxRegistry::entries[i].name)
+                  + "\",\"valeur\":" + String(FluxRegistry::entries[i].value, 4) + "}";
+        }
+        json += "]}";
+        request->send(200, "application/json", json);
+    });
+
     server.on("/api/mapping/vocabulaire", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json", VOCABULAIRE_EMBARQUE_JSON);
     });
