@@ -495,6 +495,14 @@ MidiRouter::Emplacement* MidiRouter::_assurerEmplacement(uint8_t e) {
 }
 
 void MidiRouter::_reduireChaine(uint8_t n) {
+    if (emplacements.size() <= n) return;
+    /* ET LEURS NOMS EN NVS. Sans ca, raccourcir la chaine laissait « script1 »,
+     * « script2 »... derriere elle : des cles orphelines dans le reservoir le
+     * plus tendu de la carte (630 entrees pour TOUT, §101). Vu au compteur —
+     * 114 entrees avant l'essai, 129 apres, et elles ne redescendaient pas.
+     * Une seule ouverture de NVS pour toute la reduction. */
+    Preferences p;
+    const bool nvs = p.begin(NVS_ESPACE_MIDI, false);
     while (emplacements.size() > n) {
         Emplacement* em = emplacements.back();
         /* Les reprises retiennent un pointeur sur le texte : les purger AVANT
@@ -502,7 +510,9 @@ void MidiRouter::_reduireChaine(uint8_t n) {
         MappingEngine::viderDifferes(em->contenu.c_str());
         delete em;
         emplacements.pop_back();
+        if (nvs) p.remove(cleNvsEmplacement((uint8_t)emplacements.size()).c_str());
     }
+    if (nvs) p.end();
 }
 
 /* La longueur voulue par la COMPOSITION. Rend ce qu'on a vraiment obtenu : si
