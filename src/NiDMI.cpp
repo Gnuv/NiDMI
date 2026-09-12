@@ -269,7 +269,8 @@ void nidmi_begin() {
      * maintenant une trame « NMS_PRINT:<etiquette>\x1f<valeur> » que l'app
      * affiche dans la console du bloc concerne. */
     MappingEngine::surImpression([](const char* origine, const char* etiquette,
-                                   float valeur, bool graphe) {
+                                   float valeur, uint8_t montre,
+                                   uint8_t pipe, uint8_t seg) {
         /* L'ORIGINE D'ABORD. La trame ne portait que l'etiquette et la valeur :
          * l'app ne pouvait donc pas savoir QUI avait imprime, et attribuait
          * tout au bloc map dont le script tourne sur la carte — les print() des
@@ -281,11 +282,19 @@ void nidmi_begin() {
          * PAS toucher a la WebSocket : cleanupClients() efface la liste de
          * clients depuis loopTask, et l'iterer d'ici est un acces a de la
          * memoire rendue (ServerCore.h). On POUSSE dans une file, loopTask
-         * draine. Le compteur, lui, se lit sans risque de partout.
-         * Un graphe n'a pas d'historique : s'il ne part pas il n'existe pas, on
-         * sort donc AVANT de formater — en headless ce chemin ne coute rien. */
-        if (graphe && !nidmi_ws_quelqu_un_ecoute()) return;
-        if (graphe) {
+         * draine. Le compteur, lui, se lit sans risque de partout. */
+        /* NI COURBE NI NOMBRE N'ONT D'HISTORIQUE : s'ils ne partent pas, ils
+         * n'existent pas. On sort donc AVANT de formater — en headless ce
+         * chemin ne coute rien du tout. Seul print() garde une trace. */
+        const bool vivant = (montre != MappingEngine::MontreTexte);
+        if (vivant && !nidmi_ws_quelqu_un_ecoute()) return;
+        if (montre == MappingEngine::MontreNombre) {
+            /* La POSITION voyage : « pipeline:segment ». C'est elle qui permet
+             * a l'editeur d'annoter la bonne boite, exactement comme le
+             * `${pi}:${si}` du moteur de reference. */
+            snprintf(trame, sizeof(trame), "NMS_NUM:%s\x1f%s\x1f%.4f\x1f%u:%u",
+                     org, etiquette, valeur, (unsigned)pipe, (unsigned)seg);
+        } else if (montre == MappingEngine::MontreCourbe) {
             /* PAS dans le journal texte : c'est tout l'objet de graph(). Une
              * valeur continue qui defile en chiffres noie le journal — vingt
              * lignes par seconde pour un potentiometre qui tremble. */

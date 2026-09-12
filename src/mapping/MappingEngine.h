@@ -245,11 +245,24 @@ public:
     // c'est ce qui le rend eprouvable hors carte. print() delegue donc a un
     // rappel que l'appelant installe. Sur la carte il ecrit au journal et
     // pousse une trame vers l'app ; au banc, il n'y a rien a installer.
-    /* `graphe` : la valeur est destinee a une COURBE, pas au journal texte.
-     * Un flux continu ne se lit pas en chiffres ; c'est au SCRIPT de le dire,
-     * par graph() plutot que print(), et non a l'hote de le deviner. */
+    /* TROIS FACONS DE MONTRER UNE VALEUR, et c'est le SCRIPT qui choisit —
+     * jamais l'hote qui devine :
+     *   Texte  print()  — une ligne au journal, gardee et rejouable ;
+     *   Courbe graph()  — un point de courbe. Un flux continu ne se lit pas en
+     *                     chiffres : vingt lignes par seconde pour un potard
+     *                     qui tremble noient le journal ;
+     *   Nombre num()    — un afficheur VIVANT, a sa place dans le script. Ni
+     *                     historique ni courbe : la valeur du moment, la ou le
+     *                     segment se trouve. C'est pour ca que `pipe` et `seg`
+     *                     voyagent — l'editeur retrouve la boite a annoter,
+     *                     comme le fait `${pi}:${si}` du moteur de reference.
+     * num() ne disait RIEN sur la carte : il rendait `true` sans emettre. Le
+     * verbe existait, son affichage n'existait pas — donc « num() ne marche
+     * pas », et rien pour dire pourquoi. */
+    enum Montre : uint8_t { MontreTexte = 0, MontreCourbe = 1, MontreNombre = 2 };
     typedef void (*Impression)(const char* origine, const char* etiquette,
-                               float valeur, bool graphe);
+                               float valeur, uint8_t montre,
+                               uint8_t pipe, uint8_t seg);
     static void surImpression(Impression fn);
 
     /* L'EMETTEUR OSC, pose de l'exterieur — comme l'impression. Le moteur ne
@@ -301,7 +314,8 @@ public:
     static bool executeMidiNote(const char* script,
                                 uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
                                 bool estNoteOff, SortieNote& sortie,
-                                Etat* etats = nullptr, int nEtats = 0);
+                                Etat* etats = nullptr, int nEtats = 0,
+                                const char* origine = nullptr);
 
     // ── Traitement d'un CONTROLEUR CONTINU entrant ──────────────────────────
     // Pendant du precedent pour les CC. Les verbes sont ceux que la langue
@@ -335,5 +349,11 @@ public:
     };
     static bool executeMidiCc(const char* script,
                               uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
-                              SortieCc& sortie, Etat* etats = nullptr, int nEtats = 0);
+                              SortieCc& sortie, Etat* etats = nullptr, int nEtats = 0,
+                              /* QUI execute — « map:2 ». Le battement le passait
+                               * deja ; ces deux chemins-ci, non, si bien qu'un
+                               * print() ou un graph() declenche par une NOTE ou
+                               * un CC arrivait a l'app sans origine (« ? »),
+                               * indistinguable d'un autre maillon. */
+                              const char* origine = nullptr);
 };

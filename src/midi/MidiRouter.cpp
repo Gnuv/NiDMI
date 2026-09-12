@@ -251,8 +251,12 @@ bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
         Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         MappingEngine::SortieCc sortie;
+        /* QUI execute — « map:0 ». Le battement d'horloge le passait deja ;
+         * ce chemin-ci, non, si bien qu'un print() ou un graph() declenche par
+         * un CC arrivait a l'app sous « ? ». */
+        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         MappingEngine::executeMidiCc(em.contenu.c_str(), n, v, c, sortie,
-                                     em.etats, MappingEngine::MAX_PIPELINES_SCRIPT);
+                                     em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
         if (sortie.emise) { c = sortie.canal; n = sortie.cc; v = sortie.valeur; }
         else if (sortie.traite) return false;
         // Ni emise ni traite : cet emplacement ne parle pas de CC, on passe.
@@ -429,9 +433,10 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
         Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         MappingEngine::SortieNote sortie;
+        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);   // idem
         if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c,
                                            estNoteOff, sortie,
-                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT)) {
+                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
             n = sortie.note; v = sortie.velo; c = sortie.canal;
         }
         // Script qui PARLE de notes mais n'a rien emis pour celle-ci : on NE

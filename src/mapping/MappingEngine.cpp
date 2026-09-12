@@ -986,7 +986,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
             g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
-                         courant, false);
+                         courant, MappingEngine::MontreTexte, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
         return true;
     }
     /* graph([etiquette]) — la meme valeur, mais EN COURBE. Pendant exact de
@@ -999,10 +999,22 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
             g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
-                         courant, true);
+                         courant, MappingEngine::MontreCourbe, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
         return true;
     }
-    if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) return true;
+    /* num([etiquette]) — un afficheur VIVANT, pas une ligne de journal. Il
+     * rendait `true` sans rien emettre : le verbe existait, son affichage non.
+     * La position (pipeline:segment) part avec, pour que l'editeur retrouve la
+     * boite a annoter — c'est ce que fait `${pi}:${si}` cote reference. */
+    if (verbe(seg, "num", a) || verbe(seg, "n", a) || verbe(seg, "number", a)) {
+        String etiquette = a; etiquette.trim();
+        if (etiquette.length() >= 2 && etiquette[0] == '"')
+            etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
+        if (g_impression)
+            g_impression(e.origine, etiquette.c_str(), courant,
+                         MappingEngine::MontreNombre, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
+        return true;
+    }
     if (verbe(seg, "bang", a) || verbe(seg, "b", a)) return true;
 
     // ── Sorties ─────────────────────────────────────────────────────────────
@@ -1363,11 +1375,12 @@ static uint8_t canalValide(uint8_t c) { return (uint8_t)constrain((int)c, 1, 16)
 bool MappingEngine::executeMidiNote(const char* script,
                                     uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
                                     bool estNoteOff, SortieNote& sortie,
-                                    Etat* etats, int nEtats) {
+                                    Etat* etats, int nEtats, const char* origine) {
     sortie.emise = sortie.traite = false;
     Evenement e;
     e.type  = estNoteOff ? Evenement::NoteOff : Evenement::NoteOn;
     e.canal = canalIn; e.a = noteIn; e.b = veloIn;
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
 
     Sortie liste[MAX_SORTIES];
     bool traite = false;
@@ -1386,11 +1399,13 @@ bool MappingEngine::executeMidiNote(const char* script,
 
 bool MappingEngine::executeMidiCc(const char* script,
                                   uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
-                                  SortieCc& sortie, Etat* etats, int nEtats) {
+                                  SortieCc& sortie, Etat* etats, int nEtats,
+                                  const char* origine) {
     sortie.emise = sortie.traite = false;
     Evenement e;
     e.type = Evenement::Cc;
     e.canal = canalIn; e.a = ccIn; e.b = valeurIn;
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
 
     Sortie liste[MAX_SORTIES];
     bool traite = false;
