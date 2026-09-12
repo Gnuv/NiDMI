@@ -311,6 +311,16 @@ void setupAudioAPI(AsyncWebServer& server) {
         String j = "{\"n\":" + String(Cues::nombre())
                  + ",\"index\":" + String(Cues::indexCourant())
                  + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                 /* DEUX TRANSPORTS, ET ILS NE DISENT PAS LA MEME CHOSE.
+                  * `lecture` = le SEQUENCEUR EMBARQUE deroule sa liste (cas
+                  * headless). `horloge_scripts` = l'horloge des scripts bat —
+                  * elle est ouverte aussi bien par Cues::demarrer que par le
+                  * transport de l'app (/api/audio/resume), qui pilote les cues
+                  * lui-meme et ne fait donc pas courir celui de la carte.
+                  * Les confondre, c'etait annoncer « lecture: false » pendant
+                  * qu'un metro() battait : un etat faux, constate. On les
+                  * NOMME tous les deux plutot que d'en inventer un seul. */
+                 + ",\"horloge_scripts\":" + String(g_midiRouter.enLecture() ? "true" : "false")
                  + ",\"restant\":" + String(Cues::restantSec(), 2) + "}";
         request->send(200, "application/json", j);
     });
