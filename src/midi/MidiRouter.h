@@ -35,6 +35,13 @@ public:
      * plus jamais. */
     static constexpr uint8_t PLAFOND_SCRIPTS_MAP = 64;
 
+    /* LE PLANCHER DU BLOC CONTIGU. Sous cette taille, la pile reseau accepte les
+     * connexions sans pouvoir les servir : un navigateur qui en ouvre trente de
+     * front n'obtient rien, et la page reste blanche. Declare ICI parce que
+     * c'est ici qu'on refuse d'allouer — et publie par /api/diag/reservoirs,
+     * pour que l'app affiche le meme seuil sans en garder une copie. */
+    static constexpr size_t PLANCHER_BLOC_CONTIGU = 12288;
+
     /* Combien la chaine en porte EN CE MOMENT. Publie par /api/midi/scripts :
      * l'app n'a plus a savoir combien la carte en tient, elle le lui demande. */
     uint8_t nEmplacements() const { return (uint8_t)emplacements.size(); }

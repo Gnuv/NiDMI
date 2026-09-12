@@ -11,6 +11,7 @@
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
 #include <nvs.h>
+#include <esp_heap_caps.h>   // le bloc contigu : le reservoir qui predit la panne
 
 /*
  * API audio — pilotage et MÉTROLOGIE.
@@ -573,6 +574,22 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         /* NVS : les chiffres viennent du systeme (nvs_get_stats), pas d'un
          * comptage a nous. Une entree fait 32 octets — c'est la structure de
          * l'ESP-IDF, pas une constante du projet. */
+        /* ── LE RESERVOIR LE PLUS CONTRAINT, ET CELUI QUI MANQUAIT ────────
+         * Le PLUS GROS BLOC CONTIGU, pas le tas libre. La distinction est toute
+         * la panne : mesure le 2026-09-12, une carte a 22 372 o LIBRES mais
+         * 7 668 o de plus grand bloc repondait a chaque requete prise une par
+         * une — et ne servait plus une page, parce qu'un navigateur en ouvre
+         * trente de front. Les octets etaient la ; ils etaient en miettes.
+         * Il se fragmente a chaque chargement de page (4 a 11 ko, §81) et ne se
+         * defragmente JAMAIS : seul un redemarrage le rend. C'est donc le seul
+         * chiffre qui PREDIT la panne, et il n'etait sur aucun ecran.
+         * `min_ever` dit de combien on est passe pres sans le voir. */
+        json += "\"tas\":{\"bloc_contigu\":"
+              + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+        json += ",\"libre\":"     + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        json += ",\"min_jamais\":" + String((unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+        json += ",\"plancher\":"  + String((unsigned)MidiRouter::PLANCHER_BLOC_CONTIGU) + "},";
+
         nvs_stats_t st = {};
         if (nvs_get_stats(nullptr, &st) == ESP_OK) {
             json += "\"nvs\":{\"entrees_utilisees\":" + String((unsigned)st.used_entries);

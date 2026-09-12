@@ -467,8 +467,6 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
  * lequel la pile reseau cesse de servir (MESURES, pieges de mesure). Refuser a
  * la CONFIGURATION est un message ; manquer de memoire pendant une performance
  * est une panne. */
-namespace { constexpr size_t PLANCHER_BLOC_CONTIGU = 12288; }
-
 MidiRouter::Emplacement* MidiRouter::_assurerEmplacement(uint8_t e) {
     if (e >= PLAFOND_SCRIPTS_MAP) {
         Serial.printf("[MidiRouter] emplacement %u refuse : le plafond d'index est %u\n",
