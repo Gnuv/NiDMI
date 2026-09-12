@@ -351,6 +351,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
                       "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"emplacements\":" + emps
                       + ",\"n\":" + String((unsigned)g_midiRouter.nEmplacements())
                       + ",\"plafond\":" + String((unsigned)MidiRouter::PLAFOND_SCRIPTS_MAP)
+                      + ",\"permanents\":" + String((unsigned)g_midiRouter.nMaillonsPermanents())
                       + ",\"fichiers\":" + ScriptStore::listerJson() + "}");
     });
 
@@ -372,10 +373,19 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
             return;
         }
         const uint8_t obtenu = g_midiRouter.dimensionnerChaine((uint8_t)voulu);
+        /* `permanents` : combien de maillons de tete appartiennent a la zone
+         * MAIN. Meme requete que la longueur — c'est une seule decision de la
+         * composition, et deux requetes laisseraient une fenetre ou la carte
+         * aurait la nouvelle longueur avec l'ancienne frontiere. */
+        if (request->hasParam("permanents", true)) {
+            const int perm = request->getParam("permanents", true)->value().toInt();
+            g_midiRouter.fixerMaillonsPermanents((uint8_t)((perm < 0) ? 0 : perm));
+        }
         request->send(obtenu == voulu ? 200 : 507, "application/json",
             String("{\"status\":\"") + (obtenu == voulu ? "ok" : "partiel")
             + "\",\"demande\":" + String(voulu)
-            + ",\"obtenu\":" + String((unsigned)obtenu) + "}");
+            + ",\"obtenu\":" + String((unsigned)obtenu)
+            + ",\"permanents\":" + String((unsigned)g_midiRouter.nMaillonsPermanents()) + "}");
     });
 
     /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */

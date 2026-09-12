@@ -141,6 +141,12 @@ void _appliquer(const Cue& c) {
    *    les evenements, exactement le comportement fantome corrige ailleurs. */
   {
     const uint8_t n = g_midiRouter.nEmplacements();
+    /* LES MAILLONS DE LA ZONE MAIN SONT HORS DE PORTEE D'UNE CUE. Ils tournent
+     * tout le temps, quelle que soit la cue — donc ni chargement ni vidage ici.
+     * Les positions de la liste restent ABSOLUES : ce qu'une cue ecrit pour un
+     * maillon permanent est simplement ignore, et le format ne depend pas de la
+     * frontiere. */
+    const uint8_t perm = g_midiRouter.nMaillonsPermanents();
     int debut = 0;
     for (uint8_t e = 0; e < n; e++) {
       String nom;
@@ -150,6 +156,7 @@ void _appliquer(const Cue& c) {
         debut = (virgule < 0) ? -1 : virgule + 1;
       }
       nom.trim();
+      if (e < perm) continue;          // zone MAIN : la cue passe son chemin
       g_midiRouter.chargerScriptNomme(nom.c_str(), false, e);
     }
   }

@@ -515,6 +515,19 @@ void MidiRouter::_reduireChaine(uint8_t n) {
     if (nvs) p.end();
 }
 
+/* Combien de maillons appartiennent a la zone MAIN. Persiste, comme la
+ * longueur : sans cela une carte redemarree rechargerait bien ses scripts MAIN
+ * mais laisserait la premiere cue les ecraser. */
+void MidiRouter::fixerMaillonsPermanents(uint8_t n) {
+    if (n > emplacements.size()) n = (uint8_t)emplacements.size();
+    if (n == _nPermanents) return;
+    _nPermanents = n;
+    Preferences p;
+    if (p.begin(NVS_ESPACE_MIDI, false)) { p.putUChar("nperm", n); p.end(); }
+    Serial.printf("[MidiRouter] %u maillon(s) permanent(s) — les cues n'y touchent pas\n",
+                  (unsigned)n);
+}
+
 /* La longueur voulue par la COMPOSITION. Rend ce qu'on a vraiment obtenu : si
  * la memoire a manque, c'est la carte qui le dit, pas l'app qui le suppose. */
 uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
@@ -522,6 +535,9 @@ uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
     if (n < emplacements.size()) _reduireChaine(n);
     else if (n > 0)              _assurerEmplacement((uint8_t)(n - 1));
     const uint8_t obtenu = (uint8_t)emplacements.size();
+    /* Une chaine raccourcie sous la zone MAIN ne peut plus en tenir autant :
+       la frontiere suit, sinon elle designerait des maillons disparus. */
+    if (_nPermanents > obtenu) fixerMaillonsPermanents(obtenu);
     /* La longueur va en NVS avec les noms : sans elle, une carte redemarree
      * retrouverait ses scripts mais pas sa chaine, et les emplacements au-dela
      * du premier seraient muets sans rien dire. */
@@ -580,14 +596,16 @@ void MidiRouter::restaurerScript() {
     /* LA LONGUEUR DE LA CHAINE d'abord : c'est elle qui dit combien de noms
      * lire. Sans elle on scannerait le plafond entier — 64 lectures NVS a
      * chaque demarrage pour retrouver, le plus souvent, zero script. */
-    const uint8_t nmap = p.getUChar("nmap", 0);
+    const uint8_t nmap  = p.getUChar("nmap", 0);
+    const uint8_t nperm = p.getUChar("nperm", 0);
     std::vector<String> noms(nmap);
     for (uint8_t e = 0; e < nmap; e++)
         noms[e] = p.getString(cleNvsEmplacement(e).c_str(), "");
     p.end();
     if (nmap) _assurerEmplacement((uint8_t)(nmap - 1));
-    Serial.printf("[MidiRouter] chaine restauree : %u emplacement(s)\n",
-                  (unsigned)emplacements.size());
+    _nPermanents = (nperm <= emplacements.size()) ? nperm : (uint8_t)emplacements.size();
+    Serial.printf("[MidiRouter] chaine restauree : %u emplacement(s), dont %u permanent(s)\n",
+                  (unsigned)emplacements.size(), (unsigned)_nPermanents);
     for (uint8_t e = 0; e < nmap; e++) {
         if (!noms[e].length()) continue;
         if (!chargerScriptNomme(noms[e].c_str(), false, e)) {

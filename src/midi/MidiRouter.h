@@ -44,6 +44,35 @@ public:
      * a manque, et c'est alors la carte qui le dit, pas l'app qui le devine. */
     uint8_t dimensionnerChaine(uint8_t n);
 
+    /* ── LES MAILLONS PERMANENTS : LA ZONE MAIN ────────────────────────────
+     *
+     * Les `n` PREMIERS maillons appartiennent a la zone MAIN de la composition
+     * — des scripts qui tournent TOUT LE TEMPS, quelle que soit la cue. Une cue
+     * ne les touche pas : ni pour les charger, ni pour les vider.
+     *
+     * Sans cette frontiere, un script MAIN n'avait aucun moyen d'exister sur la
+     * carte : les cues reecrivent la chaine entiere a chaque activation, et
+     * `chargerScriptNomme` REINITIALISE l'etat du maillon. Un counter() ou un
+     * toggle() de MAIN serait reparti de zero a chaque GO — ce qui est la
+     * negation meme de « toujours actif ».
+     *
+     * Ils sont EN TETE parce que la chaine est serielle et que le premier
+     * maillon voit l'evenement tel qu'il arrive : un traitement global (filtrer
+     * un canal, transposer l'ensemble) doit s'appliquer avant ce que la cue en
+     * fait. C'est aussi l'ordre visuel — la colonne MAIN est dessinee avant la
+     * case 1.
+     *
+     * ⚠ DIVERGENCE ASSUMEE AVEC LE NAVIGATEUR, et elle est ecrite ici pour
+     * qu'on ne la redecouvre pas : cote app, chaque groupe a SA chaine et
+     * l'evenement entrant les traverse EN PARALLELE (`AudioEngine.midi` appelle
+     * `_routeNoteToGroup` pour chaque groupe, puis pour « mix »). La carte n'a
+     * qu'UNE chaine serielle — choix du §60, jamais signale. Tant que la carte
+     * n'a qu'un moteur audio, le routage par groupe n'a pas d'objet ici ; le
+     * jour ou elle en aura plusieurs, c'est cette difference qu'il faudra
+     * trancher, pas ce compteur. */
+    void    fixerMaillonsPermanents(uint8_t n);
+    uint8_t nMaillonsPermanents() const { return _nPermanents; }
+
     MidiRouter();
     ~MidiRouter() override;
 
@@ -173,6 +202,7 @@ private:
     };
     /* Alloues un par un, jamais deplaces : voir PLAFOND_SCRIPTS_MAP. */
     std::vector<Emplacement*> emplacements;
+    uint8_t _nPermanents = 0;     // les maillons de la zone MAIN, en tete
     /* Rend l'emplacement `e`, en allouant ce qui manque jusqu'a lui. nullptr si
      * l'index depasse le plafond ou si la memoire a manque — dans les deux cas
      * la carte le DIT sur le port serie plutot que d'ecrire dans le vide. */
