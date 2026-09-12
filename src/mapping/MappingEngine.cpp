@@ -108,6 +108,30 @@ enum : uint8_t { RepDifferee = 0, RepLag = 1, RepRampe = 2 };
 constexpr int MAX_REPRISES = 16;
 Reprise g_reprises[MAX_REPRISES];
 
+/* CE QU'ON SAIT DE L'OCCUPATION DE CE RESERVOIR.
+ *
+ * Seize places, PARTAGEES par tout le monde : les broches, les quatre
+ * emplacements de scripts map, les cues. Jusqu'ici la saturation ne laissait
+ * qu'une ligne sur le port serie — c'est-a-dire rien, en repetition. Or c'est
+ * le seul reservoir qu'on ne peut PAS dimensionner en poussant un script : le
+ * nombre de del() et de lag() simultanes depend de ce qui se joue.
+ *
+ * D'ou ces trois nombres. Le pire cas (`max`) est ce qui dit si 16 suffit ;
+ * `refus` est ce qui dit que non, et de combien. Les compter coute une
+ * comparaison par armement — rien, dans une tache a 10 ms. */
+uint16_t g_repMax   = 0;     // plus haute occupation observee
+uint32_t g_repRefus = 0;     // demandes refusees, file pleine
+
+uint16_t _repEnCours() {
+  uint16_t n = 0;
+  for (int i = 0; i < MAX_REPRISES; i++) if (g_reprises[i].actif) n++;
+  return n;
+}
+/* Recompte apres armement plutot que d'incrementer : `continuer` REPREND
+ * parfois une place deja tenue, un compteur incremente derinverait. Seize
+ * iterations, une fois par armement. */
+void _repNoter() { const uint16_t n = _repEnCours(); if (n > g_repMax) g_repMax = n; }
+
 /* L'HORLOGE DU MOTEUR, tenue par le battement.
  * del() s'en sert plutot que de millis() : c'est ce que fait la reference
  * (this._now, mis a jour par tick()), et c'est ce qui rend le verbe
@@ -583,6 +607,7 @@ bool continuer(const Contexte* c, uint8_t genre, float de, float vers,
     for (int i = 0; i < MAX_REPRISES && !cible; i++)
         if (!g_reprises[i].actif) cible = &g_reprises[i];
     if (!cible) {
+        g_repRefus++;
         Serial.println("[nms] file des differes pleine — une interpolation est perdue");
         return false;
     }
@@ -593,6 +618,7 @@ bool continuer(const Contexte* c, uint8_t genre, float de, float vers,
     cible->debut = debut;      cible->duree = duree;
     cible->valeur = de;        cible->echeance = debut;
     cible->evt = e;            cible->actif = true;
+    _repNoter();
     return true;
 }
 
@@ -607,10 +633,12 @@ bool differer(const Contexte* c, float valeur, const Evt& e, uint32_t echeance) 
         r.evt = e;            r.actif = true;
         r.horsLigne = c->horsLigne;   // la reprise reste dans SA ligne de temps
         r.genre = RepDifferee;
+        _repNoter();
         return true;
     }
     /* Reservoir plein : on le DIT. Un differe qui disparait en silence est le
      * genre de panne qu'on passe cette session a supprimer. */
+    g_repRefus++;
     Serial.println("[nms] file des differes pleine — une valeur est perdue");
     return false;
 }
@@ -1299,6 +1327,26 @@ int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
 void MappingEngine::viderDifferes(const char* script) {
     for (int i = 0; i < MAX_REPRISES; i++)
         if (!script || g_reprises[i].script == script) g_reprises[i].actif = false;
+}
+
+/* L'OCCUPATION DU RESERVOIR, dite par lui. Publiee par /api/diag/reservoirs.
+ * `capacite` voyage avec le reste : le client n'a pas a savoir que c'est 16,
+ * et ne s'en trouvera pas menteur le jour ou ce sera autre chose. */
+void MappingEngine::statsReprises(uint16_t& enCours, uint16_t& maxVu,
+                                  uint32_t& refus, uint16_t& capacite) {
+    enCours  = _repEnCours();
+    maxVu    = g_repMax;
+    refus    = g_repRefus;
+    capacite = (uint16_t)MAX_REPRISES;
+}
+
+/* Ouvre une fenetre propre — meme usage que ?reset=1 de /api/diag/gigue :
+ * on remet a zero AVANT la charge, on lit APRES. `max` repart de l'occupation
+ * COURANTE, pas de zero : ces places-la sont tenues, les oublier ferait
+ * afficher un pire cas inferieur au present. */
+void MappingEngine::reinitStatsReprises() {
+    g_repMax   = _repEnCours();
+    g_repRefus = 0;
 }
 
 // Canal MIDI valide. Le PIPELINE ne borne rien — le moteur web ne borne pas

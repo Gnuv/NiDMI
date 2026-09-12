@@ -225,6 +225,16 @@ public:
                                bool horsLigne = false);
     static void viderDifferes(const char* script = nullptr);
 
+    /* L'OCCUPATION de cette file, qui est le SEUL reservoir qu'on ne puisse pas
+     * dimensionner a la configuration : le nombre de del() et de lag()
+     * simultanes depend de ce qui se joue, pas de ce qu'on a pousse. Elle est
+     * de plus GLOBALE — broches, emplacements de scripts map et cues y puisent
+     * ensemble. La saturation ne laissait qu'une ligne sur le port serie ;
+     * elle se compte maintenant. */
+    static void statsReprises(uint16_t& enCours, uint16_t& maxVu,
+                              uint32_t& refus, uint16_t& capacite);
+    static void reinitStatsReprises();
+
     // Efface l'etat par pipeline (toggle, counter, seq, sel/map, lp, drunk...).
     // A appeler quand le SCRIPT change : sinon un compteur repart d'ou en etait
     // le script precedent, a une position qui n'a plus de sens.

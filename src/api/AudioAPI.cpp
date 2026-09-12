@@ -10,6 +10,7 @@
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
+#include <nvs.h>
 
 /*
  * API audio — pilotage et MÉTROLOGIE.
@@ -496,6 +497,74 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"max_us\":"    + String(g_gigueMuxMaxUs);
         json += ",\"moy_us\":"    + String(nMux ? (g_gigueMuxCumulUs / nMux) : 0);
         json += ",\"retards\":"   + String(g_gigueMuxRetards) + "}}";
+        request->send(200, "application/json", json);
+    });
+
+    /* ── LES RESERVOIRS, DITS PAR LA CARTE ────────────────────────────────
+     *
+     * Trois reservoirs se remplissaient sans que rien ne le dise, chacun d'une
+     * espece differente — et c'est pour ca qu'un seul chiffre ne suffisait pas :
+     *
+     *   NVS      — 20 480 o pour TOUT (WiFi, mDNS, OSC, noms des scripts, table
+     *              CC, seuils du mux, et les configurations de broches). La
+     *              carte accepte 1 900 o par broche et en tient 32 : trois fois
+     *              la partition. La borne par broche est verifiee, le TOTAL ne
+     *              l'etait nulle part.
+     *   mapfs    — 1 Mo, mais alloue par bloc : un script de 30 octets en occupe
+     *              plusieurs milliers. Un pourcentage d'octets rassure a tort ;
+     *              c'est le NOMBRE DE FICHIERS qui bute en premier. D'ou les
+     *              deux mesures cote a cote — l'ecart EST le surcout.
+     *   reprises — le seul qu'on ne puisse pas dimensionner a la configuration
+     *              (voir MappingEngine::statsReprises). Seize places pour toute
+     *              la carte ; au-dela, un lag() ne partait pas, en silence.
+     *
+     * `?reset=1` ouvre une fenetre propre sur les reprises, comme pour la
+     * gigue : remettre a zero AVANT la charge, lire APRES.
+     *
+     * Lecture seule et hors du chemin temps reel : cette route ne fait que
+     * lire des compteurs et parcourir un repertoire. */
+    server.on("/api/diag/reservoirs", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("reset")) {
+            MappingEngine::reinitStatsReprises();
+            request->send(200, "application/json", "{\"reset\":true}");
+            return;
+        }
+        String json = "{";
+
+        /* NVS : les chiffres viennent du systeme (nvs_get_stats), pas d'un
+         * comptage a nous. Une entree fait 32 octets — c'est la structure de
+         * l'ESP-IDF, pas une constante du projet. */
+        nvs_stats_t st = {};
+        if (nvs_get_stats(nullptr, &st) == ESP_OK) {
+            json += "\"nvs\":{\"entrees_utilisees\":" + String((unsigned)st.used_entries);
+            json += ",\"entrees_libres\":"  + String((unsigned)st.free_entries);
+            json += ",\"entrees_total\":"   + String((unsigned)st.total_entries);
+            json += ",\"espaces\":"         + String((unsigned)st.namespace_count);
+            json += ",\"octets_par_entree\":32}";
+        } else {
+            json += "\"nvs\":null";          // le dire, plutot que d'inventer des zeros
+        }
+
+        size_t nf = 0, ns = 0, oc = 0, ou_ = 0, ot = 0;
+        ScriptStore::infos(nf, ns, oc, ou_, ot);
+        json += ",\"mapfs\":{\"fichiers\":" + String((unsigned)nf);
+        json += ",\"scripts\":"        + String((unsigned)ns);
+        json += ",\"octets_contenu\":" + String((unsigned)oc);
+        json += ",\"octets_utilises\":"+ String((unsigned)ou_);
+        json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
+
+        uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
+        MappingEngine::statsReprises(enCours, maxVu, refus, capacite);
+        json += ",\"reprises\":{\"en_cours\":" + String((unsigned)enCours);
+        json += ",\"max\":"      + String((unsigned)maxVu);
+        json += ",\"refus\":"    + String((unsigned)refus);
+        json += ",\"capacite\":" + String((unsigned)capacite) + "}";
+
+        /* La borne par broche, pour que le client n'ait pas a la recopier :
+         * elle est deja publiee par /api/pins/caps, et deux copies d'un meme
+         * nombre finissent toujours par diverger. On dit seulement ce qui
+         * manquait — la partition qui les accueille TOUTES. */
+        json += "}";
         request->send(200, "application/json", json);
     });
 

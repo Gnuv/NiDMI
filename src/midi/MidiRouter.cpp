@@ -352,6 +352,16 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
     Emplacement& em = emplacements[emplacement];
     const bool memeCode = (em.contenu == script);
 
+    /* ⚠ LES REPRISES DE L'ANCIEN TEXTE, D'ABORD.
+     * Une reprise en attente — del(), makenote(), lag(), ramp() — retient un
+     * `const char*` sur le texte du script. Remplacer `em.contenu` libere ce
+     * tampon (ou, pire, le REUTILISE pour le nouveau texte) : la file rejouait
+     * alors sur de la memoire rendue, ou sur le segment d'un autre script.
+     * `viderDifferes` existait pour ca et n'etait appelee QUE par le chemin des
+     * broches (ComponentManager) — les emplacements de scripts map ne l'ont
+     * jamais appelee. Trouve par le compteur de /api/diag/reservoirs : apres
+     * avoir vide l'emplacement 0, la file annoncait encore 16 places tenues. */
+    MappingEngine::viderDifferes(em.contenu.c_str());
     em.contenu = script;
     em.initEnAttente = true;          // nouveau script : son loadbang() est du
     /* L'etat par pipeline de CET emplacement n'a plus de sens : un counter
@@ -452,6 +462,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
     const String cle = cleNvsEmplacement(emplacement);
 
     if (!nom || !*nom) {                       // "" = plus de script du tout
+        MappingEngine::viderDifferes(em.contenu.c_str());   // voir setScriptMidi
         em.contenu = "";
         em.nom = "";
         for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
@@ -467,6 +478,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
         Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
         return false;
     }
+    MappingEngine::viderDifferes(em.contenu.c_str());       // voir setScriptMidi
     em.contenu = contenu;
     em.nom     = nom;
     em.initEnAttente = true;

@@ -56,6 +56,30 @@ String listerJson() {
   return out;
 }
 
+void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
+           size_t& octetsUtilises, size_t& octetsTotal) {
+  fichiers = scripts = octetsContenu = octetsUtilises = octetsTotal = 0;
+  if (!monter()) return;
+  octetsTotal    = LittleFS.totalBytes();
+  octetsUtilises = LittleFS.usedBytes();
+  /* Deux niveaux suffisent : la racine porte les echantillons et les cues,
+   * /scripts porte les .nms. Pas de recursion generale — il n'y a pas d'autre
+   * niveau, et en inventer un serait du code qu'aucun cas n'exerce. */
+  File racine = LittleFS.open("/");
+  if (!racine || !racine.isDirectory()) return;
+  for (File f = racine.openNextFile(); f; f = racine.openNextFile()) {
+    if (!f.isDirectory()) { fichiers++; octetsContenu += f.size(); continue; }
+    File d = LittleFS.open(f.path());
+    if (!d || !d.isDirectory()) continue;
+    const bool estScripts = (String(f.path()) == DOSSIER);
+    for (File g = d.openNextFile(); g; g = d.openNextFile()) {
+      if (g.isDirectory()) continue;
+      fichiers++; octetsContenu += g.size();
+      if (estScripts) scripts++;
+    }
+  }
+}
+
 bool existe(const char* nom) {
   if (!nom || !*nom || !monter()) return false;
   return LittleFS.exists(_chemin(nom));
