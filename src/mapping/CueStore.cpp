@@ -17,6 +17,16 @@ bool  _monte    = false;
 bool  _lecture  = false;
 int   _index    = 0;
 uint32_t _debutMs = 0;      // instant d'activation de la cue courante
+/* ── LA PAUSE APPARTIENT A LA CARTE, ELLE AUSSI ─────────────────────────────
+ * L'app avait la sienne, purement locale : appuyer sur STOP en lecture la
+ * mettait en pause pendant que la carte CONTINUAIT. L'ecran disait « arrete »,
+ * le son continuait — un mensonge d'etat, exactement ce que le sequenceur
+ * unique doit supprimer.
+ * Une pause n'est pas un arret : elle GELE le decompte la ou il en est. On
+ * retient donc l'ecoule, et la reprise recule l'origine d'autant au lieu de
+ * repartir de zero. */
+bool     _enPause  = false;
+uint32_t _ecouleMs = 0;     // ce qui s'etait ecoule au moment de la pause
 float _dureeCourante = 0.0f;
 
 // Decoupe "a|b|c" sans allouer de tableau : on avance de separateur en
@@ -298,12 +308,26 @@ bool aller(int index) {
   _index = index;
   _dureeCourante = c.duree;
   _debutMs = millis();
+  _enPause = false;          // changer de cue annule une pause en cours
   _appliquer(c);
   _annoncer();
   return true;
 }
 
 void demarrer() {
+  /* REPRISE : on ne recharge pas la cue, on rend son temps. La recharger
+   * relancerait son script (loadbang, etats remis a plat) et son moteur — une
+   * reprise qui recommence n'est pas une reprise. */
+  if (_enPause) {
+    _enPause = false;
+    _debutMs = millis() - _ecouleMs;
+    _lecture = true;
+    AudioEngine::ouvrirSon();
+    g_midiRouter.fixerTransport(true);
+    _annoncer();
+    Serial.println("[cues] reprise");
+    return;
+  }
   if (!aller(_index)) { Serial.println("[cues] aucune cue a jouer"); return; }
   _lecture = true;
   AudioEngine::ouvrirSon();     // PLAY ouvre la porte : c'est le transport qui decide
@@ -315,7 +339,21 @@ void demarrer() {
   Serial.println("[cues] lecture");
 }
 
+/* PAUSE : le decompte gele, la tete reste ou elle est. Le son se tait comme a
+ * l'arret — la carte n'a qu'une porte — mais le temps, lui, est garde. */
+void pauser() {
+  if (!_lecture) return;
+  _ecouleMs = millis() - _debutMs;
+  _enPause = true;
+  _lecture = false;
+  AudioEngine::couperSon();
+  g_midiRouter.fixerTransport(false);
+  _annoncer();
+  Serial.printf("[cues] pause a %.2f s\n", _ecouleMs / 1000.0f);
+}
+
 void arreter() {
+  _enPause = false;          // un arret franc oublie la position gelee
   _lecture = false;
   AudioEngine::couperSon();
   g_midiRouter.fixerTransport(false);   // idem : l'horloge des scripts s'arrete
@@ -353,8 +391,12 @@ void boucle() {
 bool  enLecture()   { return _lecture; }
 int   indexCourant(){ return _index; }
 float restantSec() {
-  if (!_lecture || _dureeCourante <= 0.0f) return 0.0f;
-  const uint32_t ecoule = millis() - _debutMs;
+  if (_dureeCourante <= 0.0f) return 0.0f;         // cue infinie : rien a decompter
+  /* EN PAUSE, LE DECOMPTE EXISTE ENCORE — il est gele. Rendre 0 faisait croire
+   * a l'app que la cue etait finie, et sa barre de progression se vidait au
+   * moment precis ou l'usager voulait la voir tenir. */
+  if (!_lecture && !_enPause) return 0.0f;
+  const uint32_t ecoule = _enPause ? _ecouleMs : (millis() - _debutMs);
   const float reste = _dureeCourante - (ecoule / 1000.0f);
   return reste > 0 ? reste : 0.0f;
 }

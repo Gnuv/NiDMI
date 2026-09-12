@@ -296,6 +296,14 @@ void setupAudioAPI(AsyncWebServer& server) {
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
                       + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
     });
+    /* PAUSE : le decompte gele, la tete reste. « play » reprend sans recharger. */
+    server.on("/api/cues/pause", HTTP_POST, [](AsyncWebServerRequest *request){
+        Cues::pauser();
+        request->send(200, "application/json",
+                      String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+    });
     server.on("/api/cues/stop", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::arreter();
         request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()

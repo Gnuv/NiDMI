@@ -64,6 +64,10 @@ String contenu();                      // le fichier brut, pour l'app
 // ── Transport ─────────────────────────────────────────────────────────────
 void  demarrer();          // PLAY : active la cue courante et lance le decompte
 void  arreter();           // STOP : silence, decompte a plat
+/* PAUSE : gele le decompte la ou il en est ; demarrer() reprend sans recharger
+ * la cue. L'app avait sa propre pause, locale — elle affichait « arrete »
+ * pendant que la carte continuait de jouer. Un sequenceur, donc une pause. */
+void  pauser();
 void  suivant();           // GO   : cue suivante
 bool  aller(int index);    // saut direct
 void  boucle();            // appelee par nidmi_loop : avance les cues minutees
