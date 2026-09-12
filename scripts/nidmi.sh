@@ -965,6 +965,11 @@ main() {
                "compile")
                    echo "🚀 NiDMI - Synchronisation + Compilation"
                    echo "================================================"
+                   # L'avertissement etait cable sur « build » SEUL, alors que
+                   # « compile » est ce qu'on lance pour flasher par OTA. Une
+                   # session entiere a donc pu graver une app d'avant-veille
+                   # sans un signe. Il vaut pour les deux.
+                   verifier_app_embarquee
                    sync_files
                    clean_cache
                    compile_sketch
