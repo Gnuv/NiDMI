@@ -883,6 +883,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
 
     server.on("/api/audio/resume", HTTP_POST, [](AsyncWebServerRequest *request){
         AudioEngine::ouvrirSon();
+        g_midiRouter.fixerTransport(true);   // l'horloge des scripts repart
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 
@@ -892,6 +893,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         // ci-dessous ne le taisent pas — la porte, si. Elle rouvre a la note
         // suivante (jeu live apres un STOP).
         AudioEngine::couperSon();
+        g_midiRouter.fixerTransport(false);  // et l'horloge des scripts s'arrete
         for (int n = 0; n < 128; n++) AudioEngine::noteOff((uint8_t)n);
         AudioEngine::testTone(0.0f, 0);
         request->send(200, "application/json", "{\"status\":\"ok\"}");

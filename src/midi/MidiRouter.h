@@ -80,6 +80,25 @@ public:
     void    fixerMaillonsPermanents(uint8_t n);
     uint8_t nMaillonsPermanents() const { return _nPermanents; }
 
+    /* ── LE TRANSPORT GOUVERNE L'HORLOGE DES SCRIPTS ───────────────────────
+     *
+     * Un script map continuait de tourner APRES un STOP : son metro() battait,
+     * ses pipelines emettaient, et rien ne le liait au transport. « Le script
+     * de la cue continue a recevoir quand je mets stop. »
+     *
+     * Ce qui s'arrete, c'est l'HORLOGE — metro(), loadbang(), tout ce qui tire
+     * sans qu'un evenement arrive. Le MIDI ENTRANT continue d'etre traite :
+     * c'est du jeu live, et la porte de silence de l'audio se rouvre elle aussi
+     * a la note suivante apres un STOP (AudioEngine). Arreter le traitement des
+     * notes rendrait le clavier muet a l'arret, ce que personne ne demande.
+     *
+     * Pose par le transport de l'app (/api/audio/resume et /api/audio/stop) ET
+     * par le sequenceur embarque (Cues::demarrer / Cues::arreter) : les deux
+     * chemins mènent au même drapeau, sinon une carte headless aurait sa propre
+     * idee du transport. */
+    void fixerTransport(bool enLecture) { _enLecture = enLecture; }
+    bool enLecture() const { return _enLecture; }
+
     MidiRouter();
     ~MidiRouter() override;
 
@@ -210,6 +229,7 @@ private:
     /* Alloues un par un, jamais deplaces : voir PLAFOND_SCRIPTS_MAP. */
     std::vector<Emplacement*> emplacements;
     uint8_t _nPermanents = 0;     // les maillons de la zone MAIN, en tete
+    bool    _enLecture   = false; // transport : l'horloge des scripts ne bat que sous PLAY
     /* Rend l'emplacement `e`, en allouant ce qui manque jusqu'a lui. nullptr si
      * l'index depasse le plafond ou si la memoire a manque — dans les deux cas
      * la carte le DIT sur le port serie plutot que d'ecrire dans le vide. */

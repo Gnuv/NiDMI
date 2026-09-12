@@ -304,6 +304,10 @@ void MidiRouter::setParamsScript(const String& params) {
 }
 
 void MidiRouter::battreHorloge(uint32_t maintenant) {
+    /* ARRET = L'HORLOGE S'ARRETE. Sans cette garde, un metro() continuait de
+     * battre apres un STOP et le script de la cue emettait tout seul. Le MIDI
+     * entrant, lui, reste traite plus bas : c'est du jeu live. */
+    if (!_enLecture) return;
     for (uint8_t e = 0; e < emplacements.size(); e++) {
         Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;

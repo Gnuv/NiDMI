@@ -1012,7 +1012,16 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
             g_impression(e.origine, etiquette.c_str(), courant,
-                         MappingEngine::MontreNombre, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
+                         MappingEngine::MontreNombre, ctx ? ctx->pipe : 0,
+                         /* +1 : ICI `seg` compte a partir du premier segment
+                          * APRES la source ; le moteur de reference, lui,
+                          * indexe le tableau ENTIER — sa source est segs[0] et
+                          * son premier segment aval est 1. Un identifiant qui
+                          * ne designe pas la meme chose des deux cotes ne
+                          * designe rien : l'editeur cherchait « 0:0 » quand sa
+                          * boite s'appelait « 0:1 », et num() paraissait muet
+                          * alors que la trame arrivait. */
+                         ctx ? (uint8_t)(ctx->seg + 1) : 1);
         return true;
     }
     if (verbe(seg, "bang", a) || verbe(seg, "b", a)) return true;

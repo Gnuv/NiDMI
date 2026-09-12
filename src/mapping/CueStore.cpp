@@ -280,12 +280,17 @@ void demarrer() {
   if (!aller(_index)) { Serial.println("[cues] aucune cue a jouer"); return; }
   _lecture = true;
   AudioEngine::ouvrirSon();     // PLAY ouvre la porte : c'est le transport qui decide
+  /* ET L'HORLOGE DES SCRIPTS. Le sequenceur embarque et le transport de l'app
+   * menent au meme drapeau : une carte headless ne doit pas avoir sa propre
+   * idee de « en lecture ». */
+  g_midiRouter.fixerTransport(true);
   Serial.println("[cues] lecture");
 }
 
 void arreter() {
   _lecture = false;
   AudioEngine::couperSon();
+  g_midiRouter.fixerTransport(false);   // idem : l'horloge des scripts s'arrete
   Serial.println("[cues] arret");
 }
 
