@@ -389,6 +389,50 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
             + ",\"permanents\":" + String((unsigned)g_midiRouter.nMaillonsPermanents()) + "}");
     });
 
+    /* ── CE QUE LA CARTE EXECUTE VRAIMENT ─────────────────────────────────
+     * Le CONTENU d'un maillon, et celui d'un fichier de mapfs. Il n'y avait
+     * aucun moyen de les lire : on poussait un script, on observait un
+     * comportement, et quand les deux ne s'accordaient pas il ne restait qu'a
+     * deviner lequel des deux mentait.
+     *
+     * Constate a l'usage : un script de 43 caracteres, un fichier de 61 octets
+     * sur la carte, et rien pour dire ce qu'il y avait dedans. Trois allers et
+     * retours pour ne pas trancher.
+     *
+     * « La page montre l'etat REEL de la carte » — la regle vaut aussi pour les
+     * scripts. En texte brut : c'est du code, on veut le LIRE. */
+    server.on("/api/midi/script", HTTP_GET, [](AsyncWebServerRequest *request){
+        const uint8_t emp = request->hasParam("slot")
+                          ? (uint8_t)request->getParam("slot")->value().toInt() : 0;
+        if (emp >= g_midiRouter.nEmplacements()) {
+            request->send(404, "text/plain; charset=utf-8",
+                          "maillon inexistant (la chaine en tient "
+                          + String((unsigned)g_midiRouter.nEmplacements()) + ")");
+            return;
+        }
+        request->send(200, "text/plain; charset=utf-8", g_midiRouter.contenuEmplacement(emp));
+    });
+
+    /* Le contenu d'un FICHIER de mapfs. Pendant du precedent : l'un dit ce qui
+     * TOURNE, l'autre ce qui est RANGE — et c'est en les comparant qu'on voit
+     * qu'une cue n'a pas charge ce qu'on croyait. */
+    /* ⚠ PAS « /api/midi/scripts/lire » : le serveur fait correspondre par
+     * PREFIXE, si bien que la route etait avalee par le GET de la liste — elle
+     * rendait le JSON de l'inventaire au lieu du fichier, sans erreur. Un nom
+     * qui ne prefixe rien. */
+    server.on("/api/midi/fichier", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("name")) {
+            request->send(400, "text/plain; charset=utf-8", "parametre name requis");
+            return;
+        }
+        String contenu;
+        if (!ScriptStore::lire(request->getParam("name")->value().c_str(), contenu)) {
+            request->send(404, "text/plain; charset=utf-8", "introuvable dans mapfs");
+            return;
+        }
+        request->send(200, "text/plain; charset=utf-8", contenu);
+    });
+
     /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */
     server.on("/api/midi/scripts", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!request->hasParam("name", true)) {

@@ -162,6 +162,12 @@ public:
     // ecriture flash, donc un craquement audio (MESURES.md §13).
     bool chargerScriptNomme(const char* nom, bool persister = false, uint8_t emplacement = 0);
     const String& nomScript() const { return nomEmplacement(0); }
+    /* Le CONTENU d'un maillon — ce que la carte execute a cet instant. Publie
+     * par /api/midi/script?slot=N : sans lui, on ne pouvait que deviner. */
+    const String& contenuEmplacement(uint8_t e) const {
+        static const String vide;
+        return (e < emplacements.size()) ? emplacements[e]->contenu : vide;
+    }
     /* Le nom porte par un emplacement donne — chaine vide s'il est libre OU
      * s'il n'existe pas encore : pour un lecteur, les deux se valent. */
     const String& nomEmplacement(uint8_t e) const {
