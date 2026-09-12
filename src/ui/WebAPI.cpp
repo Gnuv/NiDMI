@@ -402,7 +402,15 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
            le dernier gros bloc contigu et AsyncTCP n'a plus de tampons). Y
            arriver déclare donc la config du boot saine. Ne fait que poser un
            drapeau — l'écriture NVS a lieu dans nidmi_loop(). */
-        _sertArchiveApp(request, "/nidmi.html", /*validerAuBout=*/true);
+        /* L'app en UN document ou en cinquante fichiers : l'archive tranche, pas
+         * une constante. Quand elle porte mono.html, c'est lui la page — sinon
+         * nidmi.html. Le firmware n'a pas a savoir comment elle a ete
+         * construite, et le jour ou l'un remplace l'autre rien ne casse ici. */
+        bool aMono = false;
+        for (size_t i = 0; i < APP_FILES_COUNT; i++)
+            if (strcmp(APP_FILES[i].chemin, "/mono.html") == 0) { aMono = true; break; }
+        _sertArchiveApp(request, aMono ? "/mono.html" : "/nidmi.html",
+                        /*validerAuBout=*/true);
     });
 
     /* Tout chemin de l'app qui n'a pas sa route explicite passe par le
