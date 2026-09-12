@@ -4,6 +4,8 @@
 #include <Preferences.h>
 #include "CcMap.h"
 #include <Arduino.h>
+#include <esp_heap_caps.h>   // le plus gros bloc contigu : la vraie limite de la chaine
+#include <new>               // std::nothrow : une allocation refusee se dit, elle ne jette pas
 
 // Dépendances vers le serveur core
 #include "../server/ServerCore.h"
@@ -245,8 +247,8 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
  * c'est ce qui rend un filtre exprimable.
  */
 bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
-        Emplacement& em = emplacements[e];
+    for (uint8_t e = 0; e < emplacements.size(); e++) {
+        Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         MappingEngine::SortieCc sortie;
         MappingEngine::executeMidiCc(em.contenu.c_str(), n, v, c, sortie,
@@ -298,8 +300,8 @@ void MidiRouter::setParamsScript(const String& params) {
 }
 
 void MidiRouter::battreHorloge(uint32_t maintenant) {
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
-        Emplacement& em = emplacements[e];
+    for (uint8_t e = 0; e < emplacements.size(); e++) {
+        Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
          * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
@@ -321,8 +323,8 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
 }
 
 void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
-        Emplacement& em = emplacements[e];
+    for (uint8_t e = 0; e < emplacements.size(); e++) {
+        Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         MappingEngine::battreOsc(em.contenu.c_str(), adresse, valeur, this,
@@ -348,8 +350,9 @@ static String fichierEmplacement(uint8_t e) {
 }
 
 void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
-    if (emplacement >= MAX_SCRIPTS_MAP) return;
-    Emplacement& em = emplacements[emplacement];
+    Emplacement* pem = _assurerEmplacement(emplacement);
+    if (!pem) return;                 // plafond ou memoire : deja dit sur le port serie
+    Emplacement& em = *pem;
     const bool memeCode = (em.contenu == script);
 
     /* ⚠ LES REPRISES DE L'ANCIEN TEXTE, D'ABORD.
@@ -422,8 +425,8 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
 void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
     uint8_t n = note, v = velocity, c = channel;
 
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
-        Emplacement& em = emplacements[e];
+    for (uint8_t e = 0; e < emplacements.size(); e++) {
+        Emplacement& em = *emplacements[e];
         if (!em.contenu.length()) continue;
         MappingEngine::SortieNote sortie;
         if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c,
@@ -452,13 +455,81 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
 
 
 
+/* ── LA CHAINE SE DIMENSIONNE ──────────────────────────────────────────────
+ *
+ * Un emplacement coute son objet (deux String et 12 etats de pipeline, soit
+ * ~540 o) plus le texte de son script. Rien de tout cela n'est pris tant qu'il
+ * n'existe pas : une composition sans piste map ne paie aucun emplacement, la
+ * ou les quatre tableaux fixes prenaient 2,1 ko de .bss en permanence.
+ *
+ * LA VRAIE LIMITE EST LA MEMOIRE, pas un nombre. On refuse d'allouer si le plus
+ * gros bloc contigu interne tomberait sous un plancher — 12 ko, seuil sous
+ * lequel la pile reseau cesse de servir (MESURES, pieges de mesure). Refuser a
+ * la CONFIGURATION est un message ; manquer de memoire pendant une performance
+ * est une panne. */
+namespace { constexpr size_t PLANCHER_BLOC_CONTIGU = 12288; }
+
+MidiRouter::Emplacement* MidiRouter::_assurerEmplacement(uint8_t e) {
+    if (e >= PLAFOND_SCRIPTS_MAP) {
+        Serial.printf("[MidiRouter] emplacement %u refuse : le plafond d'index est %u\n",
+                      (unsigned)e, (unsigned)PLAFOND_SCRIPTS_MAP);
+        return nullptr;
+    }
+    while (emplacements.size() <= e) {
+        const size_t bloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        if (bloc < PLANCHER_BLOC_CONTIGU + sizeof(Emplacement)) {
+            Serial.printf("[MidiRouter] emplacement %u refuse : plus gros bloc %u o, "
+                          "plancher %u\n", (unsigned)emplacements.size(),
+                          (unsigned)bloc, (unsigned)PLANCHER_BLOC_CONTIGU);
+            return nullptr;
+        }
+        Emplacement* em = new (std::nothrow) Emplacement();
+        if (!em) {
+            Serial.printf("[MidiRouter] emplacement %u refuse : allocation impossible\n",
+                          (unsigned)emplacements.size());
+            return nullptr;
+        }
+        emplacements.push_back(em);
+    }
+    return emplacements[e];
+}
+
+void MidiRouter::_reduireChaine(uint8_t n) {
+    while (emplacements.size() > n) {
+        Emplacement* em = emplacements.back();
+        /* Les reprises retiennent un pointeur sur le texte : les purger AVANT
+         * de liberer, sinon la file rejouerait sur de la memoire rendue (§101). */
+        MappingEngine::viderDifferes(em->contenu.c_str());
+        delete em;
+        emplacements.pop_back();
+    }
+}
+
+/* La longueur voulue par la COMPOSITION. Rend ce qu'on a vraiment obtenu : si
+ * la memoire a manque, c'est la carte qui le dit, pas l'app qui le suppose. */
+uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
+    if (n > PLAFOND_SCRIPTS_MAP) n = PLAFOND_SCRIPTS_MAP;
+    if (n < emplacements.size()) _reduireChaine(n);
+    else if (n > 0)              _assurerEmplacement((uint8_t)(n - 1));
+    const uint8_t obtenu = (uint8_t)emplacements.size();
+    /* La longueur va en NVS avec les noms : sans elle, une carte redemarree
+     * retrouverait ses scripts mais pas sa chaine, et les emplacements au-dela
+     * du premier seraient muets sans rien dire. */
+    Preferences p;
+    if (p.begin(NVS_ESPACE_MIDI, false)) { p.putUChar("nmap", obtenu); p.end(); }
+    Serial.printf("[MidiRouter] chaine dimensionnee a %u emplacement(s)%s\n",
+                  (unsigned)obtenu, (obtenu < n) ? " — memoire insuffisante" : "");
+    return obtenu;
+}
+
 /* La cle NVS d'un emplacement : « script » pour le premier — le nom historique,
  * qu'on garde pour ne pas perdre la configuration des cartes existantes — puis
  * « script1 », « script2 »... */
 
 bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emplacement) {
-    if (emplacement >= MAX_SCRIPTS_MAP) return false;
-    Emplacement& em = emplacements[emplacement];
+    Emplacement* pem = _assurerEmplacement(emplacement);
+    if (!pem) return false;
+    Emplacement& em = *pem;
     const String cle = cleNvsEmplacement(emplacement);
 
     if (!nom || !*nom) {                       // "" = plus de script du tout
@@ -496,11 +567,18 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
 void MidiRouter::restaurerScript() {
     Preferences p;
     if (!p.begin(NVS_ESPACE_MIDI, true)) return;
-    String noms[MAX_SCRIPTS_MAP];
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++)
+    /* LA LONGUEUR DE LA CHAINE d'abord : c'est elle qui dit combien de noms
+     * lire. Sans elle on scannerait le plafond entier — 64 lectures NVS a
+     * chaque demarrage pour retrouver, le plus souvent, zero script. */
+    const uint8_t nmap = p.getUChar("nmap", 0);
+    std::vector<String> noms(nmap);
+    for (uint8_t e = 0; e < nmap; e++)
         noms[e] = p.getString(cleNvsEmplacement(e).c_str(), "");
     p.end();
-    for (uint8_t e = 0; e < MAX_SCRIPTS_MAP; e++) {
+    if (nmap) _assurerEmplacement((uint8_t)(nmap - 1));
+    Serial.printf("[MidiRouter] chaine restauree : %u emplacement(s)\n",
+                  (unsigned)emplacements.size());
+    for (uint8_t e = 0; e < nmap; e++) {
         if (!noms[e].length()) continue;
         if (!chargerScriptNomme(noms[e].c_str(), false, e)) {
             // Le fichier a disparu (mapfs efface, script supprime). On ne bloque

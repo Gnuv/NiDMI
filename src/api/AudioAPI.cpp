@@ -339,14 +339,43 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
          * les clients existants. `emplacements` dit ce que TOUS portent, ce
          * qu'un seul nom ne pouvait pas exprimer. */
         String emps = "[";
-        for (uint8_t e = 0; e < MidiRouter::MAX_SCRIPTS_MAP; e++) {
+        for (uint8_t e = 0; e < g_midiRouter.nEmplacements(); e++) {
             if (e) emps += ",";
             emps += "\"" + g_midiRouter.nomEmplacement(e) + "\"";
         }
         emps += "]";
+        /* `n` et `plafond` : l'app n'a plus a savoir combien la carte tient, et
+         * surtout elle n'a plus a l'ECRIRE EN DUR — c'etait un 4 recopie des
+         * deux cotes, donc deux nombres a maintenir d'accord. */
         request->send(200, "application/json",
                       "{\"actif\":\"" + g_midiRouter.nomScript() + "\",\"emplacements\":" + emps
+                      + ",\"n\":" + String((unsigned)g_midiRouter.nEmplacements())
+                      + ",\"plafond\":" + String((unsigned)MidiRouter::PLAFOND_SCRIPTS_MAP)
                       + ",\"fichiers\":" + ScriptStore::listerJson() + "}");
+    });
+
+    /* LA LONGUEUR DE LA CHAINE, dictee par la COMPOSITION.
+     * L'app compte ses pistes map et le dit ; la carte alloue ce qu'elle peut et
+     * REND ce qu'elle a obtenu. Si la memoire a manque, c'est elle qui le dit —
+     * l'app n'a pas a le deviner, ni a porter une copie de la limite. */
+    server.on("/api/midi/chaine/taille", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("n", true)) {
+            request->send(400, "application/json",
+                          "{\"status\":\"error\",\"message\":\"parametre n requis\"}");
+            return;
+        }
+        const int voulu = request->getParam("n", true)->value().toInt();
+        if (voulu < 0 || voulu > MidiRouter::PLAFOND_SCRIPTS_MAP) {
+            request->send(400, "application/json",
+                String("{\"status\":\"error\",\"message\":\"n hors bornes (0..")
+                + String((unsigned)MidiRouter::PLAFOND_SCRIPTS_MAP) + ")\"}");
+            return;
+        }
+        const uint8_t obtenu = g_midiRouter.dimensionnerChaine((uint8_t)voulu);
+        request->send(obtenu == voulu ? 200 : 507, "application/json",
+            String("{\"status\":\"") + (obtenu == voulu ? "ok" : "partiel")
+            + "\",\"demande\":" + String(voulu)
+            + ",\"obtenu\":" + String((unsigned)obtenu) + "}");
     });
 
     /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */

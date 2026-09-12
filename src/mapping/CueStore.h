@@ -6,9 +6,12 @@
 // a de l'audio — un moteur et ses reglages.
 //
 // FORMAT (une cue par ligne, mapfs:/cues.txt) :
-//     nom | duree_s | script.nms | engine | params_audio | params_script
+//     nom | duree_s | scripts | engine | params_audio | params_script | env
 //   duree 0        = attendre un GO (cue infinie)
-//   script vide    = passage direct du MIDI
+//   scripts        = les .nms de la CHAINE, separes par des virgules : la
+//                    position dit le maillon (« a.nms,,b.nms » met a.nms au
+//                    premier, libere le deuxieme, met b.nms au troisieme).
+//                    Vide = passage direct du MIDI, chaine entierement liberee.
 //   engine -1      = pas d'audio  (une carte sans audio n'ecrit que ca)
 //   params         = "harmonics=0.2;timbre=0.5", facultatif
 //   env            = "harmonics:0.1,0.2,...;volume:1.0,0.9,...", facultatif
@@ -41,7 +44,10 @@ namespace Cues {
 struct Cue {
   String  nom;
   float   duree   = 0.0f;    // secondes ; 0 = infinie (attend un GO)
-  String  script;            // nom de fichier .nms ("" = aucun)
+  /* Les noms de fichiers .nms de la chaine, separes par des VIRGULES — la
+   * position dit le maillon, une position vide le libere. "" = aucun script.
+   * Une seule valeur reste donc valide : elle occupe le premier maillon. */
+  String  script;
   int     engine  = -1;      // -1 = pas d'audio
   String  params;            // "cle=valeur;cle=valeur"
   String  paramsScript;      // reglages du .nms, meme format ("semitones=12")

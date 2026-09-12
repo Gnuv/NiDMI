@@ -126,9 +126,33 @@ void _appliquer(const Cue& c) {
    * precedente continuerait de tirer les parametres, exactement le comportement
    * fantome corrige ailleurs (§89.1). */
   _analyserCourbes(c.env);
-  // 1. Le script .nms d'abord : il transforme le MIDI, donc il doit etre en
-  //    place avant que la moindre note n'arrive.
-  g_midiRouter.chargerScriptNomme(c.script.c_str(), false);
+  /* 1. LES SCRIPTS .nms d'abord : ils transforment le MIDI, donc ils doivent
+   *    etre en place avant que la moindre note n'arrive.
+   *
+   *    UNE CUE EN PORTE PLUSIEURS, un par maillon de la chaine, separes par des
+   *    virgules — la position DIT le maillon, et une position vide le libere.
+   *    Elle n'en portait qu'UN, charge dans l'emplacement 0 par le defaut de
+   *    `chargerScriptNomme` : une composition a plusieurs pistes map jouait donc
+   *    dans le navigateur et pas sur la carte, et la cue ecrasait au passage le
+   *    premier maillon de la chaine — celui qui est cense tourner tout le temps.
+   *
+   *    Les maillons qu'aucun script n'occupe sont VIDES, pas laisses tels
+   *    quels : sinon le script de la cue precedente continuerait de transformer
+   *    les evenements, exactement le comportement fantome corrige ailleurs. */
+  {
+    const uint8_t n = g_midiRouter.nEmplacements();
+    int debut = 0;
+    for (uint8_t e = 0; e < n; e++) {
+      String nom;
+      if (debut >= 0 && debut <= (int)c.script.length()) {
+        const int virgule = c.script.indexOf(',', debut);
+        nom   = (virgule < 0) ? c.script.substring(debut) : c.script.substring(debut, virgule);
+        debut = (virgule < 0) ? -1 : virgule + 1;
+      }
+      nom.trim();
+      g_midiRouter.chargerScriptNomme(nom.c_str(), false, e);
+    }
+  }
   if (c.paramsScript.length()) g_midiRouter.setParamsScript(c.paramsScript);
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et

@@ -2,13 +2,47 @@
 #pragma once
 
 #include <Arduino.h>
+#include <vector>
 #include "MidiSender.h"
 #include "../mapping/MappingEngine.h"   // Etat par pipeline de chaque emplacement
 
 class MidiRouter : public MidiSender {
 public:
-    /* Emplacements de scripts map montes en CHAINE (voir plus bas). */
-    static constexpr uint8_t MAX_SCRIPTS_MAP = 4;
+    /* LA CHAINE N'A PLUS DE LONGUEUR ECRITE EN DUR.
+     *
+     * C'etait `MAX_SCRIPTS_MAP = 4` : un nombre choisi au §60 parce qu'il en
+     * fallait « plus qu'un ». Il ne mesurait rien — ni une ressource (4
+     * emplacements coutent 2,1 ko de .bss sur une carte qui en a 320) ni un
+     * besoin. Et il etait FAUX par construction : la bonne longueur de chaine,
+     * c'est le nombre de PISTES MAP de la composition, une decision de l'auteur.
+     * Une composition a cinq pistes map en perdait une, avec un avertissement
+     * pour seule trace.
+     *
+     * Les emplacements sont donc alloues A LA DEMANDE, un par un. C'est la
+     * regle du projet (MESURES §100 puis §101) : dynamique A LA CONFIGURATION,
+     * fixe pendant la performance — allouer quand l'app pousse un script est le
+     * moment ou la carte peut encore refuser proprement ; allouer pendant le
+     * spectacle fragmenterait les ~27 ko contigus dont depend AsyncTCP.
+     *
+     * PLAFOND n'est pas une longueur : c'est une borne d'INDEX, pour qu'une
+     * requete malformee ne demande pas 60 000 emplacements. La vraie limite est
+     * la MEMOIRE, verifiee a chaque allocation (voir _assurerEmplacement).
+     *
+     * Un VECTEUR DE POINTEURS, pas un vecteur d'objets : `Etat etats[]` est
+     * pointe par la file des reprises (MappingEngine), et un vecteur qui
+     * reallouerait les DEPLACERAIT — exactement la lecture apres liberation
+     * corrigee au §101. Chaque emplacement est alloue separement et ne bouge
+     * plus jamais. */
+    static constexpr uint8_t PLAFOND_SCRIPTS_MAP = 64;
+
+    /* Combien la chaine en porte EN CE MOMENT. Publie par /api/midi/scripts :
+     * l'app n'a plus a savoir combien la carte en tient, elle le lui demande. */
+    uint8_t nEmplacements() const { return (uint8_t)emplacements.size(); }
+
+    /* Dimensionne la chaine. `n` vient des pistes map de la composition.
+     * Rend le nombre REELLEMENT obtenu — qui peut etre inferieur si la memoire
+     * a manque, et c'est alors la carte qui le dit, pas l'app qui le devine. */
+    uint8_t dimensionnerChaine(uint8_t n);
 
     MidiRouter();
     ~MidiRouter() override;
@@ -72,16 +106,20 @@ public:
     // contenu vit dans LittleFS, et l'y ecrire a chaque cue ferait payer une
     // ecriture flash, donc un craquement audio (MESURES.md §13).
     bool chargerScriptNomme(const char* nom, bool persister = false, uint8_t emplacement = 0);
-    const String& nomScript() const { return emplacements[0].nom; }
-    /* Le nom porte par un emplacement donne — chaine vide s'il est libre. */
+    const String& nomScript() const { return nomEmplacement(0); }
+    /* Le nom porte par un emplacement donne — chaine vide s'il est libre OU
+     * s'il n'existe pas encore : pour un lecteur, les deux se valent. */
     const String& nomEmplacement(uint8_t e) const {
         static const String vide;
-        return (e < MAX_SCRIPTS_MAP) ? emplacements[e].nom : vide;
+        return (e < emplacements.size()) ? emplacements[e]->nom : vide;
     }
 
     // Au boot : recharge le script memorise. Appele une fois depuis nidmi_setup.
     void restaurerScript();
-    const String& scriptMidi() const { return emplacements[0].contenu; }
+    const String& scriptMidi() const {
+        static const String vide;
+        return emplacements.empty() ? vide : emplacements[0]->contenu;
+    }
 
     // Point d'entree UNIQUE de toute note ENTRANTE (USB, clavier de l'app par
     // WebSocket, RTP...) : applique le script s'il y en a un, puis joue.
@@ -133,7 +171,15 @@ private:
         bool   initEnAttente = true;   // un loadbang() est du
         MappingEngine::Etat etats[MappingEngine::MAX_PIPELINES_SCRIPT];
     };
-    Emplacement emplacements[MAX_SCRIPTS_MAP];
+    /* Alloues un par un, jamais deplaces : voir PLAFOND_SCRIPTS_MAP. */
+    std::vector<Emplacement*> emplacements;
+    /* Rend l'emplacement `e`, en allouant ce qui manque jusqu'a lui. nullptr si
+     * l'index depasse le plafond ou si la memoire a manque — dans les deux cas
+     * la carte le DIT sur le port serie plutot que d'ecrire dans le vide. */
+    Emplacement* _assurerEmplacement(uint8_t e);
+    /* Libere les emplacements au-dela de `n`, apres avoir purge leurs reprises :
+     * une reprise retient un pointeur sur le texte du script (§101). */
+    void _reduireChaine(uint8_t n);
     bool rtpEnabled;
     bool oscEnabled;
     bool bluetoothEnabled;
