@@ -656,7 +656,14 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
               + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
         json += ",\"libre\":"     + String((unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
         json += ",\"min_jamais\":" + String((unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
-        json += ",\"plancher\":"  + String((unsigned)MidiRouter::PLANCHER_BLOC_CONTIGU) + "},";
+        json += ",\"plancher\":"  + String((unsigned)MidiRouter::PLANCHER_BLOC_CONTIGU);
+        /* DEPUIS COMBIEN DE TEMPS LA CARTE TOURNE. Le tas n'est PAS stabilise
+         * au demarrage : mesure le 2026-09-12, +1 s apres un redemarrage la
+         * carte annonce 13 812 o de bloc contigu, +3 s 26 612. Lire le panneau
+         * a ce moment-la fait croire au plancher alors que WiFi et lwIP
+         * finissent de s'installer — faux positif constate, et alarmant pour
+         * rien. L'app a besoin de savoir que la mesure est encore tiede. */
+        json += ",\"uptime_ms\":" + String((unsigned long)millis()) + "},";
 
         nvs_stats_t st = {};
         if (nvs_get_stats(nullptr, &st) == ESP_OK) {
