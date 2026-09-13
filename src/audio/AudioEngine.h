@@ -186,6 +186,16 @@ bool setSampler(const char* nom, String& raison, bool persister = false);
 // effaçait le choix mémorisé (constaté au test de redémarrage).
 void arreterSampler(bool persister = false);
 bool samplerActif();
+/* `trig-wav` : demarre a l'ARRIVEE SUR UNE CUE, a la hauteur du fichier, et
+ * boucle si la cue le demande. Ni clavier ni transposition — c'est son
+ * comportement d'origine cote navigateur (un BufferSource avec `loop`). */
+void declencherEchantillon(bool boucle, float gain = 1.0f);
+void arreterEchantillon();
+/* QUI DECLENCHE. `true` (defaut) : la cue, a la hauteur du fichier — l'original.
+ * `false` : le clavier, transpose par la note. Les deux marchent ; c'est le bloc
+ * qui tranche, par son parametre `oncue`. */
+void fixerDeclenchementSurCue(bool surCue);
+bool declenchementSurCue();
 const char* samplerNom();
 void setParams(const Params& p);
 Params params();

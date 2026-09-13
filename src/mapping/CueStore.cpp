@@ -185,6 +185,9 @@ void _appliquer(const Cue& c) {
    * par l'utilisateur, « j'entends un sinus quand je joue trig wav ». */
   if (c.engine == -2) {
     String nom;
+    bool boucle = false;
+    bool surCue = true;      // defaut : le comportement d'origine de trig-wav
+    float gain = 1.0f;
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -193,25 +196,50 @@ void _appliquer(const Cue& c) {
       const int eq = kv.indexOf('=');
       if (eq > 0) {
         String cle = kv.substring(0, eq); cle.trim();
-        if (cle == "sample") { nom = kv.substring(eq + 1); nom.trim(); }
-        else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
+        if      (cle == "sample") { nom = kv.substring(eq + 1); nom.trim(); }
+        else if (cle == "loop")   boucle = (kv.substring(eq + 1).toFloat() >= 0.5f);
+        else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
+        else if (cle == "volume") { gain = kv.substring(eq + 1).toFloat();
+                                    AudioEngine::setVolume(gain); }
       }
       debut = fin + 1;
     }
     if (nom.length()) {
       /* On ne RECHARGE pas ce qui est deja la : charger copie tout le PCM en
        * PSRAM, et une cue qui rappelle le meme echantillon n'a aucune raison de
-       * payer ca — ni de couper le son en cours pour le remettre a zero. */
-      if (nom != String(AudioEngine::samplerNom())) {
+       * payer ca. En revanche on le REDECLENCHE — arriver sur une cue joue son
+       * son, c'est toute la definition de trig-wav. */
+      bool pret = (nom == String(AudioEngine::samplerNom()));
+      if (!pret) {
         String raison;
-        if (!AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/false))
+        pret = AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/false);
+        if (!pret)
           Serial.printf("[cues] echantillon %s refuse : %s\n", nom.c_str(), raison.c_str());
       }
+      /* LE DECLENCHEMENT EST ICI, a l'activation de la cue — pas au clavier.
+       * C'est le comportement d'origine : un BufferSource demarre quand la case
+       * devient active, qui boucle si on le lui demande et s'arrete en partant. */
+      AudioEngine::fixerDeclenchementSurCue(surCue);
+      /* ON NE DECLENCHE QU'EN MODE « SUR CUE ». En mode clavier, arriver sur la
+       * cue CHARGE le son et attend la premiere touche — sinon le bloc partirait
+       * tout seul avant qu'on ait joue quoi que ce soit. */
+      if (pret && surCue) AudioEngine::declencherEchantillon(boucle);
+      else if (pret) AudioEngine::arreterEchantillon();
+    } else {
+      /* Une cue qui ne nomme aucun echantillon n'en laisse pas tourner un :
+       * sinon la boucle de la cue precedente survivrait a la cue qui l'a
+       * lancee — exactement le comportement fantome corrige ailleurs. */
+      AudioEngine::arreterEchantillon();
     }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
   }
+
+  /* Et une cue qui ne parle plus d'echantillon du tout (engine != -2) arrete
+   * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
+   * BufferSource cote navigateur. */
+  if (c.engine != -2) AudioEngine::arreterEchantillon();
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.

@@ -154,6 +154,21 @@ volatile bool  sampleActif = false;
 double         samplePos   = 0.0;
 double         samplePas   = 1.0;
 float          sampleGain  = 0.0f;
+/* BOUCLE. `trig-wav` se declenche a l'ARRIVEE SUR UNE CUE et, si on le lui
+ * demande, tourne tant que la cue dure. C'est son comportement d'origine dans le
+ * navigateur : un BufferSource avec `loop`, demarre a l'activation de la case —
+ * ni clavier ni transposition. */
+volatile bool  sampleBoucle = false;
+/* DEUX FACONS DE DECLENCHER, et c'est le bloc qui choisit.
+ *   surCue = true  — comportement d'ORIGINE de trig-wav : le son part a
+ *                    l'arrivee sur la cue, a la hauteur du fichier, et le
+ *                    clavier ne le touche pas.
+ *   surCue = false — le clavier le declenche, transpose par la note (do central
+ *                    = hauteur d'origine). C'est ce que la carte faisait, et ca
+ *                    marche : on le garde plutot que de le jeter.
+ * Le defaut est `true` : c'est le comportement du moteur tel qu'il existe cote
+ * navigateur, et c'est ce qu'on porte. */
+volatile bool  sampleSurCue = true;
 
 void rendreSample() {
   const int16_t* pcm = SampleStore::donnees();
@@ -161,6 +176,11 @@ void rendreSample() {
   const bool     st  = SampleStore::stereo();
   for (size_t i = 0; i < FRAMES; i++) {
     int16_t g = 0, d = 0;
+    /* Fin atteinte : on reboucle, ou on s'arrete. Le test est ici plutot qu'en
+     * fin de boucle pour que le reenroulement se fasse AVANT la lecture — sinon
+     * le dernier echantillon serait joue deux fois a chaque tour. */
+    if (sampleActif && sampleBoucle && pcm && n > 1 && samplePos >= double(n - 1))
+      samplePos -= double(n - 1);
     if (sampleActif && pcm && samplePos < double(n - 1)) {
       const size_t k = (size_t)samplePos;
       const float  f = float(samplePos - double(k));
@@ -203,14 +223,20 @@ void appliquer(const Evenement& e) {
   // Sans play, le clavier ne doit rien produire — regle demandee explicitement.
   // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
   if (SampleStore::estCharge() && moteurCourant == -2) {
+    /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
+     * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
+     * tomberait sur le sinus plus bas, et on entendrait un bip a chaque touche
+     * sur une carte dont le moteur est le lecteur. */
+    if (sampleSurCue) return;
     if (e.velo == 0) return;                 // l'échantillon va au bout
     // do central (60) = hauteur d'origine ; on compense aussi l'écart entre la
     // fréquence du fichier et celle réellement obtenue par l'I2S.
-    samplePas   = (double(SampleStore::frequence()) / double(srReel))
-                * pow(2.0, (double(e.note) - 60.0) / 12.0);
-    samplePos   = 0.0;
-    sampleGain  = float(e.velo) / 127.0f;
-    sampleActif = true;
+    samplePas    = (double(SampleStore::frequence()) / double(srReel))
+                 * pow(2.0, (double(e.note) - 60.0) / 12.0);
+    samplePos    = 0.0;
+    sampleGain   = float(e.velo) / 127.0f;
+    sampleBoucle = false;   // au clavier, un coup est un coup
+    sampleActif  = true;
     return;
   }
   if (e.velo != 0) derniereNote = e.note;   // temoin : la note REELLEMENT jouee
@@ -700,6 +726,27 @@ void libererPlaits() {
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
+/* DECLENCHER SANS NOTE, a la hauteur du fichier. C'est ce que fait `trig-wav`
+ * a l'arrivee sur une cue : on part de zero, on lit au rythme du fichier (la
+ * seule correction est l'ecart entre sa frequence et celle que l'I2S a
+ * reellement obtenue), et on boucle si la cue le demande. */
+void declencherEchantillon(bool boucle, float gain) {
+  if (!SampleStore::estCharge() || moteurCourant != -2) return;
+  samplePas    = double(SampleStore::frequence()) / double(srReel);
+  samplePos    = 0.0;
+  sampleGain   = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
+  sampleBoucle = boucle;
+  sampleActif  = true;
+}
+
+/* Quitter la cue arrete le son — comme le `dispose()` du BufferSource cote
+ * navigateur. Sans ca, une boucle survivrait a la cue qui l'a lancee. */
+void arreterEchantillon() { sampleActif = false; sampleBoucle = false; }
+
+/* Qui declenche : la cue (defaut, comportement d'origine) ou le clavier. */
+void fixerDeclenchementSurCue(bool surCue) { sampleSurCue = surCue; }
+bool declenchementSurCue() { return sampleSurCue; }
+
 bool setSampler(const char* nom, String& raison, bool persister) {
   if (!ensureStarted()) { raison = "audio indisponible"; return false; }
   libererPlaits();                       // on ne tient jamais les deux à la fois
@@ -712,7 +759,7 @@ bool setSampler(const char* nom, String& raison, bool persister) {
 void arreterSampler(bool persister) {
   const bool etaitCharge = (moteurCourant == -2);
   if (etaitCharge) { moteurCourant = -1; if (persister) memoriser("-1"); }
-  sampleActif = false;
+  sampleActif = false; sampleBoucle = false;
   // Même précaution que libererPlaits(), qui manquait ici : rendreSample() lit
   // le tampon PSRAM à chaque bloc. Le libérer sans attendre, c'est un accès
   // après libération — audio en charpie ou plantage. On laisse huit blocs

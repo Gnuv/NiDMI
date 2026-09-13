@@ -63,6 +63,7 @@ void setupAudioAPI(AsyncWebServer& server) {
          * `false` ici veut dire : les blocs de synthese ne sonneront pas sur
          * elle ; les echantillons, si. */
         json += "\"synthese\":" + String(AudioEngine::syntheseLourdeDisponible() ? "true" : "false") + ",";
+        json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -257,6 +258,29 @@ void setupAudioAPI(AsyncWebServer& server) {
             }
             SampleStore::ecrireMorceau(data, len);
         });
+
+    /* DECLENCHER L'ECHANTILLON MAINTENANT — le chemin VIVANT.
+     * Cote navigateur, `trig-wav` demarre son BufferSource au chargement de la
+     * case ; poser un son dans l'inspecteur doit donc s'entendre tout de suite,
+     * sans attendre un changement de cue. `loop` et `oncue` accompagnent le
+     * declenchement : c'est le meme etat que la cue installerait. */
+    server.on("/api/audio/sampler/jouer", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!AudioEngine::samplerActif()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"aucun echantillon charge\"}");
+            return;
+        }
+        const bool boucle = request->hasParam("loop", true)
+                         && request->getParam("loop", true)->value() != "0";
+        const bool surCue = !request->hasParam("oncue", true)
+                         || request->getParam("oncue", true)->value() != "0";
+        AudioEngine::fixerDeclenchementSurCue(surCue);
+        if (surCue) AudioEngine::declencherEchantillon(boucle);
+        else        AudioEngine::arreterEchantillon();   // le clavier prendra la main
+        request->send(200, "application/json",
+            String("{\"status\":\"ok\",\"loop\":") + (boucle ? "true" : "false")
+            + ",\"oncue\":" + (surCue ? "true" : "false") + "}");
+    });
 
     /* Suppression d'un échantillon. Si c'est celui qui est chargé, on arrête
      * d'abord le lecteur : sinon la PSRAM garderait des données orphelines et la
