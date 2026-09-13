@@ -459,15 +459,25 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
          * Vecu par l'utilisateur — « je n'arrive pas sur la page de secours,
          * mais sur un chargement partiel qui bloque ».
          *
-         * On tranche donc AVANT d'ouvrir le robinet. RESERVE_SERVICE (12 000 o)
-         * est le chiffre que le firmware s'impose deja pour le service web, et
-         * il tombe dans l'intervalle mesure : 14 324 sert, 7 668 ne sert pas
-         * (MESURES §123, §125).
+         * On tranche donc AVANT d'ouvrir le robinet. Reste a savoir OU.
+         *
+         * Premier jet : RESERVE_SERVICE, 12 000 o — le chiffre que le firmware
+         * s'impose pour le service web. TROP PRUDENT, et constate au point
+         * d'etape : avec l'echantillonneur resident (14 324 a froid) et un banc
+         * passe dessus, le bloc descend a 11 252 et « / » rendait la page de
+         * secours sur une carte parfaitement capable de servir l'app. Une garde
+         * qui se declenche sur un etat sain est une panne qu'on fabrique.
+         *
+         * MESURE DIRECTE, en contournant la garde par /mono.html :
+         *     8 692 o  ->  502 359 o servis en 1,0 s, TROIS FOIS de suite  ✅
+         *     7 668 o  ->  3,74 s une fois, jamais l'autre                 ❌
+         * Le seuil est donc pose a 8 192 : dans la bande mesuree, au-dessus du
+         * dernier echec et sous la premiere reussite.
          *
          * Et on ne rend PAS une erreur : on rend la page de secours, celle qui
          * passe. Recharger « / » quand la carte est saturee amene donc la ou il
          * y a un bouton pour s'en sortir, sans avoir a connaitre son adresse. */
-        if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 12000) {
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 8192) {
             _sertSecours(request);
             return;
         }
