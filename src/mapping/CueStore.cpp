@@ -174,6 +174,45 @@ void _appliquer(const Cue& c) {
   }
   if (c.paramsScript.length()) g_midiRouter.setParamsScript(c.paramsScript);
 
+  /* 2 bis. L'ECHANTILLON. `engine = -2` veut dire « lecteur d'echantillons » —
+   * l'equivalent embarque de trig-wav. Le fichier voyage dans les params, sous
+   * `sample=<nom>` : pas de champ nouveau dans la ligne de cue, et le nom est
+   * celui de mapfs (le panier de la carte), pas le chemin du poste.
+   *
+   * C'ETAIT LE MAILLON MANQUANT. Le lecteur existait et marchait ; rien ne lui
+   * disait quoi jouer depuis une composition. Un bloc trig-wav laissait donc la
+   * carte sur son moteur precedent, et une note y sonnait en SINUS — constate
+   * par l'utilisateur, « j'entends un sinus quand je joue trig wav ». */
+  if (c.engine == -2) {
+    String nom;
+    int debut = 0;
+    while (debut < (int)c.params.length()) {
+      int fin = c.params.indexOf(';', debut);
+      if (fin < 0) fin = c.params.length();
+      String kv = c.params.substring(debut, fin);
+      const int eq = kv.indexOf('=');
+      if (eq > 0) {
+        String cle = kv.substring(0, eq); cle.trim();
+        if (cle == "sample") { nom = kv.substring(eq + 1); nom.trim(); }
+        else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
+      }
+      debut = fin + 1;
+    }
+    if (nom.length()) {
+      /* On ne RECHARGE pas ce qui est deja la : charger copie tout le PCM en
+       * PSRAM, et une cue qui rappelle le meme echantillon n'a aucune raison de
+       * payer ca — ni de couper le son en cours pour le remettre a zero. */
+      if (nom != String(AudioEngine::samplerNom())) {
+        String raison;
+        if (!AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/false))
+          Serial.printf("[cues] echantillon %s refuse : %s\n", nom.c_str(), raison.c_str());
+      }
+    }
+    /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
+     * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
+     * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
+  }
+
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.
   if (c.engine >= 0) {
