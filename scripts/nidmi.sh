@@ -247,6 +247,40 @@ if [ -n "$VARIANT" ]; then
     # Le header utilise #ifndef -> ce -D l'emporte sur sa valeur par défaut, sans éditer le fichier.
     USB_MIDI_DEFINE=("-DNIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME=$_usb_midi_flag")
 fi
+# ── IMAGE PLAITS : allégée par DÉFAUT sur le S3 8 Mo ──────────────────────
+#
+# Mesuré (MESURES.md §121) : l'image COMPLÈTE ne charge JAMAIS Plaits sur cette
+# carte. Son seuil d'allocation est POOL_PLAITS + sizeof(Voice) + réserve, soit
+# 16 384 + 8 876 + 12 000 = 37 260 o d'un seul tenant — et le plus gros bloc
+# contigu à froid, rien d'ouvert, est de 27 636. Le seuil n'est donc franchi à
+# AUCUN moment de la vie de la carte, ni à chaud ni au démarrage : le repli
+# silencieux est le sinus interne. Ce n'est pas de la fragmentation, c'est
+# structurel.
+#
+# L'image allégée demande 21 900 et passe. Elle substitue sept moteurs par du
+# virtual-analog (indices 2, 3, 4, 6, 15, 18, 19), et la carte le DÉCLARE dans
+# /api/audio/status (« engines_substitues »), donc l'UI ne promet pas un son
+# qu'elle n'obtiendra pas.
+#
+# LE CHOIX N'EST DONC PAS « 24 MOTEURS CONTRE 17 » : il est ZÉRO CONTRE 17.
+#
+# Ce défaut vaut pour CE 8 Mo. Un N16R8 a peut-être la place de l'image
+# complète ; c'est à remesurer sur la carte, pas à supposer. D'où l'échappatoire
+# explicite, et le fait que le choix soit INSCRIT dans la variante de version —
+# une image qui substitue des moteurs sans le dire est un piège.
+#
+#   NIDMI_PLAITS=complet ./scripts/nidmi.sh build --board s3 …
+case "${NIDMI_PLAITS:-}" in
+    complet|COMPLET|full) _plaits_image="complet" ;;
+    leger|LEGER|light)    _plaits_image="leger" ;;
+    "")  # pas de choix explicite : allégé sur S3, complet ailleurs (le C3 n'a pas d'audio)
+         if [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then _plaits_image="leger"
+         else _plaits_image="complet"; fi ;;
+    *) echo "❌ NIDMI_PLAITS inconnu: '${NIDMI_PLAITS}' (attendu: leger | complet)"; exit 1 ;;
+esac
+PLAITS_DEFINE=()
+[ "$_plaits_image" = "leger" ] && PLAITS_DEFINE=("-DPLAITS_LEGER")
+
 if [ "$_usb_midi_flag" = "1" ]; then
     # USB-MIDI activé : USB-OTG (TinyUSB), le firmware contrôle la pile USB (MIDI USB).
     S3_USB_PROPS=( --build-property "build.usb_mode=0" --build-property "build.cdc_on_boot=0" )
@@ -424,6 +458,9 @@ sync_files() {
     _fw_ver=$(cd "$REPO_DIR" && git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d-%H%M%S)
     _fw_variant=$([ "${_usb_midi_flag:-0}" = "1" ] && echo "usbmidi-on" || echo "usbmidi-off")
     [ "${USB_NET_MODE:-false}" = true ] && _fw_variant="${_fw_variant}+usbnet"
+    # L'IMAGE PLAITS EST DITE. Sept moteurs substitues sans que le numero de
+    # version ne le mentionne, c'est une carte qui ment sur ce qu'elle joue.
+    _fw_variant="${_fw_variant}+plaits-${_plaits_image}"
     printf '#pragma once\n#define NIDMI_FW_VERSION "%s"\n#define NIDMI_FW_VARIANT "%s"\n' "$_fw_ver" "$_fw_variant" > "$REPO_DIR/src/nidmi_fw_version.h"
     echo "   🏷️  Version firmware: $_fw_ver ($_fw_variant)"
 
@@ -738,10 +775,16 @@ compile_sketch() {
             EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
         fi
 
+        # Image Plaits (voir le bloc de decision plus haut). Pose AVANT
+        # l'echappatoire generique : NIDMI_EXTRA_FLAGS reste donc le dernier mot.
+        if [ ${#PLAITS_DEFINE[@]} -gt 0 ]; then
+            EXTRA_FLAGS_ARRAY+=("${PLAITS_DEFINE[@]}")
+        fi
+
         # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
         # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque
         # compiler.cpp.extra_flags les atteint (MESURES.md §18).
-        #   NIDMI_EXTRA_FLAGS="-DPLAITS_LEGER" ./scripts/nidmi.sh build --board s3 …
+        #   NIDMI_PLAITS=complet   choisit l'image Plaits (leger par defaut sur S3)
         if [ -n "${NIDMI_EXTRA_FLAGS:-}" ]; then
             # Decoupage voulu sur les espaces : plusieurs drapeaux possibles.
             # shellcheck disable=SC2206
@@ -842,10 +885,16 @@ build_binary() {
             EXTRA_FLAGS_ARRAY+=("-O3" "-DTEST")
         fi
 
+        # Image Plaits (voir le bloc de decision plus haut). Pose AVANT
+        # l'echappatoire generique : NIDMI_EXTRA_FLAGS reste donc le dernier mot.
+        if [ ${#PLAITS_DEFINE[@]} -gt 0 ]; then
+            EXTRA_FLAGS_ARRAY+=("${PLAITS_DEFINE[@]}")
+        fi
+
         # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
         # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque
         # compiler.cpp.extra_flags les atteint (MESURES.md §18).
-        #   NIDMI_EXTRA_FLAGS="-DPLAITS_LEGER" ./scripts/nidmi.sh build --board s3 …
+        #   NIDMI_PLAITS=complet   choisit l'image Plaits (leger par defaut sur S3)
         if [ -n "${NIDMI_EXTRA_FLAGS:-}" ]; then
             # Decoupage voulu sur les espaces : plusieurs drapeaux possibles.
             # shellcheck disable=SC2206

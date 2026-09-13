@@ -138,7 +138,20 @@ int  engine();
 // Les cinq continus de Plaits, 0..1 — mêmes identifiants et mêmes plages que le
 // moteur web. C'est ce qui permet à une cue de piloter indifféremment le WASM
 // du navigateur ou le DSP de la carte.
-struct Params { float harmonics, timbre, morph, decay, lpgColour; };
+/* `drone` : 0 = GACHETTE (defaut), 1 = CONTINU.
+ *
+ * Sur Plaits, « trigger patched » veut dire qu'une gachette est branchee : toute
+ * note devient une attaque suivie d'une decroissance de LPG, et RIEN NE TIENT
+ * JAMAIS — ni pendant une pause, ni ailleurs. Le drapeau etait pose en dur a
+ * l'allocation, avec pour seul commentaire « sans ca les moteurs jouent en
+ * continu ». C'est precisement ce qu'on veut pouvoir choisir : debranchee, la
+ * gachette laisse le moteur sonner en continu, ce qui est un bourdon — un mode
+ * musical a part entiere, et accessoirement le seul son qui permette d'entendre
+ * qu'une pause ne coupe pas le son (MESURES.md §121.3).
+ *
+ * Flottant comme les autres pour que Params reste uniforme et voyage par les
+ * memes chemins (cue, /api/audio/params) ; lu comme un booleen au seuil 0,5. */
+struct Params { float harmonics, timbre, morph, decay, lpgColour, drone; };
 
 // Lecteur d'échantillons — l'équivalent embarqué de trig-wav. Bien moins cher
 // que Plaits en RAM interne (quelques centaines d'octets contre 26 632), parce

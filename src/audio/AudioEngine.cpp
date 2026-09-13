@@ -92,6 +92,11 @@ constexpr size_t POOL_PLAITS = 1024;
 constexpr size_t POOL_PLAITS = 16384;
 #endif
 
+/* Ce que l'utilisateur a demande, independamment de l'existence de Plaits : le
+ * reglage arrive parfois AVANT l'allocation (une cue pose ses params sur un
+ * moteur pas encore resident). */
+bool droneVoulu = false;
+
 bool plaitsAlloue() {
   if (plaitsVoix) return true;
   const uint32_t avant = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
@@ -122,7 +127,11 @@ bool plaitsAlloue() {
   plaitsPatch.decay = 0.5f; plaitsPatch.lpg_colour = 0.5f; plaitsPatch.engine = 0;
 
   plaitsMod = plaits::Modulations{};
-  plaitsMod.trigger_patched = true;   // sans ça les moteurs jouent en continu
+  /* On REPOSE le choix courant, on ne le force pas a « gachette ».
+   * Cette ligne valait `= true` en dur : une reallocation de Plaits — un
+   * changement de moteur, une cue — ramenait un bloc en bourdon a la gachette,
+   * en silence. Un reglage qui se perd a l'allocation n'est pas un reglage. */
+  plaitsMod.trigger_patched = !droneVoulu;
 
   plaitsOctets = avant - heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   Serial.printf("[audio] Plaits alloue : %lu o (Voice %u + pool %u)%s\n",
@@ -756,11 +765,17 @@ void setParams(const Params& p) {
   plaitsPatch.morph      = constrain(p.morph,     0.0f, 1.0f);
   plaitsPatch.decay      = constrain(p.decay,     0.0f, 1.0f);
   plaitsPatch.lpg_colour = constrain(p.lpgColour, 0.0f, 1.0f);
+  /* BOURDON. Ecriture directe elle aussi : `trigger_patched` est un bool lu par
+   * la tache audio au bloc suivant, meme regle que les continus ci-dessus. Le
+   * voulu est garde a part pour survivre a une reallocation. */
+  droneVoulu = (p.drone >= 0.5f);
+  plaitsMod.trigger_patched = !droneVoulu;
 }
 
 Params params() {
   return Params{ plaitsPatch.harmonics, plaitsPatch.timbre, plaitsPatch.morph,
-                 plaitsPatch.decay, plaitsPatch.lpg_colour };
+                 plaitsPatch.decay, plaitsPatch.lpg_colour,
+                 droneVoulu ? 1.0f : 0.0f };
 }
 
 /* Volume de sortie, 0..1 — voir AudioEngine.h. Borne ici et nulle part ailleurs :

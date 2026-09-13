@@ -123,6 +123,7 @@ namespace {
       else if (!strcmp(n, "morph"))      { p.morph     = v; toucheParams = true; }
       else if (!strcmp(n, "decay"))      { p.decay     = v; toucheParams = true; }
       else if (!strcmp(n, "lpg_colour")) { p.lpgColour = v; toucheParams = true; }
+      else if (!strcmp(n, "drone"))      { p.drone     = v; toucheParams = true; }
       else if (!strcmp(n, "volume"))     { AudioEngine::setVolume(v); }
     }
     if (toucheParams) AudioEngine::setParams(p);

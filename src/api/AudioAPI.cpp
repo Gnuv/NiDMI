@@ -169,6 +169,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         lire("morph",      p.morph);
         lire("decay",      p.decay);
         lire("lpg_colour", p.lpgColour);
+        lire("drone",      p.drone);
         AudioEngine::setParams(p);
         /* Le VOLUME ne vit pas dans Params : c'est un gain de sortie, pas un
          * parametre de Plaits. Il voyage sur la meme route parce qu'il change
@@ -182,6 +183,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += ",\"morph\":"      + String(a.morph, 3);
         json += ",\"decay\":"      + String(a.decay, 3);
         json += ",\"lpg_colour\":" + String(a.lpgColour, 3);
+        json += ",\"drone\":"      + String(a.drone >= 0.5f ? 1 : 0);
         json += ",\"volume\":"     + String(AudioEngine::volume(), 3) + "}";
         request->send(200, "application/json", json);
     });
