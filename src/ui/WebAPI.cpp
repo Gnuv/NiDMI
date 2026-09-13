@@ -16,6 +16,7 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncWebSocket.h>
 #include <pgmspace.h>
+#include <esp_heap_caps.h>
 
 // Forward declarations pour les APIs
 void setupPinAPI(AsyncWebServer& server);
@@ -389,46 +390,10 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
     request->send(rep);
 }
 
-void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
-    /* ── L'application NiDMI (nidmi.html + css/ + js/), embarquée ────────────
-       GÉNÉRÉE par scripts/cartes/embarquer-app.py (dépôt nidmi) : fichiers
-       gzippés en PROGMEM, servis tels quels (Content-Encoding: gzip). C'est
-       l'étape 1c de CONVERGENCE_NIDMI.md §10 — une seule origine sert l'app
-       ET l'API, donc plus de question CORS. Le streaming par chunks évite
-       toute copie heap : le plus gros fichier ne coûte que son tampon. */
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-        /* Preuve de vie du garde-fou de boot : servir l'interface est
-           exactement ce que le chargement d'un process peut empêcher (il prend
-           le dernier gros bloc contigu et AsyncTCP n'a plus de tampons). Y
-           arriver déclare donc la config du boot saine. Ne fait que poser un
-           drapeau — l'écriture NVS a lieu dans nidmi_loop(). */
-        /* L'APP EMBARQUEE EST UN SEUL DOCUMENT. nidmi.html, css/ et js/ sont
-         * fusionnes a la generation de l'archive (embarquer-app.py) : ils n'y
-         * sont plus, et il n'y a donc rien a choisir ici. La branche « mono
-         * s'il y est, sinon nidmi » a vecu le temps de la mesure (§115) ; la
-         * garder decrirait un etat qui n'existe plus.
-         * Si l'archive ne porte pas mono.html, _sertArchiveApp rend un 404 qui
-         * NOMME le chemin manquant — diagnostic immediat, pas de repli muet. */
-        _sertArchiveApp(request, "/mono.html", /*validerAuBout=*/true);
-    });
-
-    /* ── LA PORTE DE SORTIE ────────────────────────────────────────────────
-     * Charger un moteur comme Plaits fait tomber le plus gros bloc contigu a
-     * ~7 700 o : sous ~16 000, AsyncTCP n'obtient plus de tampon et l'interface
-     * complete ne part plus (MESURES §122, §123). L'API, elle, repond encore —
-     * quelques centaines d'octets tiennent dans les miettes.
-     *
-     * Il n'y avait alors AUCUN retour possible depuis un navigateur : il fallait
-     * une ligne de commande pour decharger le moteur. Vecu par l'utilisateur,
-     * apres une proposition de redemarrage que j'avais ecrite sans issue de
-     * secours. Une fonction qui peut enfermer doit porter sa sortie.
-     *
-     * Cette page tient dans ce qui reste. Pas d'archive, pas de police, pas de
-     * feuille de style externe : une seule reponse, servie depuis la flash.
-     * Elle est en dur ici et PAS dans l'archive, exprès — l'archive est
-     * justement ce qui ne se sert plus. */
-    server.on("/secours", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(200, "text/html; charset=utf-8",
+/* LA PAGE DE SECOURS, extraite en fonction : elle est servie par « /secours »
+ * ET par « / » quand la memoire ne permet plus l'interface complete. */
+static void _sertSecours(AsyncWebServerRequest *request){
+    request->send(200, "text/html; charset=utf-8",
     "<!doctype html><meta charset=utf-8><title>NiDMI - secours</title>\n"
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">\n"
     "<style>body{background:#1a1a1a;color:#ddd;font:14px/1.5 system-ui,sans-serif;margin:0;padding:20px;max-width:34em}\n"
@@ -465,7 +430,69 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
     "async function reb(){try{await fetch('/api/system/reboot',{method:'POST'});}catch(e){}attendre();}\n"
     "etat();\n"
     "</script>");
+}
+
+void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
+    /* ── L'application NiDMI (nidmi.html + css/ + js/), embarquée ────────────
+       GÉNÉRÉE par scripts/cartes/embarquer-app.py (dépôt nidmi) : fichiers
+       gzippés en PROGMEM, servis tels quels (Content-Encoding: gzip). C'est
+       l'étape 1c de CONVERGENCE_NIDMI.md §10 — une seule origine sert l'app
+       ET l'API, donc plus de question CORS. Le streaming par chunks évite
+       toute copie heap : le plus gros fichier ne coûte que son tampon. */
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        /* Preuve de vie du garde-fou de boot : servir l'interface est
+           exactement ce que le chargement d'un process peut empêcher (il prend
+           le dernier gros bloc contigu et AsyncTCP n'a plus de tampons). Y
+           arriver déclare donc la config du boot saine. Ne fait que poser un
+           drapeau — l'écriture NVS a lieu dans nidmi_loop(). */
+        /* L'APP EMBARQUEE EST UN SEUL DOCUMENT. nidmi.html, css/ et js/ sont
+         * fusionnes a la generation de l'archive (embarquer-app.py) : ils n'y
+         * sont plus, et il n'y a donc rien a choisir ici. La branche « mono
+         * s'il y est, sinon nidmi » a vecu le temps de la mesure (§115) ; la
+         * garder decrirait un etat qui n'existe plus.
+         * Si l'archive ne porte pas mono.html, _sertArchiveApp rend un 404 qui
+         * NOMME le chemin manquant — diagnostic immediat, pas de repli muet. */
+        /* ── SERVIR A MOITIE EST PIRE QUE NE PAS SERVIR ─────────────────────
+         * Avec un moteur resident le plus gros bloc contigu tombe a ~7 700 o.
+         * On commencait quand meme a emettre, et le flux CALAIT en route : le
+         * navigateur affichait une page a moitie chargee, figee, sans rien dire.
+         * Vecu par l'utilisateur — « je n'arrive pas sur la page de secours,
+         * mais sur un chargement partiel qui bloque ».
+         *
+         * On tranche donc AVANT d'ouvrir le robinet. RESERVE_SERVICE (12 000 o)
+         * est le chiffre que le firmware s'impose deja pour le service web, et
+         * il tombe dans l'intervalle mesure : 14 324 sert, 7 668 ne sert pas
+         * (MESURES §123, §125).
+         *
+         * Et on ne rend PAS une erreur : on rend la page de secours, celle qui
+         * passe. Recharger « / » quand la carte est saturee amene donc la ou il
+         * y a un bouton pour s'en sortir, sans avoir a connaitre son adresse. */
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 12000) {
+            _sertSecours(request);
+            return;
+        }
+        _sertArchiveApp(request, "/mono.html", /*validerAuBout=*/true);
     });
+
+    /* ── LA PORTE DE SORTIE ────────────────────────────────────────────────
+     * Charger un moteur comme Plaits fait tomber le plus gros bloc contigu a
+     * ~7 700 o : sous ~16 000, AsyncTCP n'obtient plus de tampon et l'interface
+     * complete ne part plus (MESURES §122, §123). L'API, elle, repond encore —
+     * quelques centaines d'octets tiennent dans les miettes.
+     *
+     * Il n'y avait alors AUCUN retour possible depuis un navigateur : il fallait
+     * une ligne de commande pour decharger le moteur. Vecu par l'utilisateur,
+     * apres une proposition de redemarrage que j'avais ecrite sans issue de
+     * secours. Une fonction qui peut enfermer doit porter sa sortie.
+     *
+     * Cette page tient dans ce qui reste. Pas d'archive, pas de police, pas de
+     * feuille de style externe : une seule reponse, servie depuis la flash.
+     * Elle est en dur ici et PAS dans l'archive, exprès — l'archive est
+     * justement ce qui ne se sert plus. */
+    server.on("/secours", HTTP_GET, [](AsyncWebServerRequest *request){
+        _sertSecours(request);
+    });
+
 
     /* Tout chemin de l'app qui n'a pas sa route explicite passe par le
        not-found : l'archive tranche. /css/theme.css, /js/…, et un 404 propre
