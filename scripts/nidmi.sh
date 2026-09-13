@@ -345,6 +345,18 @@ show_help() {
 #
 # On ne construit donc plus sans le dire. AVERTISSEMENT, pas refus : construire
 # le firmware seul, sans toucher a l'UI, est legitime.
+# ON REGENERE, ON N'AVERTIT PLUS.
+#
+# Cette fonction se contentait de DIRE que l'archive etait en retard, en laissant
+# la commande a taper. Un avertissement au milieu d'un journal de compilation est
+# un avertissement qu'on ne lit pas : la carte a servi une app perimee pendant
+# une session entiere, deux fois — la premiere parce que la verification n'etait
+# pas cablee a « compile », la seconde parce que l'avertissement, lui, etait bien
+# la et a ete manque.
+#
+# Meme parti que pour le vocabulaire embarque juste en dessous : on refait, et on
+# le DIT quand ca a change. Un build ne peut plus produire une carte qui sert une
+# app plus vieille que le depot.
 verifier_app_embarquee() {
     local nidmi="${NIDMI_APP_DIR:-$HOME/Documents/OSC CRReaM/nidmi}"
     local arch="$REPO_DIR/src/ui/app_archive.cpp"
@@ -354,12 +366,18 @@ verifier_app_embarquee() {
     recents=$(find "$nidmi/nidmi.html" "$nidmi/js" "$nidmi/css" \
                    -type f -newer "$arch" 2>/dev/null | grep -v "/\." | head -20)
     [ -z "$recents" ] && return 0
-    echo ""
-    echo "⚠️  L'APP EMBARQUÉE EST EN RETARD sur le dépôt :"
+    echo "   ↻ app embarquee en retard — regeneration de l'archive :"
     echo "$recents" | sed "s|$nidmi/|      |"
-    echo "   La carte servirait cette version-là, sans rien dire."
-    echo "   Régénérer :  python3 '$nidmi/scripts/cartes/embarquer-app.py'"
-    echo ""
+    if python3 "$nidmi/scripts/cartes/embarquer-app.py"; then
+        echo "   ✅ archive regeneree — a commiter avec l'app"
+    else
+        echo ""
+        echo "⚠️  LA REGENERATION A ECHOUE. La carte servirait l'ancienne version,"
+        echo "   sans rien dire. Corriger avant de flasher :"
+        echo "   python3 '$nidmi/scripts/cartes/embarquer-app.py'"
+        echo ""
+        return 1
+    fi
 }
 
 # Le vocabulaire que la carte PUBLIE (/api/mapping/vocabulaire) est derive de

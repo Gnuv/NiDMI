@@ -89,6 +89,16 @@ void ComponentManager::begin(MidiSender* sender) {
 
     /* Puis charger les configs des pins */
     ConfigLoader::loadFromNVS(*this);
+    /* ET COMPTER CE QU'ON VIENT DE CHARGER. C'est le chemin du DEMARRAGE —
+     * `reloadConfigs()`, lui, ne sert qu'aux modifications ulterieures — et
+     * personne n'y rafraichissait les occupations. `s_audio` restait donc a sa
+     * valeur initiale, faux, et la carte REFUSAIT le son au motif qu'« aucun
+     * DAC n'est declare » alors qu'elle en listait un sur D0.
+     * Le son ne revenait qu'une fois l'app ouverte sur la zone I/O, dont la
+     * lecture de /api/pins/caps rafraichit au passage : une carte headless qui
+     * redemarrait revenait MUETTE et le restait, faute de quelqu'un pour ouvrir
+     * une page. Voir MESURES.md §119.2. */
+    Occupations::rafraichir();
     
     // Charger et initialiser la configuration OSC depuis NVS
     OSCConfigLoader::OSCConfig oscConfig = OSCConfigLoader::loadFromNVS();
@@ -249,7 +259,6 @@ void ComponentManager::reloadConfigs() {
         osc_output_all_enabled_ = prefs.getBool("osc_out_all", true);
         prefs.end();
     }
-    Occupations::rafraichir();   // les declarations peuvent avoir change
     marquer("pause");
     bool wdt = pauseRealtimeTasks();
     marquer("clearAll");
@@ -258,6 +267,24 @@ void ComponentManager::reloadConfigs() {
     loadMuxConfigFromNVS();
     marquer("nvs");
     ConfigLoader::loadFromNVS(*this);
+    /* APRES le chargement, et c'est tout l'objet du correctif.
+     *
+     * `rafraichir()` etait appele en TETE de cette fonction — donc avant
+     * `clearAll()`, qui vide le registre, et avant `loadFromNVS()`, qui le
+     * remplit. Il comptait les composants d'un registre vide et concluait
+     * « aucun DAC declare ». Comme il ne compte que la, la conclusion tenait
+     * jusqu'au prochain appel, et le seul autre appelant est l'API des broches.
+     *
+     * CONSEQUENCE MESUREE : apres chaque redemarrage, la carte REFUSAIT le son
+     * — « Aucun DAC declare » — alors que le DAC etait bien declare sur D0 dans
+     * sa propre liste. Le son ne revenait qu'une fois l'app ouverte sur la zone
+     * I/O, dont la lecture de /api/pins/caps rafraichit au passage. Autrement
+     * dit : une carte headless qui redemarre revenait MUETTE et le restait,
+     * puisqu'il n'y a personne pour ouvrir une page. Exactement ce que la regle
+     * premiere interdit — « debranchee, la carte doit continuer a l'identique ».
+     *
+     * Le comptage doit suivre le chargement, pas le preceder. */
+    Occupations::rafraichir();
     marquer("reprise");
     resumeRealtimeTasks(wdt);
     marquer("repos");

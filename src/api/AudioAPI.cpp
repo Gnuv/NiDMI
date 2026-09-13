@@ -294,27 +294,33 @@ void setupAudioAPI(AsyncWebServer& server) {
         Cues::demarrer();
         request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
-                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
     });
-    /* PAUSE : le decompte gele, la tete reste. « play » reprend sans recharger. */
+    /* PAUSE : le TEMPS gele, le SON continue. La porte de silence ne bouge
+     * pas — seul l'arret la ferme — donc une note tenue reste tenue.
+     * « play » reprend la ou l'on en etait, sans recharger la cue. */
     server.on("/api/cues/pause", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::pauser();
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
-                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
     });
     server.on("/api/cues/stop", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::arreter();
         request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
-                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
     });
     server.on("/api/cues/go", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::suivant();
         request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
-                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
     });
     server.on("/api/cues/goto", HTTP_POST, [](AsyncWebServerRequest *request){
         const int i = request->hasParam("i", true)
@@ -324,7 +330,8 @@ void setupAudioAPI(AsyncWebServer& server) {
                       String("{\"status\":\"") + (ok ? "ok" : "hors liste")
                       + "\",\"index\":" + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
-                      + ",\"restant\":" + String(Cues::restantSec(), 2) + "}");
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
     });
     server.on("/api/cues/texte", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "text/plain; charset=utf-8", Cues::contenu());
@@ -343,7 +350,13 @@ void setupAudioAPI(AsyncWebServer& server) {
                   * qu'un metro() battait : un etat faux, constate. On les
                   * NOMME tous les deux plutot que d'en inventer un seul. */
                  + ",\"horloge_scripts\":" + String(g_midiRouter.enLecture() ? "true" : "false")
-                 + ",\"restant\":" + String(Cues::restantSec(), 2) + "}";
+                 + ",\"restant\":" + String(Cues::restantSec(), 2)
+                 /* TROISIEME etat, et pas une nuance des deux premiers : gelee
+                  * n'est pas arretee. La porte de silence reste ouverte en
+                  * pause — ce qui sonnait sonne encore — alors qu'un arret la
+                  * ferme. Le deduire d'un decompte non nul etait faux pour une
+                  * cue infinie, qui ne decompte rien. */
+                 + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}";
         request->send(200, "application/json", j);
     });
     server.on("/api/cues", HTTP_POST, [](AsyncWebServerRequest *request){

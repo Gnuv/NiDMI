@@ -296,9 +296,12 @@ String contenu() {
  * `nidmi_ws_pousser` est sur : il ne fait qu'empiler dans une file statique. */
 static void _annoncer() {
   if (!nidmi_ws_quelqu_un_ecoute()) return;   // personne n'ecoute : rien a dire
-  char trame[72];
-  snprintf(trame, sizeof trame, "NIDMI_CUE:%d\x1f%s\x1f%.2f\x1f%d",
-           _index, _lecture ? "1" : "0", restantSec(), nombre());
+  char trame[80];
+  /* CINQ CHAMPS : le dernier dit GELEE. Ajoute en queue — l'app destructure,
+   * une trame a quatre champs reste donc lisible par une app a jour. */
+  snprintf(trame, sizeof trame, "NIDMI_CUE:%d\x1f%s\x1f%.2f\x1f%d\x1f%s",
+           _index, _lecture ? "1" : "0", restantSec(), nombre(),
+           _enPause ? "1" : "0");
   nidmi_ws_pousser(trame);
 }
 
@@ -322,6 +325,9 @@ void demarrer() {
     _enPause = false;
     _debutMs = millis() - _ecouleMs;
     _lecture = true;
+    /* La porte est deja ouverte — la pause n'y touche plus. On la rouvre
+     * quand meme : /api/audio/stop peut l'avoir fermee pendant la pause, et
+     * une reprise muette serait le meme mensonge d'etat a l'envers. */
     AudioEngine::ouvrirSon();
     g_midiRouter.fixerTransport(true);
     _annoncer();
@@ -339,19 +345,37 @@ void demarrer() {
   Serial.println("[cues] lecture");
 }
 
-/* PAUSE : le decompte gele, la tete reste ou elle est. Le son se tait comme a
- * l'arret — la carte n'a qu'une porte — mais le temps, lui, est garde. */
+/* PAUSE : on gele le DEROULE TEMPOREL de la cue — son decompte, son automation
+ * d'enveloppe, son enchainement, l'horloge de ses scripts — et RIEN D'AUTRE.
+ *
+ * LA PORTE DE SILENCE NE BOUGE PAS. C'est toute la difference entre pause et
+ * arret, et la carte n'en faisait pas : elle appelait couperSon() ici, si bien
+ * que « pause » etait un arret qui se souvenait de l'heure. Ce qui sonne
+ * continue donc de sonner — une note tenue, un echantillon en cours, la sortie
+ * continue de Plaits. La regle est celle du navigateur, ecrite depuis
+ * longtemps : « la pause suspend le deroule temporel d'une case, pas le son ».
+ *
+ * L'HORLOGE DES SCRIPTS S'ARRETE, elle : un metro() est du temps qui passe.
+ * Les DIFFERES, en revanche, continuent d'etre pompes par loopTask — ils ne
+ * sont pas gates par le transport. C'est ce qu'il faut : le note-off d'un
+ * makenote() parti avant la pause arrive quand meme, au lieu de laisser une
+ * note coincee jusqu'a la reprise. Une pause ne fabrique pas de notes
+ * fantomes.
+ *
+ * LE MIDI ENTRANT continue aussi d'etre traite — c'est du jeu live, il n'a
+ * jamais dependu du transport. */
 void pauser() {
   if (!_lecture) return;
   _ecouleMs = millis() - _debutMs;
   _enPause = true;
   _lecture = false;
-  AudioEngine::couperSon();
   g_midiRouter.fixerTransport(false);
   _annoncer();
-  Serial.printf("[cues] pause a %.2f s\n", _ecouleMs / 1000.0f);
+  Serial.printf("[cues] pause a %.2f s — le son continue\n", _ecouleMs / 1000.0f);
 }
 
+/* ARRET : lui ferme la porte. Depuis qu'il est le SEUL a la fermer, c'est ce
+ * qui le distingue de la pause — pas une nuance de decompte. */
 void arreter() {
   _enPause = false;          // un arret franc oublie la position gelee
   _lecture = false;
@@ -389,6 +413,11 @@ void boucle() {
 }
 
 bool  enLecture()   { return _lecture; }
+/* GELEE, ET PAS ARRETEE. Trois etats de transport, pas deux : sans ce drapeau
+ * l'app deduisait la pause d'un decompte non nul — inference fausse pour une
+ * cue infinie, qui ne decompte rien et paraissait donc arretee alors qu'elle
+ * sonnait. La carte le DIT au lieu de le laisser deviner. */
+bool  enPause()     { return _enPause; }
 int   indexCourant(){ return _index; }
 float restantSec() {
   if (_dureeCourante <= 0.0f) return 0.0f;         // cue infinie : rien a decompter

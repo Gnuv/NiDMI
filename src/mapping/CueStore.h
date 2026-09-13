@@ -63,16 +63,23 @@ String contenu();                      // le fichier brut, pour l'app
 
 // ── Transport ─────────────────────────────────────────────────────────────
 void  demarrer();          // PLAY : active la cue courante et lance le decompte
-void  arreter();           // STOP : silence, decompte a plat
-/* PAUSE : gele le decompte la ou il en est ; demarrer() reprend sans recharger
- * la cue. L'app avait sa propre pause, locale — elle affichait « arrete »
- * pendant que la carte continuait de jouer. Un sequenceur, donc une pause. */
+void  arreter();           // STOP : ferme la porte de silence, decompte a plat
+/* PAUSE : gele le TEMPS, pas le SON. Le decompte, l'automation d'enveloppe,
+ * l'enchainement et l'horloge des scripts s'arretent ; la porte de silence,
+ * elle, ne bouge pas — une note tenue reste tenue, un echantillon continue.
+ * demarrer() reprend la ou l'on en etait, sans recharger la cue.
+ *
+ * Deux dettes reglees d'un coup. L'app avait sa propre pause, locale : elle
+ * affichait « arrete » pendant que la carte continuait de jouer. Puis la carte
+ * a eu la sienne, mais elle coupait le son — « pause » n'etait qu'un arret qui
+ * se souvenait de l'heure. Un sequenceur, une pause, et c'en est une. */
 void  pauser();
 void  suivant();           // GO   : cue suivante
 bool  aller(int index);    // saut direct
 void  boucle();            // appelee par nidmi_loop : avance les cues minutees
 
 bool  enLecture();
+bool  enPause();           // gelee — DIFFERENT d'arretee, et le son y coule encore
 int   indexCourant();
 float restantSec();        // temps restant sur la cue courante (0 si infinie)
 
