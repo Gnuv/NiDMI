@@ -98,6 +98,28 @@ void couperSon();
 // PLAY : ouvre la porte. Le moteur reste charge — « silence, mais moteur prêt ».
 void ouvrirSon();
 
+/* ── SYNTHÈSE LOURDE : DÉSACTIVÉE SUR UNE CARTE SEULE ──────────────────────
+ *
+ * Décision prise sur mesure (MESURES.md §122 à §126) : faire cohabiter le
+ * serveur web et Plaits sur ce 8 Mo n'est PAS robuste. Plaits résident laisse
+ * 7 668 o de bloc contigu ; une page déjà ouverte tient très bien (101 allers-
+ * retours, zéro échec), mais tenter de la RECHARGER coince la carte une à deux
+ * minutes — « elle répond, elle ne sert plus » (§15).
+ *
+ * La carte seule fait donc : capteurs, MIDI, OSC, séquenceur, scripts .nms et
+ * ÉCHANTILLONS. L'échantillonneur, lui, cohabite sans problème — son PCM vit en
+ * PSRAM et il ne coûte que 1 536 o de bloc contigu (§123).
+ *
+ * LA SYNTHÈSE COMMENCE À DEUX CARTES. Le build d'un worker de ferme définira
+ * NIDMI_SYNTH_LOURDE ; il n'a pas de serveur web à nourrir, donc pas ce conflit.
+ *
+ * Ce n'est pas une restriction « au cas où » : c'est ce que la mesure impose. */
+#ifndef NIDMI_SYNTH_LOURDE
+#define NIDMI_SYNTH_LOURDE 0
+#endif
+// true si cette image accepte les moteurs de synthèse (0..23).
+bool syntheseLourdeDisponible();
+
 // Indices des moteurs Plaits SUBSTITUÉS dans cette image (liste "2,3,4,..."),
 // chaîne vide si l'image est complète. Sous -DPLAITS_LEGER, sept emplacements
 // jouent virtual-analog à la place de leur moteur d'origine : les indices sont

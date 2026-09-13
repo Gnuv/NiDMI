@@ -281,6 +281,21 @@ esac
 PLAITS_DEFINE=()
 [ "$_plaits_image" = "leger" ] && PLAITS_DEFINE=("-DPLAITS_LEGER")
 
+# ── SYNTHESE LOURDE : ETEINTE PAR DEFAUT ──────────────────────────────────
+# Decision prise sur mesure (MESURES.md §122 a §126) : sur ce 8 Mo, faire
+# cohabiter le serveur web et Plaits n'est PAS robuste. Une carte SEULE fait
+# capteurs, MIDI, OSC, sequenceur, scripts .nms et ECHANTILLONS — l'echantillon-
+# neur ne coute que 1 536 o de bloc contigu, il cohabite tres bien.
+# LA SYNTHESE COMMENCE A DEUX CARTES : le worker de ferme n'a pas de serveur web
+# a nourrir, donc pas ce conflit.
+#   NIDMI_SYNTHESE=oui ./scripts/nidmi.sh build --board s3 …
+case "${NIDMI_SYNTHESE:-}" in
+    oui|OUI|yes|1) _synthese=1 ;;
+    ""|non|NON|no|0) _synthese=0 ;;
+    *) echo "❌ NIDMI_SYNTHESE inconnu: '${NIDMI_SYNTHESE}' (attendu: oui | non)"; exit 1 ;;
+esac
+SYNTH_DEFINE=("-DNIDMI_SYNTH_LOURDE=$_synthese")
+
 if [ "$_usb_midi_flag" = "1" ]; then
     # USB-MIDI activé : USB-OTG (TinyUSB), le firmware contrôle la pile USB (MIDI USB).
     S3_USB_PROPS=( --build-property "build.usb_mode=0" --build-property "build.cdc_on_boot=0" )
@@ -458,9 +473,14 @@ sync_files() {
     _fw_ver=$(cd "$REPO_DIR" && git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d-%H%M%S)
     _fw_variant=$([ "${_usb_midi_flag:-0}" = "1" ] && echo "usbmidi-on" || echo "usbmidi-off")
     [ "${USB_NET_MODE:-false}" = true ] && _fw_variant="${_fw_variant}+usbnet"
-    # L'IMAGE PLAITS EST DITE. Sept moteurs substitues sans que le numero de
-    # version ne le mentionne, c'est une carte qui ment sur ce qu'elle joue.
-    _fw_variant="${_fw_variant}+plaits-${_plaits_image}"
+    # CE QUE LA CARTE SAIT FAIRE, DIT DANS SON NUMERO. Sans synthese, l'image
+    # Plaits choisie est inerte : l'annoncer laisserait croire a une capacite
+    # qui n'existe pas. Avec, on nomme laquelle des deux images est dedans.
+    if [ "${_synthese:-0}" = "1" ]; then
+        _fw_variant="${_fw_variant}+plaits-${_plaits_image}"
+    else
+        _fw_variant="${_fw_variant}+sans-synthese"
+    fi
     printf '#pragma once\n#define NIDMI_FW_VERSION "%s"\n#define NIDMI_FW_VARIANT "%s"\n' "$_fw_ver" "$_fw_variant" > "$REPO_DIR/src/nidmi_fw_version.h"
     echo "   🏷️  Version firmware: $_fw_ver ($_fw_variant)"
 
@@ -780,6 +800,7 @@ compile_sketch() {
         if [ ${#PLAITS_DEFINE[@]} -gt 0 ]; then
             EXTRA_FLAGS_ARRAY+=("${PLAITS_DEFINE[@]}")
         fi
+        EXTRA_FLAGS_ARRAY+=("${SYNTH_DEFINE[@]}")
 
         # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
         # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque
@@ -890,6 +911,7 @@ build_binary() {
         if [ ${#PLAITS_DEFINE[@]} -gt 0 ]; then
             EXTRA_FLAGS_ARRAY+=("${PLAITS_DEFINE[@]}")
         fi
+        EXTRA_FLAGS_ARRAY+=("${SYNTH_DEFINE[@]}")
 
         # Echappatoire generique : le contenu de NIDMI_EXTRA_FLAGS est ajoute aux
         # flags C++. Il est donc vu AUSSI par les bibliotheques, puisque

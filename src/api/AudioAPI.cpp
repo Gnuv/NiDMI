@@ -59,6 +59,10 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
         json += "\"niveau\":"            + String(m.niveau) + ",";
         json += "\"derniere_note\":"     + String(m.derniereNote) + ",";
+        /* CE QUE CETTE CARTE SAIT FAIRE — l'app demande, elle ne suppose pas.
+         * `false` ici veut dire : les blocs de synthese ne sonneront pas sur
+         * elle ; les echantillons, si. */
+        json += "\"synthese\":" + String(AudioEngine::syntheseLourdeDisponible() ? "true" : "false") + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -107,6 +111,19 @@ void setupAudioAPI(AsyncWebServer& server) {
          * l'API repondait « Plaits indisponible (tas insuffisant ?) » pour une
          * broche occupee. Un message faux coute plus cher qu'une absence de
          * message — on verifie donc ici, avant, pour pouvoir nommer la cause. */
+        /* PAS DE SYNTHESE SUR UNE CARTE SEULE — et on dit POURQUOI, avec ce
+         * qui reste. Un refus sans alternative envoie chercher une panne qui
+         * n'existe pas. */
+        if (n >= 0 && !AudioEngine::syntheseLourdeDisponible()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"synthese\":false,\"message\":"
+                "\"Cette carte ne fait pas de synthese. Mesure : un moteur lourd "
+                "resident ne laisse que 7 668 o de memoire d'un seul tenant, et "
+                "recharger l'interface coince alors la carte (MESURES §122-126). "
+                "Ce qui marche ici : capteurs, MIDI, OSC, sequenceur, scripts .nms "
+                "et ECHANTILLONS (trig-wav). La synthese commence a deux cartes.\"}");
+            return;
+        }
         if (n >= 0 && !Occupations::audioDeclare()) {
             request->send(409, "application/json",
                 "{\"status\":\"error\",\"message\":\"Aucun DAC declare : le son est desactive. "
@@ -147,6 +164,10 @@ void setupAudioAPI(AsyncWebServer& server) {
         // valeurs par défaut — appliquer les continus avant, c'est les perdre.
         if (request->hasParam("engine", true)) {
             const int n = request->getParam("engine", true)->value().toInt();
+            /* Une cue qui demande un moteur de synthese sur une carte qui n'en
+             * fait pas : on NE casse PAS la cue — les continus qui suivent et
+             * le reste du spectacle continuent. On laisse simplement setEngine
+             * refuser, et `engine` rendu plus bas dira la verite. */
             // Chemin des CUES (js/device/audio-board.js) : on ne persiste pas.
             // Une cue change le son, elle ne redéfinit pas le défaut du boîtier.
             // Un refus de bascule n'est PAS un échec de la cue : les continus

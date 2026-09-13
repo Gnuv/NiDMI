@@ -389,6 +389,14 @@ void restaurer() {
                     nom.c_str(), raison.c_str());
     }
   } else if (v.startsWith("p:")) {
+    if (!syntheseLourdeDisponible()) {
+      /* Un choix memorise par une image qui acceptait la synthese ne doit pas
+       * ressusciter dans une image qui ne l'accepte plus. On l'ignore, et on le
+       * DIT — un reglage qui disparait en silence est un piege. */
+      Serial.println("[audio] moteur de synthese memorise IGNORE : cette image "
+                     "n'en accepte pas (carte seule). Voir MESURES.md §126.");
+      return;
+    }
     const int n = v.substring(2).toInt();
     if (n >= 0 && n <= 23 && plaitsAlloue()) {
       plaitsPatch.engine = n;
@@ -603,6 +611,8 @@ bool ensureStarted() {
 // Doit rester d'accord avec les NIDMI_LOURD de plaits/dsp/voice.cpp
 // (hardware/bench/plaits-instrumentation.patch) : six_op x3 (2,3,4),
 // string_machine (6), speech (15), particle (18), string (19).
+bool syntheseLourdeDisponible() { return NIDMI_SYNTH_LOURDE != 0; }
+
 const char* moteursSubstitues() {
 #ifdef PLAITS_LEGER
   return "2,3,4,6,15,18,19";
@@ -724,6 +734,10 @@ bool setEngine(int moteur, bool persister) {
     return true;
   }
   if (moteur > 23) { derniereBasc = Bascule::Echec; return false; }
+  /* PAS DE SYNTHÈSE SUR UNE CARTE SEULE. Refus net, pas d'armement : il n'y a
+   * rien à charger au prochain démarrage. L'échantillonneur (moteur -2) passe
+   * au-dessus de cette garde — c'est lui qui reste. */
+  if (!syntheseLourdeDisponible()) { derniereBasc = Bascule::Echec; return false; }
   if (!ensureStarted()) { derniereBasc = Bascule::Echec; return false; }
 
   // Garde d'allocation à chaud — voir l'en-tête. Si Plaits est déjà résident,
