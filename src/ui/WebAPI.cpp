@@ -412,6 +412,61 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
         _sertArchiveApp(request, "/mono.html", /*validerAuBout=*/true);
     });
 
+    /* ── LA PORTE DE SORTIE ────────────────────────────────────────────────
+     * Charger un moteur comme Plaits fait tomber le plus gros bloc contigu a
+     * ~7 700 o : sous ~16 000, AsyncTCP n'obtient plus de tampon et l'interface
+     * complete ne part plus (MESURES §122, §123). L'API, elle, repond encore —
+     * quelques centaines d'octets tiennent dans les miettes.
+     *
+     * Il n'y avait alors AUCUN retour possible depuis un navigateur : il fallait
+     * une ligne de commande pour decharger le moteur. Vecu par l'utilisateur,
+     * apres une proposition de redemarrage que j'avais ecrite sans issue de
+     * secours. Une fonction qui peut enfermer doit porter sa sortie.
+     *
+     * Cette page tient dans ce qui reste. Pas d'archive, pas de police, pas de
+     * feuille de style externe : une seule reponse, servie depuis la flash.
+     * Elle est en dur ici et PAS dans l'archive, exprès — l'archive est
+     * justement ce qui ne se sert plus. */
+    server.on("/secours", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "text/html; charset=utf-8",
+    "<!doctype html><meta charset=utf-8><title>NiDMI - secours</title>\n"
+    "<meta name=viewport content=\"width=device-width,initial-scale=1\">\n"
+    "<style>body{background:#1a1a1a;color:#ddd;font:14px/1.5 system-ui,sans-serif;margin:0;padding:20px;max-width:34em}\n"
+    "h1{font-size:17px;margin:0 0 4px}p{margin:10px 0}code{color:#8cf}\n"
+    "b{color:#fb4}button{font:inherit;padding:10px 14px;margin:6px 6px 0 0;border:1px solid #555;\n"
+    "background:#333;color:#eee;border-radius:6px;cursor:pointer}button:hover{background:#444}\n"
+    "#e{margin:14px 0;padding:10px;background:#222;border-left:3px solid #666;white-space:pre-wrap}</style>\n"
+    "<h1>NiDMI &mdash; page de secours</h1>\n"
+    "<p>Cette page tient en un kilo-octet. Elle se sert <b>meme quand l'interface\n"
+    "complete ne se sert plus</b> &mdash; c'est tout son objet.</p>\n"
+    "<div id=e>lecture de l'etat...</div>\n"
+    "<p><button onclick=dech()>Decharger le moteur et redemarrer</button>\n"
+    "<button onclick=reb()>Redemarrer seulement</button></p>\n"
+    "<p>Decharger rend a la carte la memoire d'un seul tenant dont le serveur web a\n"
+    "besoin. La composition n'est pas touchee : elle vit en flash.</p>\n"
+    "<script>\n"
+    "const E=document.getElementById('e');\n"
+    "async function etat(){try{const d=await(await fetch('/api/audio/status',{cache:'no-store'})).json();\n"
+    "E.textContent='moteur '+d.engine+(d.plaits_ready?' (Plaits charge)':'')\n"
+    "+'\\nplus gros bloc libre : '+d.heap_largest_block+' o'\n"
+    "+(d.heap_largest_block<16000?'\\n\\nEN DESSOUS DE ~16000 : l interface complete ne se sert pas.':'\\n\\nAssez pour servir l interface complete.');}\n"
+    "catch(e){E.textContent='carte muette';}}\n"
+    "async function attendre(){E.textContent='redemarrage...';\n"
+    "for(let i=0;i<20;i++){await new Promise(r=>setTimeout(r,500));\n"
+    "const c=new AbortController();const t=setTimeout(()=>c.abort(),1200);\n"
+    "try{await fetch('/api/status',{cache:'no-store',signal:c.signal});}catch(e){clearTimeout(t);break;}clearTimeout(t);}\n"
+    "for(let i=0;i<60;i++){await new Promise(r=>setTimeout(r,500));\n"
+    "const c=new AbortController();const t=setTimeout(()=>c.abort(),1200);\n"
+    "try{const r=await fetch('/api/status',{cache:'no-store',signal:c.signal});clearTimeout(t);\n"
+    "if(r.ok){await new Promise(r=>setTimeout(r,3000));return etat();}}catch(e){clearTimeout(t);}}\n"
+    "E.textContent='la carte n est pas revenue. Verifier son alimentation.';}\n"
+    "async function dech(){await fetch('/api/audio/engine',{method:'POST',\n"
+    "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'engine=-1'});reb();}\n"
+    "async function reb(){try{await fetch('/api/system/reboot',{method:'POST'});}catch(e){}attendre();}\n"
+    "etat();\n"
+    "</script>");
+    });
+
     /* Tout chemin de l'app qui n'a pas sa route explicite passe par le
        not-found : l'archive tranche. /css/theme.css, /js/…, et un 404 propre
        pour le reste. /api/* garde son 404 JSON. */
