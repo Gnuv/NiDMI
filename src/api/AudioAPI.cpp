@@ -126,7 +126,8 @@ void setupAudioAPI(AsyncWebServer& server) {
             // choix est en NVS ; il sera chargé au prochain démarrage, sur un
             // tas vierge — le seul ordre d'allocation mesuré comme sûr.
             request->send(202, "application/json",
-                "{\"status\":\"armed\",\"engine\":" + String(n) + ",\"message\":"
+                "{\"status\":\"armed\",\"engine\":" + String(n)
+                + ",\"redemarrage_requis\":true,\"message\":"
                 "\"tas trop fragmente pour basculer a chaud — choix memorise, "
                 "actif au prochain redemarrage\"}");
         } else {
@@ -140,6 +141,7 @@ void setupAudioAPI(AsyncWebServer& server) {
      * paramètres sont optionnels : on ne change que ce qui est envoyé.
      * Mêmes noms et mêmes plages que engines/core/plaits/web/index.js. */
     server.on("/api/audio/params", HTTP_POST, [](AsyncWebServerRequest *request){
+        bool _redemarrageRequis = false;
         // ORDRE IMPORTANT : le moteur D'ABORD. setEngine() peut déclencher
         // l'allocation de Plaits, dont l'initialisation repose le patch sur ses
         // valeurs par défaut — appliquer les continus avant, c'est les perdre.
@@ -157,6 +159,14 @@ void setupAudioAPI(AsyncWebServer& server) {
                     "{\"status\":\"error\",\"message\":\"moteur indisponible (tas insuffisant ?)\"}");
                 return;
             }
+            /* ET SI C'ETAIT ARME, ON LE DIT. Le cas passait ici en SILENCE :
+             * 200, « engine » rendu a sa valeur reelle, et personne pour
+             * remarquer qu'elle n'etait pas celle demandee. L'app demandait
+             * Plaits, recevait un succes, et n'avait pas Plaits — le mensonge
+             * d'etat que tout ce chantier supprime. Le champ dit ce qui manque :
+             * un redemarrage, et rien d'autre. */
+            _redemarrageRequis = (AudioEngine::derniereBascule()
+                                  == AudioEngine::Bascule::Armee);
         }
 
         AudioEngine::Params p = AudioEngine::params();
@@ -184,7 +194,12 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += ",\"decay\":"      + String(a.decay, 3);
         json += ",\"lpg_colour\":" + String(a.lpgColour, 3);
         json += ",\"drone\":"      + String(a.drone >= 0.5f ? 1 : 0);
-        json += ",\"volume\":"     + String(AudioEngine::volume(), 3) + "}";
+        json += ",\"volume\":"     + String(AudioEngine::volume(), 3);
+        /* Le seul geste qui appliquerait ce qui vient d'etre demande. La carte
+         * ne redemarre PAS d'elle-meme : elle dit ce qu'il faudrait. Decider de
+         * couper le son revient a qui tient la salle, pas au firmware. */
+        json += ",\"redemarrage_requis\":" + String(_redemarrageRequis ? "true" : "false");
+        json += "}";
         request->send(200, "application/json", json);
     });
 
