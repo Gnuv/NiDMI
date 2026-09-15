@@ -150,15 +150,45 @@ bool plaitsAlloue() {
 // La hauteur suit la note (do central = hauteur d'origine), par lecture à pas
 // fractionnaire avec interpolation linéaire — quelques opérations par
 // échantillon, sans commune mesure avec un moteur de synthèse.
-volatile bool  sampleActif = false;
-double         samplePos   = 0.0;
-double         samplePas   = 1.0;
-float          sampleGain  = 0.0f;
-/* BOUCLE. `trig-wav` se declenche a l'ARRIVEE SUR UNE CUE et, si on le lui
- * demande, tourne tant que la cue dure. C'est son comportement d'origine dans le
- * navigateur : un BufferSource avec `loop`, demarre a l'activation de la case —
- * ni clavier ni transposition. */
-volatile bool  sampleBoucle = false;
+/* ── POLYPHONIE ────────────────────────────────────────────────────────────
+ * Le lecteur etait MONOPHONIQUE, et le magasin ne tenait qu'un echantillon :
+ * deux pistes instrument avec deux sons en meme temps etaient donc impossibles
+ * de deux facons a la fois. Signale par l'usager.
+ *
+ * COMBIEN DE VOIX ? Mesure, pas estimation (MESURES §131) :
+ *     echantillon charge mais silencieux ......  36 cycles/echantillon
+ *     une voix qui joue .......................  420
+ *     donc UNE VOIX COUTE ~380 cycles, sur un budget de 5 000 a 240 MHz/48 kHz.
+ *
+ *     6 voix  -> 2 320 cycles, 46 %
+ *     8 voix  -> 3 080 cycles, 62 %   <- retenu
+ *    10 voix  -> 3 840 cycles, 77 %
+ *
+ * On s'arrete a 8 : il reste un tiers du budget pour le reste, et la regle du
+ * projet est que l'audio ne cede jamais. Le vol de voix prend la PLUS ANCIENNE,
+ * comme partout ailleurs. */
+#ifndef VOIX_MAX
+#define VOIX_MAX 8
+#endif
+
+struct VoixEch {
+  bool     actif  = false;
+  uint8_t  iEch   = 0;        // index dans SampleStore
+  double   pos    = 0.0;
+  double   pas    = 1.0;
+  float    gain   = 0.0f;
+  bool     boucle = false;
+  uint32_t age    = 0;        // ordre de declenchement, pour le vol de voix
+};
+VoixEch  voixEch[VOIX_MAX];
+uint32_t voixHorloge = 0;
+
+/* Reste vrai tant qu'au moins une voix sonne — c'est ce que lit la porte de
+ * silence et ce que « niveau » reflete. */
+static inline bool _uneVoixSonne() {
+  for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif) return true;
+  return false;
+}
 /* DEUX FACONS DE DECLENCHER, et c'est le bloc qui choisit.
  *   surCue = true  — comportement d'ORIGINE de trig-wav : le son part a
  *                    l'arrivee sur la cue, a la hauteur du fichier, et le
@@ -169,34 +199,45 @@ volatile bool  sampleBoucle = false;
  * Le defaut est `true` : c'est le comportement du moteur tel qu'il existe cote
  * navigateur, et c'est ce qu'on porte. */
 volatile bool  sampleSurCue = true;
+/* Quel echantillon le clavier joue : celui que la derniere cue a designe. */
+char echantillonClavier[48] = {0};
 
 void rendreSample() {
-  const int16_t* pcm = SampleStore::donnees();
-  const size_t   n   = SampleStore::trames();
-  const bool     st  = SampleStore::stereo();
+  /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
+   * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
+   * de saturer, ce qui s'entend comme un craquement franc. */
   for (size_t i = 0; i < FRAMES; i++) {
-    int16_t g = 0, d = 0;
-    /* Fin atteinte : on reboucle, ou on s'arrete. Le test est ici plutot qu'en
-     * fin de boucle pour que le reenroulement se fasse AVANT la lecture — sinon
-     * le dernier echantillon serait joue deux fois a chaque tour. */
-    if (sampleActif && sampleBoucle && pcm && n > 1 && samplePos >= double(n - 1))
-      samplePos -= double(n - 1);
-    if (sampleActif && pcm && samplePos < double(n - 1)) {
-      const size_t k = (size_t)samplePos;
-      const float  f = float(samplePos - double(k));
-      if (st) {
-        g = (int16_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
-        d = (int16_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
-      } else {
-        g = d = (int16_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
+    int32_t g = 0, d = 0;
+    for (uint8_t v = 0; v < VOIX_MAX; v++) {
+      VoixEch& vo = voixEch[v];
+      if (!vo.actif) continue;
+      const int16_t* pcm = SampleStore::donnees(vo.iEch);
+      const size_t   n   = SampleStore::trames(vo.iEch);
+      if (!pcm || n < 2) { vo.actif = false; continue; }
+      /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
+       * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
+       * trame a chaque tour. */
+      if (vo.pos >= double(n - 1)) {
+        if (!vo.boucle) { vo.actif = false; continue; }
+        vo.pos -= double(n - 1);
       }
-      g = (int16_t)(g * sampleGain);
-      d = (int16_t)(d * sampleGain);
-      samplePos += samplePas;
-    } else {
-      sampleActif = false;
+      const size_t k = (size_t)vo.pos;
+      const float  f = float(vo.pos - double(k));
+      const bool  st = SampleStore::stereo(vo.iEch);
+      int32_t eg, ed;
+      if (st) {
+        eg = (int32_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
+        ed = (int32_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
+      } else {
+        eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
+      }
+      g += (int32_t)(eg * vo.gain);
+      d += (int32_t)(ed * vo.gain);
+      vo.pos += vo.pas;
     }
-    entrelace[i * 2] = g; entrelace[i * 2 + 1] = d;
+    if (g >  32767) g =  32767; else if (g < -32768) g = -32768;
+    if (d >  32767) d =  32767; else if (d < -32768) d = -32768;
+    entrelace[i * 2] = (int16_t)g; entrelace[i * 2 + 1] = (int16_t)d;
   }
 }
 
@@ -222,21 +263,19 @@ void appliquer(const Evenement& e) {
   // La porte n'est PAS ouverte par les notes : c'est le TRANSPORT qui decide.
   // Sans play, le clavier ne doit rien produire — regle demandee explicitement.
   // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
-  if (SampleStore::estCharge() && moteurCourant == -2) {
+  if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
     /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
      * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
      * tomberait sur le sinus plus bas, et on entendrait un bip a chaque touche
      * sur une carte dont le moteur est le lecteur. */
     if (sampleSurCue) return;
     if (e.velo == 0) return;                 // l'échantillon va au bout
-    // do central (60) = hauteur d'origine ; on compense aussi l'écart entre la
-    // fréquence du fichier et celle réellement obtenue par l'I2S.
-    samplePas    = (double(SampleStore::frequence()) / double(srReel))
-                 * pow(2.0, (double(e.note) - 60.0) / 12.0);
-    samplePos    = 0.0;
-    sampleGain   = float(e.velo) / 127.0f;
-    sampleBoucle = false;   // au clavier, un coup est un coup
-    sampleActif  = true;
+    /* Au clavier, c'est l'echantillon du CLAVIER qui joue — celui que la cue a
+     * designe en dernier. Do central (60) = hauteur d'origine. Une voix par
+     * note : jouer un accord donne un accord, ce que la version monophonique
+     * ne pouvait pas. */
+    declencherEchantillon(echantillonClavier, /*boucle=*/false,
+                          float(e.velo) / 127.0f, float(e.note) - 60.0f);
     return;
   }
   if (e.velo != 0) derniereNote = e.note;   // temoin : la note REELLEMENT jouee
@@ -297,7 +336,7 @@ void boucleAudio(void*) {
 
     const uint32_t t0 = millis();
     const uint32_t c0 = ESP.getCycleCount();
-    if (moteurCourant == -2 && SampleStore::estCharge()) {
+    if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
       rendreSample();
     } else if (moteurCourant >= 0 && plaitsVoix) {
       if (plaitsTrigger) { plaitsMod.trigger = 1.0f; plaitsTrigger = false; }
@@ -405,15 +444,15 @@ void restaurer() {
   if (!v.length() || v == "-1") return;
 
   if (v.startsWith("s:")) {
-    String raison;
+    /* ON CHARGE TOUT, pas seulement celui-la. Une composition met des sons
+     * differents sur des pistes differentes ; ne restaurer que le dernier
+     * designe, c'est arriver a la premiere cue avec un magasin incomplet. */
+    const uint8_t n = SampleStore::chargerTout();
+    moteurCourant = -2;
     const String nom = v.substring(2);
-    if (SampleStore::charger(nom.c_str(), raison)) {
-      moteurCourant = -2;
-      Serial.printf("[audio] echantillon restaure : %s\n", nom.c_str());
-    } else {
-      Serial.printf("[audio] restauration de %s impossible : %s\n",
-                    nom.c_str(), raison.c_str());
-    }
+    strncpy(echantillonClavier, nom.c_str(), sizeof(echantillonClavier) - 1);
+    Serial.printf("[audio] lecteur d'echantillons arme — %u en PSRAM, clavier sur %s\n",
+                  (unsigned)n, nom.c_str());
   } else if (v.startsWith("p:")) {
     if (!syntheseLourdeDisponible()) {
       /* Un choix memorise par une image qui acceptait la synthese ne doit pas
@@ -666,7 +705,7 @@ void couperSon() {
   gSilence = true;                       // la porte se ferme
   bipBlocsRestants = 0;                   // coupe le bip de test
   for (auto& v : voix) v.cible = 0.0f;    // le sinus s'eteint
-  sampleActif = false;                    // l'echantillon s'arrete net
+  arreterEchantillon();                   // toutes les voix se taisent net
 }
 
 /* UNE NOTE NE DEMARRE PLUS LE MOTEUR. Comme noteOff, elle ne joue que si un
@@ -730,52 +769,86 @@ void libererPlaits() {
  * a l'arrivee sur une cue : on part de zero, on lit au rythme du fichier (la
  * seule correction est l'ecart entre sa frequence et celle que l'I2S a
  * reellement obtenue), et on boucle si la cue le demande. */
-void declencherEchantillon(bool boucle, float gain) {
-  if (!SampleStore::estCharge() || moteurCourant != -2) return;
-  samplePas    = double(SampleStore::frequence()) / double(srReel);
-  samplePos    = 0.0;
-  sampleGain   = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
-  sampleBoucle = boucle;
-  sampleActif  = true;
+/* La voix libre, sinon la PLUS ANCIENNE. */
+static VoixEch* _voixLibre() {
+  VoixEch* plusVieille = &voixEch[0];
+  for (uint8_t v = 0; v < VOIX_MAX; v++) {
+    if (!voixEch[v].actif) return &voixEch[v];
+    if (voixEch[v].age < plusVieille->age) plusVieille = &voixEch[v];
+  }
+  return plusVieille;
+}
+
+/* Declenche UN echantillon, nomme. `demiTons` = 0 signifie « a la hauteur du
+ * fichier » — le cas de trig-wav sur cue ; le clavier passe un ecart. */
+bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiTons) {
+  if (moteurCourant != -2) return false;
+  const int i = SampleStore::indexDe(nom);
+  if (i < 0) return false;
+  VoixEch* vo = _voixLibre();
+  vo->iEch   = (uint8_t)i;
+  vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
+             * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
+  vo->pos    = 0.0;
+  vo->gain   = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
+  vo->boucle = boucle;
+  vo->age    = ++voixHorloge;
+  vo->actif  = true;
+  return true;
+}
+
+/* Arrete UNE voix par son echantillon — quitter une cue coupe ce qu'elle avait
+ * lance, sans toucher a ce qu'une autre piste tient. */
+void arreterEchantillonNomme(const char* nom) {
+  const int i = SampleStore::indexDe(nom);
+  if (i < 0) return;
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (voixEch[v].actif && voixEch[v].iEch == (uint8_t)i) voixEch[v].actif = false;
 }
 
 /* Quitter la cue arrete le son — comme le `dispose()` du BufferSource cote
  * navigateur. Sans ca, une boucle survivrait a la cue qui l'a lancee. */
-void arreterEchantillon() { sampleActif = false; sampleBoucle = false; }
+void arreterEchantillon() { for (uint8_t v = 0; v < VOIX_MAX; v++) voixEch[v].actif = false; }
 
 /* Qui declenche : la cue (defaut, comportement d'origine) ou le clavier. */
 void fixerDeclenchementSurCue(bool surCue) { sampleSurCue = surCue; }
 bool declenchementSurCue() { return sampleSurCue; }
 
+/* ARMER LE LECTEUR — il ne « charge » plus rien : tout est deja en PSRAM.
+ * `nom` designe seulement l'echantillon que le CLAVIER jouera ; les cues, elles,
+ * nomment le leur a chaque declenchement. */
 bool setSampler(const char* nom, String& raison, bool persister) {
   if (!ensureStarted()) { raison = "audio indisponible"; return false; }
   libererPlaits();                       // on ne tient jamais les deux à la fois
-  if (!SampleStore::charger(nom, raison)) return false;
+  if (SampleStore::nombreCharges() == 0) SampleStore::chargerTout();
+  if (nom && *nom && SampleStore::indexDe(nom) < 0) {
+    raison = "echantillon « " + String(nom) + " » absent de mapfs";
+    return false;
+  }
+  if (nom) strncpy(echantillonClavier, nom, sizeof(echantillonClavier) - 1);
   moteurCourant = -2;
   if (persister) memoriser(String("s:") + nom);
   return true;
 }
 
 void arreterSampler(bool persister) {
-  const bool etaitCharge = (moteurCourant == -2);
-  if (etaitCharge) { moteurCourant = -1; if (persister) memoriser("-1"); }
-  sampleActif = false; sampleBoucle = false;
-  // Même précaution que libererPlaits(), qui manquait ici : rendreSample() lit
-  // le tampon PSRAM à chaque bloc. Le libérer sans attendre, c'est un accès
-  // après libération — audio en charpie ou plantage. On laisse huit blocs
-  // (2,5 ms chacun) à la tâche audio pour repasser au sinus. L'appelant est le
-  // gestionnaire HTTP, de priorité inférieure : le vTaskDelay lui rend la main.
-  if (etaitCharge) vTaskDelay(pdMS_TO_TICKS(20));
-  SampleStore::decharger();
+  const bool etaitArme = (moteurCourant == -2);
+  if (etaitArme) { moteurCourant = -1; if (persister) memoriser("-1"); }
+  arreterEchantillon();
+  /* ON NE LIBERE PLUS LA PSRAM. Il n'y a plus rien a liberer au bon moment :
+   * les echantillons restent charges pour la vie de la carte (voir
+   * SampleStore.h — le pire cas absolu tient dans 12,7 % de la PSRAM). Avec eux
+   * disparait l'acces-apres-liberation que ce vTaskDelay protegeait, et la
+   * latence de 32 a 72 ms qu'un rechargement coutait a chaque cue. */
 }
 
-bool samplerActif() { return moteurCourant == -2 && SampleStore::estCharge(); }
-const char* samplerNom() { return SampleStore::nomCharge(); }
+bool samplerActif() { return moteurCourant == -2 && SampleStore::nombreCharges() > 0; }
+const char* samplerNom() { return echantillonClavier; }
 
 bool setEngine(int moteur, bool persister) {
   if (moteur == -2) return false;        // passer par setSampler
   if (moteur < 0) {
-    sampleActif = false; libererPlaits();
+    arreterEchantillon(); libererPlaits();
     if (persister) memoriser("-1");
     derniereBasc = Bascule::Appliquee;
     return true;

@@ -43,18 +43,39 @@ void ecrireAbandon();
 
 bool supprimer(const char* nom);
 
-// ── Chargement en PSRAM ────────────────────────────────────────────────────
-// Analyse l'en-tête WAV, refuse ce qui n'est pas du PCM 16 bits, et copie les
-// données dans la PSRAM. Retourne false avec une raison lisible sinon.
-bool charger(const char* nom, String& raison);
-void decharger();
+// ── Chargement en PSRAM : TOUS, UNE FOIS ───────────────────────────────────
+//
+// Le magasin ne tenait qu'UN échantillon : deux pistes avec deux sons étaient
+// donc structurellement impossibles, le second chargement écrasant le premier.
+//
+// ET ON NE DÉCHARGE PLUS. La règle « un process absent de la cue est déchargé
+// après le release » existe pour libérer une ressource RARE. Ici elle n'a rien
+// à libérer, et la mesure le dit sans appel :
+//
+//     mapfs plafonne à 1 048 576 o — c'est TOUT ce que la carte peut stocker
+//     PSRAM libre                   8 249 372 o
+//     donc le pire cas absolu tient dans 12,7 % de la PSRAM
+//
+// Décharger ne rend donc rien qui manque, et recharger coûte 32 à 72 ms par
+// échantillon (mesuré) — une latence à chaque changement de cue, pour rien.
+// On charge tout au démarrage et on n'y revient plus. Ce n'est pas une
+// exception qui complique : c'est un mécanisme en moins.
+#ifndef SAMPLES_MAX
+#define SAMPLES_MAX 24        // mapfs n'en tiendra jamais beaucoup plus
+#endif
 
-bool            estCharge();
-const int16_t*  donnees();     // en PSRAM
-size_t          trames();      // nombre de trames (pas d'octets)
-bool            stereo();
-uint32_t        frequence();   // celle du fichier, pas celle de l'I2S
-const char*     nomCharge();
-size_t          octetsPsram();
+// Charge tout ce que mapfs contient. Retourne le nombre d'échantillons prêts.
+uint8_t chargerTout();
+// Recharge après un téléversement ou une suppression.
+void    oublierTout();
+
+uint8_t         nombreCharges();
+int             indexDe(const char* nom);      // -1 si absent
+const int16_t*  donnees(uint8_t i);            // en PSRAM
+size_t          trames(uint8_t i);
+bool            stereo(uint8_t i);
+uint32_t        frequence(uint8_t i);          // celle du fichier, pas celle de l'I2S
+const char*     nom(uint8_t i);
+size_t          octetsPsram();                 // total, tous échantillons
 
 }  // namespace SampleStore

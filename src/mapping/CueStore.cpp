@@ -184,10 +184,18 @@ void _appliquer(const Cue& c) {
    * carte sur son moteur precedent, et une note y sonnait en SINUS — constate
    * par l'utilisateur, « j'entends un sinus quand je joue trig wav ». */
   if (c.engine == -2) {
-    String nom;
-    bool boucle = false;
+    /* PLUSIEURS SONS A LA FOIS. Une cue peut porter DEUX pistes instrument avec
+     * deux sons — c'etait impossible : le magasin ne tenait qu'un echantillon et
+     * le lecteur n'avait qu'une voix. Les deux sont leves (SampleStore.h,
+     * AudioEngine.h).
+     *
+     * FORMAT : les valeurs multiples sont separees par des VIRGULES, et la
+     * POSITION fait la correspondance — exactement comme la chaine de scripts
+     * d'une cue. « sample=a.wav,b.wav ; loop=1,0 » lance a.wav en boucle et
+     * b.wav en coup unique. Une liste `loop` plus courte que `sample` complete
+     * avec sa derniere valeur : ecrire « loop=0 » une fois vaut pour tous. */
+    String noms, boucles, gains;
     bool surCue = true;      // defaut : le comportement d'origine de trig-wav
-    float gain = 1.0f;
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -196,40 +204,68 @@ void _appliquer(const Cue& c) {
       const int eq = kv.indexOf('=');
       if (eq > 0) {
         String cle = kv.substring(0, eq); cle.trim();
-        if      (cle == "sample") { nom = kv.substring(eq + 1); nom.trim(); }
-        else if (cle == "loop")   boucle = (kv.substring(eq + 1).toFloat() >= 0.5f);
+        if      (cle == "sample") { noms = kv.substring(eq + 1); noms.trim(); }
+        else if (cle == "loop")   { boucles = kv.substring(eq + 1); boucles.trim(); }
+        else if (cle == "gain")   { gains   = kv.substring(eq + 1); gains.trim(); }
         else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
-        else if (cle == "volume") { gain = kv.substring(eq + 1).toFloat();
-                                    AudioEngine::setVolume(gain); }
+        else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
       }
       debut = fin + 1;
     }
-    if (nom.length()) {
-      /* On ne RECHARGE pas ce qui est deja la : charger copie tout le PCM en
-       * PSRAM, et une cue qui rappelle le meme echantillon n'a aucune raison de
-       * payer ca. En revanche on le REDECLENCHE — arriver sur une cue joue son
-       * son, c'est toute la definition de trig-wav. */
-      bool pret = (nom == String(AudioEngine::samplerNom()));
-      if (!pret) {
-        String raison;
-        pret = AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/false);
-        if (!pret)
-          Serial.printf("[cues] echantillon %s refuse : %s\n", nom.c_str(), raison.c_str());
-      }
-      /* LE DECLENCHEMENT EST ICI, a l'activation de la cue — pas au clavier.
-       * C'est le comportement d'origine : un BufferSource demarre quand la case
-       * devient active, qui boucle si on le lui demande et s'arrete en partant. */
-      AudioEngine::fixerDeclenchementSurCue(surCue);
-      /* ON NE DECLENCHE QU'EN MODE « SUR CUE ». En mode clavier, arriver sur la
-       * cue CHARGE le son et attend la premiere touche — sinon le bloc partirait
-       * tout seul avant qu'on ait joue quoi que ce soit. */
-      if (pret && surCue) AudioEngine::declencherEchantillon(boucle);
-      else if (pret) AudioEngine::arreterEchantillon();
+
+    /* ON COUPE D'ABORD ce que la cue precedente tenait. Sans cela une boucle
+     * survivrait a la cue qui l'a lancee — le comportement fantome corrige
+     * partout ailleurs. Les sons de CETTE cue repartent juste apres. */
+    AudioEngine::arreterEchantillon();
+    AudioEngine::fixerDeclenchementSurCue(surCue);
+
+    if (!noms.length()) {
+      Serial.println("[cues] aucun echantillon nomme");
     } else {
-      /* Une cue qui ne nomme aucun echantillon n'en laisse pas tourner un :
-       * sinon la boucle de la cue precedente survivrait a la cue qui l'a
-       * lancee — exactement le comportement fantome corrige ailleurs. */
-      AudioEngine::arreterEchantillon();
+      /* Armer le lecteur une fois — il ne charge rien, tout est deja en PSRAM.
+       * Le premier nom sert d'echantillon par defaut au clavier. */
+      String premier = noms.substring(0, (noms.indexOf(',') < 0) ? noms.length()
+                                                                 : noms.indexOf(','));
+      premier.trim();
+      String raison;
+      if (!AudioEngine::setSampler(premier.c_str(), raison, /*persister=*/false))
+        Serial.printf("[cues] lecteur non arme : %s\n", raison.c_str());
+
+      int dn = 0, db = 0, dg = 0, rang = 0;
+      bool  derniereBoucle = false;
+      float dernierGain    = 1.0f;
+      while (dn < (int)noms.length()) {
+        int fn = noms.indexOf(',', dn); if (fn < 0) fn = noms.length();
+        String nom = noms.substring(dn, fn); nom.trim();
+
+        /* La boucle de MEME RANG, ou la derniere lue si la liste est plus
+         * courte. Une seule valeur vaut donc pour tous les sons. */
+        if (db < (int)boucles.length()) {
+          int fb = boucles.indexOf(',', db); if (fb < 0) fb = boucles.length();
+          derniereBoucle = (boucles.substring(db, fb).toFloat() >= 0.5f);
+          db = fb + 1;
+        }
+        /* LE GAIN DE MEME RANG. Sans lui, deux sons a plein volume SATURENT :
+         * mesure, nappe seule 22 503 et balayage seul 24 575, mais les deux
+         * ensemble 32 768 — le plafond. Chaque voix porte donc le volume de SON
+         * bloc, comme chaque piste a le sien dans le navigateur. Meme regle de
+         * completion : une seule valeur vaut pour tous. */
+        if (dg < (int)gains.length()) {
+          int fg = gains.indexOf(',', dg); if (fg < 0) fg = gains.length();
+          dernierGain = gains.substring(dg, fg).toFloat();
+          dg = fg + 1;
+        }
+
+        /* EN MODE CLAVIER on ne declenche pas : arriver sur la cue ARME et
+         * attend la premiere touche — sinon le bloc partirait tout seul. */
+        if (nom.length() && surCue) {
+          if (!AudioEngine::declencherEchantillon(nom.c_str(), derniereBoucle, dernierGain))
+            Serial.printf("[cues] echantillon « %s » absent de mapfs\n", nom.c_str());
+        }
+        dn = fn + 1; rang++;
+      }
+      Serial.printf("[cues] %d echantillon(s) %s\n", rang,
+                    surCue ? "lances" : "armes pour le clavier");
     }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le

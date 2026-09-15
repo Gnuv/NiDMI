@@ -270,15 +270,29 @@ void setupAudioAPI(AsyncWebServer& server) {
                 "{\"status\":\"error\",\"message\":\"aucun echantillon charge\"}");
             return;
         }
+        /* `name` DESIGNE LEQUEL. Le lecteur est polyphonique et le magasin tient
+         * tous les echantillons : « celui qui est charge » n'existe plus, il
+         * faut nommer. Sans nom, on retombe sur celui du clavier. */
+        const String nom = request->hasParam("name", true)
+                         ? request->getParam("name", true)->value()
+                         : String(AudioEngine::samplerNom());
         const bool boucle = request->hasParam("loop", true)
                          && request->getParam("loop", true)->value() != "0";
         const bool surCue = !request->hasParam("oncue", true)
                          || request->getParam("oncue", true)->value() != "0";
         AudioEngine::fixerDeclenchementSurCue(surCue);
-        if (surCue) AudioEngine::declencherEchantillon(boucle);
-        else        AudioEngine::arreterEchantillon();   // le clavier prendra la main
+        bool lance = false;
+        if (surCue) lance = AudioEngine::declencherEchantillon(nom.c_str(), boucle);
+        else        AudioEngine::arreterEchantillonNomme(nom.c_str());  // au clavier de jouer
+        if (surCue && !lance) {
+            request->send(404, "application/json",
+                String("{\"status\":\"error\",\"message\":\"echantillon « ")
+                + nom + " » absent de la carte\"}");
+            return;
+        }
         request->send(200, "application/json",
-            String("{\"status\":\"ok\",\"loop\":") + (boucle ? "true" : "false")
+            String("{\"status\":\"ok\",\"name\":\"") + nom
+            + "\",\"loop\":" + (boucle ? "true" : "false")
             + ",\"oncue\":" + (surCue ? "true" : "false") + "}");
     });
 

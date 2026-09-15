@@ -189,8 +189,16 @@ bool samplerActif();
 /* `trig-wav` : demarre a l'ARRIVEE SUR UNE CUE, a la hauteur du fichier, et
  * boucle si la cue le demande. Ni clavier ni transposition — c'est son
  * comportement d'origine cote navigateur (un BufferSource avec `loop`). */
-void declencherEchantillon(bool boucle, float gain = 1.0f);
-void arreterEchantillon();
+/* Declenche UN echantillon NOMME sur une voix libre (la plus ancienne sinon).
+ * `demiTons` = 0 : a la hauteur du fichier — le cas de trig-wav sur cue.
+ * HUIT VOIX : mesure a ~380 cycles/echantillon la voix, sur 5 000 de budget,
+ * soit 62 % a huit. Deux pistes instrument avec deux sons en meme temps sont
+ * donc possibles — elles ne l'etaient pas, le lecteur etant monophonique et le
+ * magasin ne tenant qu'un echantillon. */
+bool declencherEchantillon(const char* nom, bool boucle = false,
+                           float gain = 1.0f, float demiTons = 0.0f);
+void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
+void arreterEchantillon();                       // toutes les voix
 /* QUI DECLENCHE. `true` (defaut) : la cue, a la hauteur du fichier — l'original.
  * `false` : le clavier, transpose par la note. Les deux marchent ; c'est le bloc
  * qui tranche, par son parametre `oncue`. */
