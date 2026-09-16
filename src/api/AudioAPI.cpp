@@ -368,7 +368,14 @@ void setupAudioAPI(AsyncWebServer& server) {
      * SEULE (l'enchainement minute) ; elle n'est plus le seul chemin. */
     server.on("/api/cues/play", HTTP_POST, [](AsyncWebServerRequest *request){
         Cues::demarrer();
-        request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+        /* « ok » NE DOIT PAS VOULOIR DIRE « j'ai repondu ». La route rendait
+         * status ok alors que la lecture n'avait pas demarre — mesure, avec
+         * « lecture: false » dans la meme reponse. Un appelant qui lit le statut
+         * et pas le detail croyait donc que ca jouait. */
+        const bool parti = Cues::enLecture();
+        request->send(200, "application/json",
+                      String("{\"status\":\"") + (parti ? "ok" : "rien a jouer")
+                      + "\",\"index\":" + Cues::indexCourant()
                       + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
                       + ",\"restant\":" + String(Cues::restantSec(), 2)
                       + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");

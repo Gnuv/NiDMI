@@ -366,7 +366,14 @@ bool ecrireTout(const String& contenuTexte) {
   if (!f) return false;
   const size_t n = f.print(contenuTexte);
   f.close();
-  Serial.printf("[cues] liste ecrite : %u o, %d cues\n", (unsigned)n, nombre());
+  /* UNE LISTE PLUS COURTE NE LAISSE PAS LA TETE DEHORS. L'index memorise
+   * pouvait depasser la nouvelle fin — installer une composition plus courte
+   * laissait alors le transport bloque : `demarrer()` ne trouvait plus sa cue et
+   * abandonnait, porte de silence fermee, pendant qu'un `goto` declenchait des
+   * sons dans le vide. Trouve par le banc trig-wav (MESURES §136). */
+  const int total = nombre();
+  if (_index >= total) _index = (total > 0) ? total - 1 : 0;
+  Serial.printf("[cues] liste ecrite : %u o, %d cues\n", (unsigned)n, total);
   return n == contenuTexte.length();
 }
 
@@ -438,7 +445,16 @@ void demarrer() {
     Serial.println("[cues] reprise");
     return;
   }
-  if (!aller(_index)) { Serial.println("[cues] aucune cue a jouer"); return; }
+  /* ON RAMENE LA TETE DANS LA LISTE plutot que d'abandonner. L'index vient de la
+   * session precedente ou d'une composition plus longue : s'il depasse, la bonne
+   * reponse est de jouer la premiere cue, pas de refuser de demarrer en silence. */
+  const int total = nombre();
+  if (total <= 0) { Serial.println("[cues] aucune cue a jouer"); return; }
+  if (_index < 0 || _index >= total) {
+    Serial.printf("[cues] index %d hors de la liste (%d cues) — ramene a 0\n", _index, total);
+    _index = 0;
+  }
+  if (!aller(_index)) { Serial.println("[cues] cue illisible"); return; }
   _lecture = true;
   AudioEngine::ouvrirSon();     // PLAY ouvre la porte : c'est le transport qui decide
   /* ET L'HORLOGE DES SCRIPTS. Le sequenceur embarque et le transport de l'app
