@@ -391,9 +391,39 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
 }
 
 /* LA PAGE DE SECOURS, extraite en fonction : elle est servie par « /secours »
- * ET par « / » quand la memoire ne permet plus l'interface complete. */
-static void _sertSecours(AsyncWebServerRequest *request){
-    request->send(200, "text/html; charset=utf-8",
+ * ET par « / » quand la memoire ne permet plus l'interface complete.
+ *
+ * ── ELLE COMPTE COMME PREUVE DE VIE ────────────────────────────────────────
+ * Elle ne comptait pas, et la carte s'en est rendue MUETTE.
+ *
+ * La boucle, mesuree de bout en bout :
+ *     demarrage avec audio      10 228 o de bloc contigu
+ *     un chargement d'app    ->  7 668 o   (les ~70 fichiers du navigateur)
+ *     « / » sert alors          cette page-ci, pas l'app
+ *     et cette page             n'appelait JAMAIS validerConfigBoot()
+ *  -> le compteur de boot       ne pouvait plus jamais retomber a zero
+ *  -> au 3e demarrage           le garde-fou coupait l'audio
+ *
+ * Constate sur la carte : reset_reason PANIQUE, boot_attempts 3,
+ * boot_disabled true, started false. L'issue de secours ne comptait pas
+ * comme une sortie.
+ *
+ * Or ce que le garde-fou cherche a garantir, il le dit lui-meme : « la carte
+ * demarre nue, JOIGNABLE, FLASHABLE ». Si cette page part, la carte est
+ * joignable et flashable — le garde-fou n'a plus rien a proteger, et se taire
+ * lui faisait couper le son. Il coupait l'AUDIO pour une famine causee par le
+ * SERVEUR WEB, l'inverse exact de l'ordre du projet.
+ *
+ * Il garde tout son role : quand meme CETTE page ne part plus, rien ne valide,
+ * et il tranche. C'est le seul cas ou il doit encore le faire.
+ *
+ * ── ET LA PREUVE EST SUR LE DERNIER MORCEAU DU CORPS ───────────────────────
+ * Pas a l'entree du gestionnaire. Cette faute a DEJA ete commise ici (§20,
+ * piege 2) : une carte affamee accepte la connexion et parse la requete, mais
+ * n'ecoule jamais le corps — « le gestionnaire s'est execute » ne prouve pas
+ * « la page est sortie ». La page passe donc par un flux a rappel, comme
+ * l'archive, pour qu'on sache QUAND elle est partie. */
+static const char SECOURS_HTML[] =
     "<!doctype html><meta charset=utf-8><title>NiDMI - secours</title>\n"
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">\n"
     "<style>body{background:#1a1a1a;color:#ddd;font:14px/1.5 system-ui,sans-serif;margin:0;padding:20px;max-width:34em}\n"
@@ -429,7 +459,23 @@ static void _sertSecours(AsyncWebServerRequest *request){
     "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'engine=-1'});reb();}\n"
     "async function reb(){try{await fetch('/api/system/reboot',{method:'POST'});}catch(e){}attendre();}\n"
     "etat();\n"
-    "</script>");
+    "</script>";
+
+static void _sertSecours(AsyncWebServerRequest *request){
+    const size_t taille = sizeof(SECOURS_HTML) - 1;
+    AsyncWebServerResponse *rep = request->beginResponse("text/html; charset=utf-8", taille,
+        [taille](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            const size_t aEcrire = (taille - index < maxLen) ? (taille - index) : maxLen;
+            if (aEcrire > 0) memcpy(buffer, SECOURS_HTML + index, aEcrire);
+            /* Dernier morceau : le corps est entierement ecoule. Ne fait que
+               lever un drapeau — on est dans async_tcp, l'ecriture NVS a lieu
+               dans nidmi_loop() via entretienBoot(). */
+            if (aEcrire > 0 && index + aEcrire >= taille)
+                AudioEngine::validerConfigBoot();
+            return aEcrire;
+        });
+    rep->addHeader("Cache-Control", "no-store");
+    request->send(rep);
 }
 
 void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {

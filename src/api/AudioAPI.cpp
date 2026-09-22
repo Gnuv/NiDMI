@@ -115,6 +115,26 @@ void setupAudioAPI(AsyncWebServer& server) {
         /* PAS DE SYNTHESE SUR UNE CARTE SEULE — et on dit POURQUOI, avec ce
          * qui reste. Un refus sans alternative envoie chercher une panne qui
          * n'existe pas. */
+        /* -2 N'EST PAS UN MOTEUR DE CETTE ROUTE, et le dire vaut mieux que
+         * laisser l'echec retomber dans le 507 generique.
+         *
+         * setEngine() rejette -2 en PREMIERE ligne (« passer par setSampler »).
+         * La route repondait alors « Plaits indisponible (tas insuffisant ?) ».
+         * Faux deux fois : il n'etait pas question de Plaits, et le tas n'y
+         * etait pour rien. Vecu — en voulant rearmer le garde-fou de boot apres
+         * une coupure, cette reponse a envoye chercher un probleme de memoire
+         * qui n'existait pas, pendant que le rearmement, lui, n'avait PAS eu
+         * lieu. Le commentaire juste en dessous le dit deja : « un message faux
+         * coute plus cher qu'une absence de message ». Il valait aussi pour
+         * celui-la. */
+        if (n == -2) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":"
+                "\"L'echantillonneur ne se choisit pas ici : POST /api/audio/sampler "
+                "avec name=<fichier.wav> (name vide pour l'arreter). Cette route ne "
+                "prend que -1 (aucun moteur) et 0..23 (synthese).\"}");
+            return;
+        }
         if (n >= 0 && !AudioEngine::syntheseLourdeDisponible()) {
             request->send(409, "application/json",
                 "{\"status\":\"error\",\"synthese\":false,\"message\":"
