@@ -31,12 +31,28 @@ private:
     UsbMidiManager usbMidiInstance;
     bool useStaticSta = false;
     IPAddress staIp, staGw, staSn;
+    /* Retenus au begin() pour que la radio puisse etre allumee PLUS TARD, sans
+     * que l'appelant ait a garder ces chaines vivantes. Voir demarrerRadioWifi(). */
+    String apSsidRetenu, apPassRetenu;
+    bool   apOnlyRetenu = false;
+    bool   radioAllumee = false;
     
 public:
     ServerCore();
     
     // Initialisation (apOnlyMode: true si aucun STA en NVS — WIFI_AP pur évite boucles d’auth sur certains ESP32)
     void begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode = false);
+
+    /* ── LA RADIO WIFI, SEPAREE DU RESTE ───────────────────────────────────
+     * begin() faisait trois choses d'un bloc : allumer la radio, publier le
+     * mDNS, installer le serveur web. Or en mode « USB seul » on veut les deux
+     * dernieres SANS la premiere — AsyncWebServer ecoute sur INADDR_ANY, il
+     * sert donc tres bien sur le netif USB.
+     *
+     * Idempotent : un second appel ne fait rien. C'est ce qui permet au repli
+     * de l'appeler sans savoir si la radio est deja la. */
+    void demarrerRadioWifi();
+    bool radioWifiAllumee() const { return radioAllumee; }
     void connectSta(const char* staSsid, const char* staPass);
     void setStaticStaIp(IPAddress ip, IPAddress gateway, IPAddress subnet);
     void reconfigureMdns(const char* hostname);

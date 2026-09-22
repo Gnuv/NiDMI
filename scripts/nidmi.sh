@@ -128,6 +128,7 @@ VARIANT=""
 USB_MIDI_DEFINE=()
 
 USB_NET_MODE=false
+USB_SEUL_MODE=false
 
 # Parser les arguments pour --lang, --board, --light, --pagination, --no-pagination, --large-app, --no-large-app, --split-fs, --port
 ARGS=()
@@ -145,6 +146,18 @@ while [[ $# -gt 0 ]]; do
             # Variant : interface web servie aussi par le cable USB (CDC-NCM).
             # S3 uniquement, et impose usb_mode=0 (donc USB-MIDI actif).
             USB_NET_MODE=true
+            shift
+            ;;
+        --usb-seul)
+            # Le cable OU le WiFi, pas les deux. Mesure (MESURES §140) : faire
+            # tourner les deux coute 8 192 o de bloc contigu et double la gigue
+            # MIDI. La radio WiFi n'est donc pas allumee au demarrage.
+            # IMPLIQUE --usb-net : sans lui la carte n'aurait AUCUN reseau (le
+            # firmware refuse de compiler dans ce cas, pas de piege silencieux).
+            # Porte son REPLI : si le lien USB n'est pas monte au bout de 20 s,
+            # la radio s'allume — on ne peut pas s'enfermer.
+            USB_NET_MODE=true
+            USB_SEUL_MODE=true
             shift
             ;;
         --port)
@@ -339,6 +352,8 @@ show_help() {
     echo "                    off = USB-MIDI désactivé, série stable (HW CDC/JTAG) ; on = MIDI USB (OTG)"
     echo "  --board BOARD - Type de carte ESP32 (c3|s3, défaut: s3)"
     echo "  --usb-net     - Variant S3 : sert aussi l'interface web par le câble USB (CDC-NCM)"
+    echo "  --usb-seul    - Comme --usb-net, mais SANS allumer le WiFi (le câble OU le WiFi)."
+    echo "                  Repli automatique : si le lien USB ne monte pas en 20 s, la radio s'allume."
     echo "                  c3 = XIAO ESP32-C3"
     echo "                  s3 = XIAO ESP32-S3"
     echo "  --port DEVICE - Port série explicite (ex: /dev/ttyUSB0, /dev/ttyACM0, /dev/cu.usbmodem*)"
@@ -473,6 +488,9 @@ sync_files() {
     _fw_ver=$(cd "$REPO_DIR" && git describe --tags --always --dirty 2>/dev/null || date +%Y%m%d-%H%M%S)
     _fw_variant=$([ "${_usb_midi_flag:-0}" = "1" ] && echo "usbmidi-on" || echo "usbmidi-off")
     [ "${USB_NET_MODE:-false}" = true ] && _fw_variant="${_fw_variant}+usbnet"
+    # « usbseul » REMPLACE « usbnet » dans l'etiquette : les deux seraient
+    # redondants, et surtout le second seul ferait croire que le WiFi tourne.
+    [ "${USB_SEUL_MODE:-false}" = true ] && _fw_variant="${_fw_variant%+usbnet}+usbseul"
     # CE QUE LA CARTE SAIT FAIRE, DIT DANS SON NUMERO. Sans synthese, l'image
     # Plaits choisie est inerte : l'annoncer laisserait croire a une capacite
     # qui n'existe pas. Avec, on nomme laquelle des deux images est dedans.
@@ -781,6 +799,10 @@ compile_sketch() {
             EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_NET=1")
         fi
 
+        if [ "$USB_SEUL_MODE" = true ]; then
+            EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_SEUL=1")
+        fi
+
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
         if [ ${#USB_MIDI_DEFINE[@]} -gt 0 ]; then
             EXTRA_FLAGS_ARRAY+=("${USB_MIDI_DEFINE[@]}")
@@ -890,6 +912,10 @@ build_binary() {
 
         if [ "$USB_NET_MODE" = true ]; then
             EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_NET=1")
+        fi
+
+        if [ "$USB_SEUL_MODE" = true ]; then
+            EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_SEUL=1")
         fi
 
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)

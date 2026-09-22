@@ -1,5 +1,6 @@
 #include "ServerCore.h"
 #include "../Globals.h"
+#include "../network/UsbNetBootstrap.h"   // NIDMI_USB_SEUL
 #include <ESPmDNS.h>
 #include <Preferences.h>
 // setupWebAPI est déclaré plus bas et défini dans WebAPI.cpp
@@ -12,6 +13,41 @@ ServerCore serverCore;
 
 ServerCore::ServerCore()
     : server(80), ws("/ws") {}
+
+/* ── ALLUMER LA RADIO, SEPAREMENT ──────────────────────────────────────────
+ * Extrait de begin() sans rien changer a son contenu : meme mode, meme
+ * puissance, meme IP d'AP, meme canal, meme delai de 100 ms.
+ *
+ * Idempotent. Le repli de nidmi_loop() appelle sans savoir, et un second appel
+ * ne doit pas reconfigurer un AP qui sert deja des clients. */
+void ServerCore::demarrerRadioWifi() {
+    if (radioAllumee) return;
+    radioAllumee = true;
+
+    /* Sans STA enregistré : AP seul (WIFI_AP). APSTA avec interface STA inactive peut provoquer
+     * échecs ou boucles « mot de passe » / reconnexion sur téléphones (notamment ESP32-C3/S3). */
+    if (apOnlyRetenu) {
+        WiFi.mode(WIFI_MODE_AP);
+        Serial.println("[ServerCore] WiFi: mode AP uniquement");
+    } else {
+        WiFi.mode(WIFI_MODE_APSTA);
+    }
+
+    // Augmenter la puissance WiFi pour XIAO_ESP32C3
+    WiFi.setTxPower(WIFI_POWER_19_5dBm); // Puissance maximale
+
+    /* Configurer l'IP de l'AP explicitement à 192.168.4.1 */
+    IPAddress apIp = IPAddress(192, 168, 4, 1);
+    IPAddress apGateway = IPAddress(192, 168, 4, 1);
+    IPAddress apSubnet = IPAddress(255, 255, 255, 0);
+    WiFi.softAPConfig(apIp, apGateway, apSubnet);
+
+    /* Canal 1 : meilleure compatibilité avec les clients 2,4 GHz */
+    WiFi.softAP(apSsidRetenu.c_str(), apPassRetenu.c_str(), 1);
+
+    /* Attendre que l'AP soit prêt avant de continuer */
+    delay(100);
+}
 
 void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode) {
     nidmi_ws_file_init();   // avant tout client : voir ServerCore.h
@@ -26,32 +62,20 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
         }
     });
 
-    /* Sans STA enregistré : AP seul (WIFI_AP). APSTA avec interface STA inactive peut provoquer
-     * échecs ou boucles « mot de passe » / reconnexion sur téléphones (notamment ESP32-C3/S3). */
-    if (apOnlyMode) {
-        WiFi.mode(WIFI_MODE_AP);
-        Serial.println("[ServerCore] WiFi: mode AP uniquement");
-    } else {
-        WiFi.mode(WIFI_MODE_APSTA);
-    }
-    
-    // Augmenter la puissance WiFi pour XIAO_ESP32C3
-    WiFi.setTxPower(WIFI_POWER_19_5dBm); // Puissance maximale
-    
-    /* Configurer l'IP de l'AP explicitement à 192.168.4.1 */
-    IPAddress apIp = IPAddress(192, 168, 4, 1);
-    IPAddress apGateway = IPAddress(192, 168, 4, 1);
-    IPAddress apSubnet = IPAddress(255, 255, 255, 0);
-    WiFi.softAPConfig(apIp, apGateway, apSubnet);
-    
-    /* Canal 1 : meilleure compatibilité avec les clients 2,4 GHz */
-    WiFi.softAP(apSsid, apPass, 1);
-    
-    /* Attendre que l'AP soit prêt avant de continuer */
-    delay(100);
-    
-    /* Vérifier l'IP de l'AP (devrait être 192.168.4.1) */
-    apIp = WiFi.softAPIP();
+    /* La radio est retenue pour plus tard : en mode « USB seul » on ne l'allume
+     * pas ici, et le repli de nidmi_loop() s'en chargera si le lien USB ne
+     * monte pas. Voir demarrerRadioWifi(). */
+    apSsidRetenu = apSsid ? apSsid : "";
+    apPassRetenu = apPass ? apPass : "";
+    apOnlyRetenu = apOnlyMode;
+#if !NIDMI_USB_SEUL
+    demarrerRadioWifi();
+#else
+    Serial.println("[ServerCore] USB SEUL : radio WiFi NON allumee au demarrage.");
+    Serial.printf( "             repli dans %d s si le lien USB ne monte pas.\n",
+                   (int)(NIDMI_USB_SEUL_REPLI_MS / 1000));
+#endif
+    IPAddress apIp = WiFi.softAPIP();
     
     Serial.begin(115200);
     Serial.println();

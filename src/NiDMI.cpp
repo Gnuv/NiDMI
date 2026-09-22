@@ -34,6 +34,19 @@ static String g_staSnStr;
 static unsigned long g_lastStaConnectAttempt = 0;
 static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative après 10 s
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
+/* Mode « USB seul » : depuis quand le lien USB est-il BAS ? 0 = il est haut.
+ *
+ * Premiere version : on ne repliait que si le lien n'etait JAMAIS monte, au
+ * motif qu'un lien tombe apres coup signifie « l'hote est la ». NOTRE PROPRE
+ * MESURE dit le contraire (§140) : le lien monte tres bien, puis MEURT sous une
+ * charge de navigateur, et ne se releve pas — l'hote continuant d'afficher
+ * « active ». Cette exemption enfermait donc la carte exactement dans le cas
+ * qu'on avait mesure.
+ *
+ * On replie donc sur une absence CONTINUE, qu'elle ait ete precedee d'un lien
+ * ou non. La radio, une fois allumee, le reste : on ne joue pas a l'eteindre et
+ * la rallumer sous l'utilisateur. */
+static unsigned long g_usbSeulLienBasDepuis = 0;
 static unsigned long g_staReconnectInterval = STA_RECONNECT_BASE_MS;
 static bool g_staWasConnected = false;  // pour logguer les transitions STA (visibilité)
 
@@ -243,7 +256,14 @@ void nidmi_begin() {
                 Serial.printf("[NiDMI] STA static IP: %s GW: %s SN: %s\n", g_staIpStr.c_str(), g_staGwStr.c_str(), g_staSnStr.c_str());
             }
         }
-        serverCore.connectSta(g_staSsid.c_str(), g_staPass.length() > 0 ? g_staPass.c_str() : nullptr);
+        /* En « USB seul » la radio n'est pas allumee : demander une association
+         * STA maintenant echouerait, et surtout allumerait la pile WiFi qu'on
+         * cherche justement a ne pas payer. Le repli de nidmi_loop() rallume la
+         * radio, et la reconnexion automatique qui vit deja dans cette boucle
+         * fait le reste — rien a dupliquer ici. */
+        if (serverCore.radioWifiAllumee()) {
+            serverCore.connectSta(g_staSsid.c_str(), g_staPass.length() > 0 ? g_staPass.c_str() : nullptr);
+        }
     } else {
         Serial.println("[NiDMI] No STA configuration found");
     }
@@ -411,6 +431,33 @@ void nidmi_loop() {
     // Tentative de reconnexion STA automatique si des identifiants sont connus.
     // connectSta() est non bloquant : on se contente de relancer WiFi.begin() et
     // d'espacer les tentatives via un backoff (10 s -> 60 s) remis à zéro une fois connecté.
+    /* ── LE REPLI DU MODE « USB SEUL » ────────────────────────────────────
+     * On n'a pas besoin des deux acces en meme temps : c'est le cable OU le
+     * WiFi. Mais si le lien USB ne monte pas — cable sur un chargeur, hote qui
+     * n'active jamais l'interface de donnees, descripteur refuse — la carte
+     * n'est joignable que par le bouton BOOT. Alors on rallume la radio.
+     *
+     * On regarde linkUp(), pas « le cable est branche » : c'est l'ACTIVATION de
+     * l'interface de donnees par l'hote qui fait un lien utilisable, et elle
+     * peut manquer sur un cable parfaitement enfonce (MESURES §140).
+     *
+     * Une seule fois : radioWifiAllumee() garde l'etat, demarrerRadioWifi() est
+     * idempotent. La reconnexion STA juste en dessous prend alors le relais. */
+    if (NIDMI_USB_SEUL && !serverCore.radioWifiAllumee()) {
+        const unsigned long maintenant = millis();
+        if (nidmi_usbnet::linkUp()) {
+            g_usbSeulLienBasDepuis = 0;            // le lien porte : rien a faire
+        } else {
+            if (g_usbSeulLienBasDepuis == 0) g_usbSeulLienBasDepuis = maintenant;
+            if (maintenant - g_usbSeulLienBasDepuis >= NIDMI_USB_SEUL_REPLI_MS) {
+                NIDMI_WEB_LOG("[USB seul] lien USB bas depuis %d s — la radio WiFi est rallumee.",
+                              (int)(NIDMI_USB_SEUL_REPLI_MS / 1000));
+                Serial.println("[USB seul] REPLI : lien USB bas, radio WiFi rallumee.");
+                serverCore.demarrerRadioWifi();
+            }
+        }
+    }
+
     if (g_staSsid.length() > 0) {
         wl_status_t staStatus = WiFi.status();
         unsigned long now = millis();
