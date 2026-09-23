@@ -43,6 +43,28 @@
 #error "NIDMI_USB_SEUL sans NIDMI_USB_NET : la carte n'aurait AUCUN acces reseau."
 #endif
 
+/* ── NIDMI_USB_SEUL EST CONDAMNE TANT QU'IL N'EST PAS CORRIGE ─────────────
+ * Flashe le 23/09 : la carte n'a JAMAIS demarre. Ni sur le bus USB, ni en
+ * WiFi — recuperee au bouton BOOT, et la recuperation a efface la flash
+ * entiere (MESURES §142).
+ *
+ * Cause tres probable : MDNS.begin() s'execute dans serverCore.begin(), bien
+ * AVANT nidmi_usbnet::begin() — celui qui pose esp_netif et la boucle
+ * d'evenements. Avec le WiFi, c'est son init qui les posait avant. Sans lui,
+ * personne : mdns_init() part sur du vide, au demarrage. La doc du spike le
+ * disait (« mDNS APRES usbNet.begin() ») ; notre ordre d'appels est l'inverse.
+ *
+ * Et le repli ne pouvait rien : il vit dans nidmi_loop(), que setup() n'atteint
+ * jamais. UNE SORTIE POSEE APRES LA PORTE QUI SE FERME N'EST PAS UNE SORTIE.
+ *
+ * Avant de lever cette garde : (1) remettre esp_netif avant le mDNS dans ce
+ * mode, (2) poser le repli au DEMARRAGE — compteur en NVS comme le garde-fou
+ * audio, pas dans la boucle — (3) le voir tourner sur une carte dont la flash
+ * a d'abord ete SAUVEGARDEE (esptool read-flash marche en mode download). */
+#if NIDMI_USB_SEUL
+#error "NIDMI_USB_SEUL met la carte hors service au demarrage (MESURES §142). Ne pas lever sans lire ce commentaire."
+#endif
+
 namespace nidmi_usbnet {
 
 /** Vrai si le firmware a ete compile avec le variant USB net. */
