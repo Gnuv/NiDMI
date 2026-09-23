@@ -8,6 +8,7 @@
 #include "mapping/MappingEngine.h"
 #include "network/UsbMidiManager.h"
 #include "network/UsbNetBootstrap.h"
+#include <esp_heap_caps.h>
 #include "server/WebDebugConsole.h"
 #include "Globals.h"
 #include <Preferences.h>
@@ -34,20 +35,30 @@ static String g_staSnStr;
 static unsigned long g_lastStaConnectAttempt = 0;
 static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative après 10 s
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
-/* ── LE CABLE OU LE WIFI, EN MARCHE ──────────────────────────────────────────
- * La coupure du WiFi est une COMMANDE (POST /api/reseau/wifi) executee ICI :
- * WiFi.mode() depuis async_tcp bloquerait la tache qui doit justement emettre
- * la reponse. Differee de 300 ms, pour que cette reponse parte avant que son
- * chemin — peut-etre le WiFi lui-meme — ne disparaisse.
- * Rien n'est memorise : un redemarrage ramene TOUJOURS le WiFi. */
-static volatile uint8_t g_wifiDemande = 0;          // 0 rien, 1 couper, 2 rallumer
-static unsigned long    g_wifiDemandeA = 0;
-static bool             g_wifiCoupeParCommande = false;
-/* Depuis quand le lien USB est-il bas, WiFi coupe ? 0 = haut. Le lien a deja
- * ete vu MOURIR sous charge sans se relever (§140) : on ne suppose pas qu'un
- * lien monte le reste. 20 s d'absence CONTINUE et la radio se rallume. */
-static unsigned long    g_lienBasDepuis = 0;
-static const unsigned long REPLI_WIFI_MS = 20000;
+/* ── LE CABLE OU LE WIFI ─────────────────────────────────────────────────────
+ * Une premiere version coupait le WiFi SUR COMMANDE, avec un repli : lien USB
+ * bas 20 s -> radio rallumee. Le repli croyait linkUp(). Or linkUp() a ete vu
+ * VRAI sur un lien MORT, deux fois (§140, §143) : les deux bouts disent
+ * « monte », plus aucune trame ne passe. Couper le WiFi dans cet etat rendait
+ * la carte injoignable jusqu'a ce qu'on la debranche. Cette coupure est
+ * RETIREE tant que le lien USB n'a pas de preuve de vie qui ne mente pas.
+ *
+ * Reste L'ESSAI : couper le WiFi N secondes, mesurer, le rallumer — sur son
+ * SEUL minuteur, sans rien attendre du lien USB. Il marche donc sur tous les
+ * builds, et le pire cas est N secondes sans reseau. Rien n'est memorise. */
+static volatile bool g_wifiRallumerDemande = false;
+static unsigned long g_wifiRallumerA = 0;
+static volatile bool g_essaiDemande = false;
+static unsigned long g_essaiDemandeA = 0;
+static unsigned long g_essaiDureeDemandee = 10000;
+struct EssaiWifi {
+    bool enCours = false, fait = false, mesurePendant = false, mesureApres = false;
+    unsigned long debut = 0, fin = 0, dureeMs = 0;
+    uint32_t blocAvant = 0,   tasAvant = 0;
+    uint32_t blocPendant = 0, tasPendant = 0;
+    uint32_t blocApres = 0,   tasApres = 0;
+};
+static EssaiWifi g_essai;
 static unsigned long g_staReconnectInterval = STA_RECONNECT_BASE_MS;
 static bool g_staWasConnected = false;  // pour logguer les transitions STA (visibilité)
 
@@ -102,10 +113,25 @@ extern "C" void nidmi_requestDownloadMode(){
     g_requestDownload = true;
 }
 
-// Le cable OU le WiFi — voir g_wifiDemande. La route verifie le lien avant.
-extern "C" void nidmi_requestWifi(bool allumer){
-    g_wifiDemandeA = millis();
-    g_wifiDemande = allumer ? 2 : 1;
+// Le cable OU le WiFi — voir « LE CABLE OU LE WIFI ».
+extern "C" void nidmi_requestRallumerWifi(){
+    g_wifiRallumerA = millis();
+    g_wifiRallumerDemande = true;
+}
+extern "C" void nidmi_requestEssaiWifi(unsigned long dureeMs){
+    g_essaiDureeDemandee = dureeMs;
+    g_essaiDemandeA = millis();
+    g_essaiDemande = true;
+}
+String nidmi_essaiWifiJson(){
+    const EssaiWifi e = g_essai;
+    String j = "{\"etat\":\"";
+    j += e.enCours ? "wifi_coupe" : (e.fait ? (e.mesureApres ? "fait" : "retour") : "jamais");
+    j += "\",\"duree_ms\":" + String(e.dureeMs);
+    j += ",\"avant\":{\"bloc\":"      + String(e.blocAvant)   + ",\"tas\":" + String(e.tasAvant)   + "}";
+    j += ",\"wifi_coupe\":{\"bloc\":" + String(e.blocPendant) + ",\"tas\":" + String(e.tasPendant) + "}";
+    j += ",\"apres\":{\"bloc\":"      + String(e.blocApres)   + ",\"tas\":" + String(e.tasApres)   + "}}";
+    return j;
 }
 
 // Le mapping GPIO est maintenant géré par PinMapper
@@ -429,41 +455,45 @@ void nidmi_loop() {
     }
 
     /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────── */
-    if (g_wifiDemande && millis() - g_wifiDemandeA >= 300) {
-        const uint8_t d = g_wifiDemande;
-        g_wifiDemande = 0;
-        if (d == 1) {
-            // La route a verifie le lien ; 300 ms ont passe, on le reverifie.
-            if (nidmi_usbnet::linkUp()) {
-                serverCore.couperRadioWifi();
-                g_wifiCoupeParCommande = true;
-                g_lienBasDepuis = 0;
-                NIDMI_WEB_LOG("[reseau] WiFi coupe sur commande : la carte ne repond plus que par le cable.");
-            }
-        } else {
+    if (g_wifiRallumerDemande && millis() - g_wifiRallumerA >= 300) {
+        g_wifiRallumerDemande = false;
+        serverCore.demarrerRadioWifi();
+        g_lastStaConnectAttempt = 0;             // reconnexion STA sans attendre
+        g_staReconnectInterval = STA_RECONNECT_BASE_MS;
+    }
+    if (g_essaiDemande && !g_essai.enCours && millis() - g_essaiDemandeA >= 300) {
+        g_essaiDemande = false;
+        g_essai = EssaiWifi();
+        g_essai.dureeMs   = g_essaiDureeDemandee;
+        g_essai.blocAvant = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        g_essai.tasAvant  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        serverCore.couperRadioWifi();
+        g_essai.debut   = millis();
+        g_essai.enCours = true;
+    }
+    if (g_essai.enCours) {
+        const unsigned long ecoule = millis() - g_essai.debut;
+        // 3 s : le temps que esp_wifi_deinit() ait tout rendu.
+        if (!g_essai.mesurePendant && ecoule >= 3000) {
+            g_essai.blocPendant = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+            g_essai.tasPendant  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+            g_essai.mesurePendant = true;
+        }
+        // LE MINUTEUR, ET RIEN D'AUTRE : la radio revient quoi qu'il arrive.
+        if (ecoule >= g_essai.dureeMs) {
             serverCore.demarrerRadioWifi();
-            g_wifiCoupeParCommande = false;
-            g_lastStaConnectAttempt = 0;             // reconnexion STA sans attendre
+            g_lastStaConnectAttempt = 0;
             g_staReconnectInterval = STA_RECONNECT_BASE_MS;
-            NIDMI_WEB_LOG("[reseau] WiFi rallume sur commande.");
+            g_essai.enCours = false;
+            g_essai.fait = true;
+            g_essai.fin = millis();
         }
     }
-    // LE REPLI. Posé dans la boucle, et cette fois c'est le bon endroit : la
-    // coupure n'arrive qu'en marche, setup() est derriere nous.
-    if (g_wifiCoupeParCommande && !serverCore.radioWifiAllumee()) {
-        if (nidmi_usbnet::linkUp()) {
-            g_lienBasDepuis = 0;
-        } else {
-            const unsigned long maintenant = millis();
-            if (g_lienBasDepuis == 0) g_lienBasDepuis = maintenant;
-            if (maintenant - g_lienBasDepuis >= REPLI_WIFI_MS) {
-                serverCore.demarrerRadioWifi();
-                g_wifiCoupeParCommande = false;
-                g_lastStaConnectAttempt = 0;
-                g_staReconnectInterval = STA_RECONNECT_BASE_MS;
-                NIDMI_WEB_LOG("[reseau] REPLI : lien USB bas depuis 20 s, WiFi rallume.");
-            }
-        }
+    // 5 s apres le retour : la radio a repris ce qu'elle prend. Que reste-t-il ?
+    if (g_essai.fait && !g_essai.mesureApres && millis() - g_essai.fin >= 5000) {
+        g_essai.blocApres = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        g_essai.tasApres  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        g_essai.mesureApres = true;
     }
 
     // Tentative de reconnexion STA automatique si des identifiants sont connus.

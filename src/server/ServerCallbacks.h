@@ -35,10 +35,12 @@ void nidmi_requestReboot();
 void nidmi_requestDownloadMode();
 
 /**
- * @brief Couper (false) ou rallumer (true) la radio WiFi, en marche, differe
- * de 300 ms. Voir NiDMI.cpp, « LE CABLE OU LE WIFI ». Jamais memorise.
+ * @brief Le cable OU le WiFi — voir NiDMI.cpp, « LE CABLE OU LE WIFI ».
+ * Rallumer la radio, ou l'ESSAI : la couper dureeMs, mesurer, la rallumer sur
+ * son seul minuteur. Differes de 300 ms. Rien n'est memorise.
  */
-void nidmi_requestWifi(bool allumer);
+void nidmi_requestRallumerWifi(void);
+void nidmi_requestEssaiWifi(unsigned long dureeMs);
 
 /**
  * @brief Demander un redémarrage différé "persist USB"
