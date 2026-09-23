@@ -63,7 +63,9 @@ String statusLine();
 
 /** Etat du lien et ses compteurs, en JSON — pour /api/reseau/liens.
  *  Le lien a deja ete vu MOURIR sous charge sans que l'hote s'en apercoive
- *  (MESURES §140) : sans ces compteurs, on ne saurait pas dire comment. */
+ *  (MESURES §140) : sans ces compteurs, on ne saurait pas dire comment.
+ *  Porte aussi, sous "diag", le releve du controleur USB qui a trouve
+ *  pourquoi (MESURES §147) — lu par lire-diag-usb.py. */
 String etatJson();
 
 }  // namespace nidmi_usbnet

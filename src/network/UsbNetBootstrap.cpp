@@ -87,7 +87,8 @@ String etatJson() {
   j += ",\"rx\":" + String(s.rxFrames);
   j += ",\"rx_rejetees\":" + String(s.rxDropped);
   j += ",\"tx\":" + String(s.txFrames);
-  j += ",\"tx_expirees\":" + String(s.txTimeouts) + "}";
+  j += ",\"tx_expirees\":" + String(s.txTimeouts);
+  j += ",\"diag\":" + g_usbNet.diagJson() + "}";
   return j;
 }
 
