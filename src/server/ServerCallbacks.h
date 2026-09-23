@@ -31,8 +31,20 @@ void nidmi_requestReloadOsc();
 /**
  * @brief Demander un redémarrage différé (2 s pour laisser la réponse HTTP partir et la NVS se fermer proprement)
  */
-void nidmi_requestReboot();
-void nidmi_requestDownloadMode();
+/* `par` : QUI demande — note en RTC, lu au demarrage suivant, publie dans
+ * /api/audio/status (« redemarrage_demande_par »). Voir NiDMI.cpp. */
+void nidmi_requestReboot(const char* par);
+void nidmi_requestDownloadMode(const char* par);
+const char* nidmi_redemarrageDemandePar(void);
+
+/* Demarrer a vide UNE fois : le son revient au redemarrage suivant. */
+void nidmi_demanderDemarrageAVide(void);
+bool nidmi_prendreDemarrageAVide(void);   // consomme le drapeau (restaurerAuBoot)
+bool nidmi_demarreAVide(void);
+
+/* La sante, decidee par la carte : un octet de causes, et leur nom. */
+unsigned char nidmi_sante(void);
+void nidmi_santeTexte(unsigned char f, char* out, unsigned n);
 
 /**
  * @brief Le cable OU le WiFi — voir NiDMI.cpp, « LE CABLE OU LE WIFI ».

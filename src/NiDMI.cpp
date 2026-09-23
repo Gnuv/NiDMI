@@ -9,6 +9,7 @@
 #include "network/UsbMidiManager.h"
 #include "network/UsbNetBootstrap.h"
 #include <esp_heap_caps.h>
+#include <esp_system.h>
 #include "server/WebDebugConsole.h"
 #include "Globals.h"
 #include <Preferences.h>
@@ -97,7 +98,140 @@ static void tacheRedemarrage(void*) {
     esp_restart();
 }
 
-extern "C" void nidmi_requestReboot(){
+/* ── QUI A DEMANDE LE REDEMARRAGE ─────────────────────────────────────────
+ * Constate le 23/09 : la carte a redemarre seule, sans le son, et personne ne
+ * savait pourquoi. reset_reason disait « logiciel » — donc on le lui avait
+ * DEMANDE — mais rien ne disait qui. Trois chemins le peuvent (identifiants
+ * WiFi, flash, redemarrage par l'API), et la carte n'en gardait aucune trace.
+ *
+ * La RTC RAM survit a un redemarrage logiciel (pas a une coupure de courant) :
+ * on y depose QUI a demande, au moment de la demande, et le demarrage suivant
+ * le lit puis l'efface. Meme procede que la phase des broches (§42). Si le
+ * redemarrage suivant n'a ete demande par personne — panique, chien de garde —
+ * il n'y aura rien a lire : c'est voulu, ce n'etait pas une demande. */
+RTC_NOINIT_ATTR static char     s_redemParRtc[48];
+RTC_NOINIT_ATTR static uint32_t s_redemMagie;
+RTC_NOINIT_ATTR static uint32_t s_aVideMagie;
+static const uint32_t REDEM_MAGIE = 0x52454445UL;   // "REDE"
+static const uint32_t AVIDE_MAGIE = 0x56494445UL;   // "VIDE"
+static char s_redemPar[48] = "";
+static bool s_demarreAVide = false;
+
+static void noterDemandeur(const char* par) {
+    strlcpy(s_redemParRtc, (par && *par) ? par : "?", sizeof(s_redemParRtc));
+    s_redemMagie = REDEM_MAGIE;
+}
+
+/* Au tout debut de nidmi_begin(), avant que quoi que ce soit ne redemarre. */
+static void capturerDemandeur() {
+    if (s_redemMagie == REDEM_MAGIE) {
+        s_redemParRtc[sizeof(s_redemParRtc) - 1] = '\0';
+        strlcpy(s_redemPar, s_redemParRtc, sizeof(s_redemPar));
+    } else {
+        s_redemPar[0] = '\0';
+    }
+    s_redemMagie = 0;   // consomme : un redemarrage NON demande ne le re-affichera pas
+}
+
+extern "C" const char* nidmi_redemarrageDemandePar() { return s_redemPar; }
+
+/* ── DEMARRER A VIDE, UNE FOIS ──────────────────────────────────────────────
+ * « Decharger le moteur et redemarrer » ecrivait « aucun moteur » en NVS : la
+ * carte repartait sans le son, et RESTAIT sans le son a tous les demarrages
+ * suivants, jusqu'a ce que quelqu'un le rende a la main. Une carte qui se tait
+ * pour toujours apres un geste de depannage est un piege sur scene.
+ *
+ * Desormais le demarrage a vide vaut pour UN demarrage : un drapeau en RTC,
+ * consomme par restaurerAuBoot(). La NVS n'est pas touchee — le choix du son
+ * reste celui de l'utilisateur, et il revient au redemarrage suivant. */
+extern "C" void nidmi_demanderDemarrageAVide() { s_aVideMagie = AVIDE_MAGIE; }
+extern "C" bool nidmi_prendreDemarrageAVide() {
+    const bool oui = (s_aVideMagie == AVIDE_MAGIE);
+    s_aVideMagie = 0;
+    if (oui) s_demarreAVide = true;
+    return oui;
+}
+extern "C" bool nidmi_demarreAVide() { return s_demarreAVide; }
+
+/* ── LA SANTE DE LA CARTE ────────────────────────────────────────────────────
+ * « Indiquer qu'il y a un souci suffit ; on rentre dans les reglages pour les
+ * details. » La CARTE decide s'il y a un souci — l'app ne fait que l'afficher.
+ * Recalculer ces seuils cote navigateur, c'est deux verites qui divergent.
+ *
+ * Et elle l'ANNONCE quand ca change, sans se faire sonder : sonder est ce qui
+ * la fait giguer (MESURES §82). Meme chemin que l'annonce des cues.
+ *
+ * Chaque cause, et pourquoi ce seuil :
+ *   son_coupe    le garde-fou de demarrage a coupe l'audio (§138).
+ *   decrochages  une sous-alimentation audio — un craquement. Tenue 60 s :
+ *                un decrochage dure quelques ms, il faut avoir le temps de le voir.
+ *   charge       rendu audio a 85 % du budget ou plus.
+ *   memoire      le TOTAL libre est descendu sous 3 072 o depuis l'allumage —
+ *                le seuil de la jauge « Creux », mesure : en dessous, des
+ *                requetes se perdent. PAS le plus gros bloc : avec le son et un
+ *                onglet ouvert, il est normalement a ~8 000, et un voyant qui
+ *                s'allume en usage normal ne signale plus rien.
+ *   reprises     une reprise refusee, file pleine. Tenue 60 s.
+ *   plantage     le demarrage en cours fait suite a une panique, un chien de
+ *                garde ou une chute de tension.
+ * Un octet, ecrit par la boucle seule et lu par les routes : pas de chaine
+ * partagee entre deux taches (§20, piege 11). */
+enum : uint8_t {
+    SANTE_SON_COUPE = 1, SANTE_DECROCHAGES = 2, SANTE_CHARGE = 4,
+    SANTE_MEMOIRE = 8,   SANTE_REPRISES = 16,   SANTE_PLANTAGE = 32
+};
+static volatile uint8_t s_sante = 0;
+static unsigned long s_santeProchain = 0, s_decrochagesJusqua = 0, s_reprisesJusqua = 0;
+static uint32_t s_sousAlimAvant = 0, s_refusAvant = 0;
+
+extern "C" uint8_t nidmi_sante() { return s_sante; }
+extern "C" void nidmi_santeTexte(uint8_t f, char* out, unsigned n) {
+    static const struct { uint8_t bit; const char* nom; } CAUSES[] = {
+        { SANTE_SON_COUPE, "son_coupe" }, { SANTE_DECROCHAGES, "decrochages" },
+        { SANTE_CHARGE, "charge" },       { SANTE_MEMOIRE, "memoire" },
+        { SANTE_REPRISES, "reprises" },   { SANTE_PLANTAGE, "plantage" } };
+    if (!out || !n) return;
+    out[0] = '\0';
+    for (const auto& c : CAUSES) {
+        if (!(f & c.bit)) continue;
+        if (out[0]) strlcat(out, ",", n);
+        strlcat(out, c.nom, n);
+    }
+}
+
+static void verifierSante() {
+    const unsigned long maintenant = millis();
+    if ((long)(maintenant - s_santeProchain) < 0) return;
+    s_santeProchain = maintenant + 1000;
+
+    const AudioEngine::Metriques m = AudioEngine::metriques();
+    uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
+    MappingEngine::statsReprises(enCours, maxVu, refus, capacite);
+    if (m.sousAlimentations > s_sousAlimAvant) s_decrochagesJusqua = maintenant + 60000;
+    s_sousAlimAvant = m.sousAlimentations;
+    if (refus > s_refusAvant) s_reprisesJusqua = maintenant + 60000;
+    s_refusAvant = refus;
+
+    const esp_reset_reason_t r = esp_reset_reason();
+    uint8_t f = 0;
+    if (m.bootCoupe)                                          f |= SANTE_SON_COUPE;
+    if ((long)(s_decrochagesJusqua - maintenant) > 0)         f |= SANTE_DECROCHAGES;
+    if (m.cyclesParEch * 100u >= 85u * 5000u)                 f |= SANTE_CHARGE;
+    if (heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) < 3072) f |= SANTE_MEMOIRE;
+    if ((long)(s_reprisesJusqua - maintenant) > 0)            f |= SANTE_REPRISES;
+    if (r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT
+        || r == ESP_RST_WDT || r == ESP_RST_BROWNOUT)         f |= SANTE_PLANTAGE;
+
+    if (f == s_sante) return;
+    s_sante = f;
+    if (!nidmi_ws_quelqu_un_ecoute()) return;
+    char trame[96] = "NIDMI_SANTE:";
+    nidmi_santeTexte(f, trame + 12, sizeof(trame) - 12);
+    nidmi_ws_pousser(trame);
+}
+
+extern "C" void nidmi_requestReboot(const char* par){
+    noterDemandeur(par);
     g_rebootRequestTime = millis();
     g_requestReboot = true;
     // Filet de securite : si la boucle est morte, cette tache redemarre quand meme.
@@ -108,7 +242,8 @@ extern "C" void nidmi_requestReboot(){
 // reboot : bloquer ici bloquerait async_tcp, donc la réponse HTTP ne partirait
 // jamais — c'est ce qui s'était passé au premier essai.
 static volatile bool g_requestDownload = false;
-extern "C" void nidmi_requestDownloadMode(){
+extern "C" void nidmi_requestDownloadMode(const char* par){
+    noterDemandeur(par);
     g_rebootRequestTime = millis();
     g_requestDownload = true;
 }
@@ -181,6 +316,7 @@ void nidmi_begin() {
     /* AVANT tout chargement : lire la phase laissee par la vie precedente,
      * sinon le premier marquer() de ce demarrage l'ecraserait. */
     ComponentManager::capturerPhasePrecedente();
+    capturerDemandeur();
     Serial.begin(115200);
     delay(50);
 
@@ -538,6 +674,9 @@ void nidmi_loop() {
     // Ces deux annonces doivent être répétées : émises une seule fois elles se
     // perdent si l'hôte n'a pas fini de se configurer, et rien ne le signale.
     nidmi_usbnet::update();
+
+    // La sante de la carte : calculee une fois par seconde, annoncee si elle change.
+    verifierSante();
 
     // Recharger pins si demandé (débounce 500 ms pour grouper les sauvegardes séquentielles)
     if (g_requestReloadPins && (millis() - g_reloadRequestTime >= 500)) {

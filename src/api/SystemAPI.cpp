@@ -51,13 +51,31 @@ void setupSystemAPI(AsyncWebServer& server) {
             "l'alimentation.\"}");
         // Différé côté loop() : un delay() ici bloquerait async_tcp, donc la
         // réponse ne partirait jamais (constaté au premier essai).
-        nidmi_requestDownloadMode();
+        nidmi_requestDownloadMode((String("telechargement · ") + request->client()->remoteIP().toString()).c_str());
     });
 
     /* API - Reset logiciel (comme appuyer sur le bouton reset) */
+    /* `par`  : qui demande (« reglages », « secours », un script…). Filtre : lettres,
+     *          chiffres, tirets — c'est une etiquette, pas un texte libre.
+     * `vide` : 1 = demarrer A VIDE, pour ce seul demarrage (voir NiDMI.cpp). */
     server.on("/api/system/reboot", HTTP_POST, [](AsyncWebServerRequest *request){
-        request->send(200, "application/json", "{\"status\":\"ok\",\"message\":\"Reboot scheduled\"}");
+        String par = request->hasParam("par", true) ? request->getParam("par", true)->value()
+                                                    : String("api");
+        String propre;
+        for (size_t i = 0; i < par.length() && propre.length() < 16; i++) {
+            const char c = par[i];
+            if (isalnum((unsigned char)c) || c == '-' || c == '_') propre += (char)tolower(c);
+        }
+        if (!propre.length()) propre = "api";
+        const bool vide = request->hasParam("vide", true)
+                       && request->getParam("vide", true)->value() == "1";
+        if (vide) {
+            nidmi_demanderDemarrageAVide();
+            propre += " (a vide)";
+        }
+        request->send(200, "application/json", String("{\"status\":\"ok\",\"message\":\"Reboot scheduled\",\"a_vide\":")
+                      + (vide ? "true" : "false") + "}");
         // Reboot différé côté loop (pour laisser partir la réponse HTTP)
-        nidmi_requestReboot();
+        nidmi_requestReboot((propre + " · " + request->client()->remoteIP().toString()).c_str());
     });
 }

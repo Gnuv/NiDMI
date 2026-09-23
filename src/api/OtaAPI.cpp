@@ -32,7 +32,7 @@ void setupOtaAPI(AsyncWebServer& server) {
             if (s_otaOk && Update.isFinished() && !Update.hasError()) {
                 request->send(200, "application/json", "{\"status\":\"ok\",\"reboot\":true}");
                 NIDMI_WEB_LOG("[OTA] Image validée, redémarrage...");
-                nidmi_requestReboot();  // reboot différé (laisse partir la réponse)
+                nidmi_requestReboot((String("flash · ") + request->client()->remoteIP().toString()).c_str());
             } else {
                 String err = Update.hasError() ? String(Update.errorString())
                                                : String("upload incomplet ou invalide");

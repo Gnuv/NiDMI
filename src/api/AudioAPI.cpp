@@ -10,6 +10,7 @@
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
+#include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include <nvs.h>
 #include <esp_heap_caps.h>   // le bloc contigu : le reservoir qui predit la panne
 
@@ -45,6 +46,14 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"load_percent\":" + String(m.cyclesParEch * 100.0f / 5000.0f, 1) + ",";
         json += "\"heap_min_ever\":"      + String(m.heapMiniJamais) + ",";
         json += "\"reset_reason\":\""      + String(m.causeResetTexte) + "\",";
+        /* QUI a demande ce redemarrage — vide s'il n'a ete demande par personne
+         * (coupure de courant, panique, chien de garde). Et s'il est a vide. */
+        {
+            String par = nidmi_redemarrageDemandePar();
+            par.replace("\\", "\\\\"); par.replace("\"", "\\\"");
+            json += "\"redemarrage_demande_par\":\"" + par + "\",";
+            json += "\"demarre_a_vide\":" + String(nidmi_demarreAVide() ? "true" : "false") + ",";
+        }
         /* Marges de PILE, en octets. Celle de la tache MIDI est relevee par
          * elle-meme ; celle-ci est mesuree ici meme, donc c'est celle du
          * serveur web. Les deux portent les tableaux de sortie du moteur. */
@@ -755,6 +764,16 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      *
      * Lecture seule et hors du chemin temps reel : cette route ne fait que
      * lire des compteurs et parcourir un repertoire. */
+    /* LA SANTE, DECIDEE PAR LA CARTE. Lue UNE fois par l'app a la connexion ;
+     * ensuite la carte annonce elle-meme chaque changement (« NIDMI_SANTE: »),
+     * sans etre sondee. Causes separees par des virgules ; vide = rien a
+     * signaler. La liste et ses seuils : NiDMI.cpp, « LA SANTE DE LA CARTE ». */
+    server.on("/api/diag/sante", HTTP_GET, [](AsyncWebServerRequest *request){
+        char causes[96];
+        nidmi_santeTexte(nidmi_sante(), causes, sizeof causes);
+        request->send(200, "application/json", String("{\"causes\":\"") + causes + "\"}");
+    });
+
     server.on("/api/diag/reservoirs", HTTP_GET, [](AsyncWebServerRequest *request){
         if (request->hasParam("reset")) {
             MappingEngine::reinitStatsReprises();

@@ -136,7 +136,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
             // Reboot différé (~2 s, géré dans nidmi_loop) pour appliquer la config STA :
             // g_staSsid/g_staPass ne sont lus qu'au boot. L'AP reste actif (APSTA),
             // donc l'accès web n'est pas perdu. La réponse part avant le redémarrage.
-            nidmi_requestReboot();
+            nidmi_requestReboot((String("wifi · ") + request->client()->remoteIP().toString()).c_str());
             request->send(200, "application/json", "{\"status\":\"ok\",\"reboot\":true}");
         } else {
             request->send(400, "application/json", "{\"error\":\"ssid and pass required\"}");

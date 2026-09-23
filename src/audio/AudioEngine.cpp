@@ -2,6 +2,7 @@
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"   // g_componentManager : les broches audio peuvent porter un composant
 #include "AudioEngine.h"
+#include "../server/ServerCallbacks.h"   // demarrage a vide, une fois
 
 #include <Arduino.h>
 #include <ESP_I2S.h>
@@ -490,6 +491,13 @@ bool isStarted() { return demarre; }
 // entretienBoot(), et le coût connu (MESURES.md §13 : 1,8 % de blocs en retard
 // le temps de l'écriture, une fois par boot).
 void restaurerAuBoot() {
+  /* DEMARRAGE A VIDE, DEMANDE POUR CE SEUL DEMARRAGE. Le drapeau est consomme
+   * ici : le suivant restaurera le son. La NVS n'est pas lue, donc pas touchee —
+   * et le compteur de tentatives non plus : ce n'est pas une tentative. */
+  if (nidmi_prendreDemarrageAVide()) {
+    Serial.println("[audio] boot : demarrage A VIDE demande — le son reviendra au suivant");
+    return;
+  }
   String choix;
   {
     Preferences p;
