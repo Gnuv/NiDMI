@@ -34,19 +34,20 @@ static String g_staSnStr;
 static unsigned long g_lastStaConnectAttempt = 0;
 static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative après 10 s
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
-/* Mode « USB seul » : depuis quand le lien USB est-il BAS ? 0 = il est haut.
- *
- * Premiere version : on ne repliait que si le lien n'etait JAMAIS monte, au
- * motif qu'un lien tombe apres coup signifie « l'hote est la ». NOTRE PROPRE
- * MESURE dit le contraire (§140) : le lien monte tres bien, puis MEURT sous une
- * charge de navigateur, et ne se releve pas — l'hote continuant d'afficher
- * « active ». Cette exemption enfermait donc la carte exactement dans le cas
- * qu'on avait mesure.
- *
- * On replie donc sur une absence CONTINUE, qu'elle ait ete precedee d'un lien
- * ou non. La radio, une fois allumee, le reste : on ne joue pas a l'eteindre et
- * la rallumer sous l'utilisateur. */
-static unsigned long g_usbSeulLienBasDepuis = 0;
+/* ── LE CABLE OU LE WIFI, EN MARCHE ──────────────────────────────────────────
+ * La coupure du WiFi est une COMMANDE (POST /api/reseau/wifi) executee ICI :
+ * WiFi.mode() depuis async_tcp bloquerait la tache qui doit justement emettre
+ * la reponse. Differee de 300 ms, pour que cette reponse parte avant que son
+ * chemin — peut-etre le WiFi lui-meme — ne disparaisse.
+ * Rien n'est memorise : un redemarrage ramene TOUJOURS le WiFi. */
+static volatile uint8_t g_wifiDemande = 0;          // 0 rien, 1 couper, 2 rallumer
+static unsigned long    g_wifiDemandeA = 0;
+static bool             g_wifiCoupeParCommande = false;
+/* Depuis quand le lien USB est-il bas, WiFi coupe ? 0 = haut. Le lien a deja
+ * ete vu MOURIR sous charge sans se relever (§140) : on ne suppose pas qu'un
+ * lien monte le reste. 20 s d'absence CONTINUE et la radio se rallume. */
+static unsigned long    g_lienBasDepuis = 0;
+static const unsigned long REPLI_WIFI_MS = 20000;
 static unsigned long g_staReconnectInterval = STA_RECONNECT_BASE_MS;
 static bool g_staWasConnected = false;  // pour logguer les transitions STA (visibilité)
 
@@ -99,6 +100,12 @@ static volatile bool g_requestDownload = false;
 extern "C" void nidmi_requestDownloadMode(){
     g_rebootRequestTime = millis();
     g_requestDownload = true;
+}
+
+// Le cable OU le WiFi — voir g_wifiDemande. La route verifie le lien avant.
+extern "C" void nidmi_requestWifi(bool allumer){
+    g_wifiDemandeA = millis();
+    g_wifiDemande = allumer ? 2 : 1;
 }
 
 // Le mapping GPIO est maintenant géré par PinMapper
@@ -256,14 +263,7 @@ void nidmi_begin() {
                 Serial.printf("[NiDMI] STA static IP: %s GW: %s SN: %s\n", g_staIpStr.c_str(), g_staGwStr.c_str(), g_staSnStr.c_str());
             }
         }
-        /* En « USB seul » la radio n'est pas allumee : demander une association
-         * STA maintenant echouerait, et surtout allumerait la pile WiFi qu'on
-         * cherche justement a ne pas payer. Le repli de nidmi_loop() rallume la
-         * radio, et la reconnexion automatique qui vit deja dans cette boucle
-         * fait le reste — rien a dupliquer ici. */
-        if (serverCore.radioWifiAllumee()) {
-            serverCore.connectSta(g_staSsid.c_str(), g_staPass.length() > 0 ? g_staPass.c_str() : nullptr);
-        }
+        serverCore.connectSta(g_staSsid.c_str(), g_staPass.length() > 0 ? g_staPass.c_str() : nullptr);
     } else {
         Serial.println("[NiDMI] No STA configuration found");
     }
@@ -428,37 +428,50 @@ void nidmi_loop() {
         ESP.restart();
     }
 
-    // Tentative de reconnexion STA automatique si des identifiants sont connus.
-    // connectSta() est non bloquant : on se contente de relancer WiFi.begin() et
-    // d'espacer les tentatives via un backoff (10 s -> 60 s) remis à zéro une fois connecté.
-    /* ── LE REPLI DU MODE « USB SEUL » ────────────────────────────────────
-     * On n'a pas besoin des deux acces en meme temps : c'est le cable OU le
-     * WiFi. Mais si le lien USB ne monte pas — cable sur un chargeur, hote qui
-     * n'active jamais l'interface de donnees, descripteur refuse — la carte
-     * n'est joignable que par le bouton BOOT. Alors on rallume la radio.
-     *
-     * On regarde linkUp(), pas « le cable est branche » : c'est l'ACTIVATION de
-     * l'interface de donnees par l'hote qui fait un lien utilisable, et elle
-     * peut manquer sur un cable parfaitement enfonce (MESURES §140).
-     *
-     * Une seule fois : radioWifiAllumee() garde l'etat, demarrerRadioWifi() est
-     * idempotent. La reconnexion STA juste en dessous prend alors le relais. */
-    if (NIDMI_USB_SEUL && !serverCore.radioWifiAllumee()) {
-        const unsigned long maintenant = millis();
-        if (nidmi_usbnet::linkUp()) {
-            g_usbSeulLienBasDepuis = 0;            // le lien porte : rien a faire
+    /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────── */
+    if (g_wifiDemande && millis() - g_wifiDemandeA >= 300) {
+        const uint8_t d = g_wifiDemande;
+        g_wifiDemande = 0;
+        if (d == 1) {
+            // La route a verifie le lien ; 300 ms ont passe, on le reverifie.
+            if (nidmi_usbnet::linkUp()) {
+                serverCore.couperRadioWifi();
+                g_wifiCoupeParCommande = true;
+                g_lienBasDepuis = 0;
+                NIDMI_WEB_LOG("[reseau] WiFi coupe sur commande : la carte ne repond plus que par le cable.");
+            }
         } else {
-            if (g_usbSeulLienBasDepuis == 0) g_usbSeulLienBasDepuis = maintenant;
-            if (maintenant - g_usbSeulLienBasDepuis >= NIDMI_USB_SEUL_REPLI_MS) {
-                NIDMI_WEB_LOG("[USB seul] lien USB bas depuis %d s — la radio WiFi est rallumee.",
-                              (int)(NIDMI_USB_SEUL_REPLI_MS / 1000));
-                Serial.println("[USB seul] REPLI : lien USB bas, radio WiFi rallumee.");
+            serverCore.demarrerRadioWifi();
+            g_wifiCoupeParCommande = false;
+            g_lastStaConnectAttempt = 0;             // reconnexion STA sans attendre
+            g_staReconnectInterval = STA_RECONNECT_BASE_MS;
+            NIDMI_WEB_LOG("[reseau] WiFi rallume sur commande.");
+        }
+    }
+    // LE REPLI. Posé dans la boucle, et cette fois c'est le bon endroit : la
+    // coupure n'arrive qu'en marche, setup() est derriere nous.
+    if (g_wifiCoupeParCommande && !serverCore.radioWifiAllumee()) {
+        if (nidmi_usbnet::linkUp()) {
+            g_lienBasDepuis = 0;
+        } else {
+            const unsigned long maintenant = millis();
+            if (g_lienBasDepuis == 0) g_lienBasDepuis = maintenant;
+            if (maintenant - g_lienBasDepuis >= REPLI_WIFI_MS) {
                 serverCore.demarrerRadioWifi();
+                g_wifiCoupeParCommande = false;
+                g_lastStaConnectAttempt = 0;
+                g_staReconnectInterval = STA_RECONNECT_BASE_MS;
+                NIDMI_WEB_LOG("[reseau] REPLI : lien USB bas depuis 20 s, WiFi rallume.");
             }
         }
     }
 
-    if (g_staSsid.length() > 0) {
+    // Tentative de reconnexion STA automatique si des identifiants sont connus.
+    // connectSta() est non bloquant : on se contente de relancer WiFi.begin() et
+    // d'espacer les tentatives via un backoff (10 s -> 60 s) remis à zéro une fois connecté.
+    // GARDEE PAR LA RADIO : connectSta() appelle WiFi.begin(), qui RALLUMERAIT un
+    // WiFi coupe sur commande — la coupure serait un mensonge, et la mesure fausse.
+    if (g_staSsid.length() > 0 && serverCore.radioWifiAllumee()) {
         wl_status_t staStatus = WiFi.status();
         unsigned long now = millis();
         if (staStatus == WL_CONNECTED) {

@@ -1,6 +1,5 @@
 #include "ServerCore.h"
 #include "../Globals.h"
-#include "../network/UsbNetBootstrap.h"   // NIDMI_USB_SEUL
 #include <ESPmDNS.h>
 #include <Preferences.h>
 // setupWebAPI est déclaré plus bas et défini dans WebAPI.cpp
@@ -49,6 +48,21 @@ void ServerCore::demarrerRadioWifi() {
     delay(100);
 }
 
+/* ── COUPER LA RADIO, EN MARCHE ────────────────────────────────────────────
+ * WiFi.mode(WIFI_OFF) va jusqu'au bout : esp_wifi_stop(), puis destruction des
+ * interfaces AP et STA, puis esp_wifi_deinit() — la memoire du pilote est
+ * RENDUE (WiFiGeneric.cpp, wifiLowLevelDeinit). L'interface USB, elle, porte
+ * sa propre cle et n'est pas touchee ; esp_netif et la boucle d'evenements,
+ * globaux, restent en place.
+ *
+ * Jamais appelee au demarrage : seulement sur commande, par nidmi_loop(), et
+ * seulement quand un lien USB peut prendre le relais. */
+void ServerCore::couperRadioWifi() {
+    if (!radioAllumee) return;
+    WiFi.mode(WIFI_OFF);
+    radioAllumee = false;
+}
+
 void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode) {
     nidmi_ws_file_init();   // avant tout client : voir ServerCore.h
     /* Événements WiFi : visibilité des drops STA (avec la RAISON, indisponible par polling)
@@ -62,19 +76,14 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
         }
     });
 
-    /* La radio est retenue pour plus tard : en mode « USB seul » on ne l'allume
-     * pas ici, et le repli de nidmi_loop() s'en chargera si le lien USB ne
-     * monte pas. Voir demarrerRadioWifi(). */
+    /* Les parametres de l'AP sont retenus pour qu'on puisse RALLUMER la radio
+     * en marche, apres une coupure sur commande (voir couperRadioWifi()).
+     * Le demarrage, lui, l'allume TOUJOURS : c'est le chemin qui marche, et on
+     * n'y touche plus (MESURES §142). */
     apSsidRetenu = apSsid ? apSsid : "";
     apPassRetenu = apPass ? apPass : "";
     apOnlyRetenu = apOnlyMode;
-#if !NIDMI_USB_SEUL
     demarrerRadioWifi();
-#else
-    Serial.println("[ServerCore] USB SEUL : radio WiFi NON allumee au demarrage.");
-    Serial.printf( "             repli dans %d s si le lien USB ne monte pas.\n",
-                   (int)(NIDMI_USB_SEUL_REPLI_MS / 1000));
-#endif
     IPAddress apIp = WiFi.softAPIP();
     
     Serial.begin(115200);

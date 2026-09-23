@@ -76,6 +76,21 @@ String statusLine() {
   return out;
 }
 
+String etatJson() {
+  const nidmi_core::UsbNetStats s = g_usbNet.stats();
+  String j = "{\"compile\":true,\"demarre\":";
+  j += g_started ? "true" : "false";
+  j += ",\"lien\":";
+  j += g_usbNet.isLinkUp() ? "true" : "false";
+  j += ",\"ip\":\"" + g_usbNet.localIp().toString() + "\"";
+  j += ",\"etape\":" + String((int)g_usbNet.lastStep());
+  j += ",\"rx\":" + String(s.rxFrames);
+  j += ",\"rx_rejetees\":" + String(s.rxDropped);
+  j += ",\"tx\":" + String(s.txFrames);
+  j += ",\"tx_expirees\":" + String(s.txTimeouts) + "}";
+  return j;
+}
+
 }  // namespace nidmi_usbnet
 
 #else  // variant desactive
@@ -100,6 +115,9 @@ String broadcastAddress() {
 }
 String statusLine() {
   return String("variant USB net non compile");
+}
+String etatJson() {
+  return String("{\"compile\":false,\"lien\":false}");
 }
 
 }  // namespace nidmi_usbnet

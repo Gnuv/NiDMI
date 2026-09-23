@@ -18,52 +18,18 @@
 #define NIDMI_USB_NET 0
 #endif
 
-/* ── USB SEUL : le cable OU le WiFi, pas les deux ──────────────────────────
- * Mesure (MESURES.md §140) : faire tourner les DEUX coute 8 192 o de bloc
- * contigu et double la gigue MIDI. Or on n'a pas besoin des deux acces en
- * meme temps — c'est l'un ou l'autre. Ce drapeau n'allume pas la radio WiFi
- * au demarrage ; le serveur web, lui, sert sur le netif USB (AsyncWebServer
- * ecoute sur INADDR_ANY).
+/* ── LE CABLE OU LE WIFI : ON COUPE EN MARCHE, JAMAIS AU DEMARRAGE ────────
+ * Une premiere version (NIDMI_USB_SEUL, retiree) n'allumait pas la radio au
+ * demarrage. La carte n'a jamais demarre : le serveur et le mDNS avaient
+ * besoin d'une pile reseau que plus personne ne posait, et son repli vivait
+ * dans une boucle que setup() n'atteignait jamais (MESURES §142).
  *
- * IL PORTE SON REPLI, et ce n'est pas optionnel : une carte qui demarre radio
- * eteinte sur un lien USB qui ne monte pas n'est joignable QUE par le bouton
- * BOOT. Si le lien n'est pas monte au bout de NIDMI_USB_SEUL_REPLI_MS, la
- * radio s'allume. Cas reels que le repli couvre : cable sur un simple chargeur,
- * hote qui n'active jamais l'interface de donnees, descripteur refuse.
- *
- * « Une fonction qui peut enfermer doit porter sa sortie » — regle 7. */
-#ifndef NIDMI_USB_SEUL
-#define NIDMI_USB_SEUL 0
-#endif
-#ifndef NIDMI_USB_SEUL_REPLI_MS
-#define NIDMI_USB_SEUL_REPLI_MS 20000
-#endif
-
-#if NIDMI_USB_SEUL && !NIDMI_USB_NET
-#error "NIDMI_USB_SEUL sans NIDMI_USB_NET : la carte n'aurait AUCUN acces reseau."
-#endif
-
-/* ── NIDMI_USB_SEUL EST CONDAMNE TANT QU'IL N'EST PAS CORRIGE ─────────────
- * Flashe le 23/09 : la carte n'a JAMAIS demarre. Ni sur le bus USB, ni en
- * WiFi — recuperee au bouton BOOT, et la recuperation a efface la flash
- * entiere (MESURES §142).
- *
- * Cause tres probable : MDNS.begin() s'execute dans serverCore.begin(), bien
- * AVANT nidmi_usbnet::begin() — celui qui pose esp_netif et la boucle
- * d'evenements. Avec le WiFi, c'est son init qui les posait avant. Sans lui,
- * personne : mdns_init() part sur du vide, au demarrage. La doc du spike le
- * disait (« mDNS APRES usbNet.begin() ») ; notre ordre d'appels est l'inverse.
- *
- * Et le repli ne pouvait rien : il vit dans nidmi_loop(), que setup() n'atteint
- * jamais. UNE SORTIE POSEE APRES LA PORTE QUI SE FERME N'EST PAS UNE SORTIE.
- *
- * Avant de lever cette garde : (1) remettre esp_netif avant le mDNS dans ce
- * mode, (2) poser le repli au DEMARRAGE — compteur en NVS comme le garde-fou
- * audio, pas dans la boucle — (3) le voir tourner sur une carte dont la flash
- * a d'abord ete SAUVEGARDEE (esptool read-flash marche en mode download). */
-#if NIDMI_USB_SEUL
-#error "NIDMI_USB_SEUL met la carte hors service au demarrage (MESURES §142). Ne pas lever sans lire ce commentaire."
-#endif
+ * Desormais le demarrage est TOUJOURS celui qui marche, radio allumee. Le WiFi
+ * se coupe ensuite, sur commande (POST /api/reseau/wifi), et :
+ *   - la commande est REFUSEE si aucun lien USB ne peut prendre le relais ;
+ *   - si le lien USB tombe ensuite 20 s d'affilee, la radio se rallume ;
+ *   - rien n'est memorise : un redemarrage ramene TOUJOURS le WiFi.
+ * On ne peut pas s'enfermer dehors : le pire cas est un redemarrage. */
 
 namespace nidmi_usbnet {
 
@@ -94,5 +60,10 @@ String broadcastAddress();
 
 /** Resume d'etat, pour les logs de demarrage. */
 String statusLine();
+
+/** Etat du lien et ses compteurs, en JSON — pour /api/reseau/liens.
+ *  Le lien a deja ete vu MOURIR sous charge sans que l'hote s'en apercoive
+ *  (MESURES §140) : sans ces compteurs, on ne saurait pas dire comment. */
+String etatJson();
 
 }  // namespace nidmi_usbnet

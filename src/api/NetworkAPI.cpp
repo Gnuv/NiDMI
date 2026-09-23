@@ -3,6 +3,7 @@
 #include "../server/ServerCore.h"
 #include "../server/WebDebugConsole.h"
 #include "../server/ServerCallbacks.h"
+#include "../network/UsbNetBootstrap.h"
 #include <Preferences.h>
 #include <WiFi.h>
 
@@ -64,6 +65,53 @@ void setupNetworkAPI(AsyncWebServer& server) {
     // (perte temporaire de l'AP, reconnexion WiFi côté client, etc.).
     // Le nom de réseau et la connexion STA seront pris en compte
     // au prochain redémarrage manuel (ou reset bouton).
+    /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────────
+     * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
+     * Mesure (MESURES §140) : faire tourner les DEUX coute 8 192 o de bloc
+     * contigu et double la gigue MIDI.
+     *
+     * Compilees dans TOUS les builds. Sans la variante usb-net, linkUp() rend
+     * toujours faux : la coupure est donc toujours refusee, et la route le dit.
+     * Une route qui n'existerait que dans une variante serait une surface de
+     * plus a maintenir — celle-ci est simplement honnete partout. */
+    server.on("/api/reseau/liens", HTTP_GET, [](AsyncWebServerRequest *request){
+        String j = "{\"wifi\":";
+        j += serverCore.radioWifiAllumee() ? "true" : "false";
+        j += ",\"usb\":" + nidmi_usbnet::etatJson() + "}";
+        request->send(200, "application/json", j);
+    });
+
+    server.on("/api/reseau/wifi", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String etat = request->hasParam("etat", true)
+                          ? request->getParam("etat", true)->value() : String("");
+        if (etat == "on") {
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"wifi\":\"rallume dans 300 ms\"}");
+            nidmi_requestWifi(true);
+            return;
+        }
+        if (etat != "off") {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"etat=off ou etat=on\"}");
+            return;
+        }
+        /* ON NE COUPE PAS LA BRANCHE SUR LAQUELLE ON EST ASSIS. Sans lien USB
+         * monte, couper le WiFi rendrait la carte injoignable jusqu'au prochain
+         * redemarrage. Refuse, et on dit pourquoi. */
+        if (!nidmi_usbnet::linkUp()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"Aucun lien USB monte : couper le "
+                "WiFi rendrait la carte injoignable. Brancher la carte a un ordinateur "
+                "(variante usb-net) et attendre que le lien monte.\"}");
+            return;
+        }
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"wifi\":\"coupe dans 300 ms\",\"repli_s\":20,"
+            "\"message\":\"La carte ne repondra plus que par le cable. Si le lien USB "
+            "tombe 20 s d'affilee, le WiFi se rallume. Un redemarrage le rallume toujours.\"}");
+        nidmi_requestWifi(false);
+    });
+
     server.on("/api/sta", HTTP_POST, [](AsyncWebServerRequest *request){
         if (request->hasParam("ssid", true) && request->hasParam("pass", true)) {
             String ssid = request->getParam("ssid", true)->value();

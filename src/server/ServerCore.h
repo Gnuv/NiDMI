@@ -45,13 +45,14 @@ public:
 
     /* ── LA RADIO WIFI, SEPAREE DU RESTE ───────────────────────────────────
      * begin() faisait trois choses d'un bloc : allumer la radio, publier le
-     * mDNS, installer le serveur web. Or en mode « USB seul » on veut les deux
-     * dernieres SANS la premiere — AsyncWebServer ecoute sur INADDR_ANY, il
-     * sert donc tres bien sur le netif USB.
+     * mDNS, installer le serveur web. On la separe pour pouvoir la COUPER et la
+     * RALLUMER en marche — AsyncWebServer ecoute sur INADDR_ANY, il continue
+     * donc de servir sur le netif USB quand le WiFi est coupe.
      *
      * Idempotent : un second appel ne fait rien. C'est ce qui permet au repli
      * de l'appeler sans savoir si la radio est deja la. */
     void demarrerRadioWifi();
+    void couperRadioWifi();
     bool radioWifiAllumee() const { return radioAllumee; }
     void connectSta(const char* staSsid, const char* staPass);
     void setStaticStaIp(IPAddress ip, IPAddress gateway, IPAddress subnet);
