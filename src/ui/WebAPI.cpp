@@ -423,6 +423,19 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
  * n'ecoule jamais le corps — « le gestionnaire s'est execute » ne prouve pas
  * « la page est sortie ». La page passe donc par un flux a rappel, comme
  * l'archive, pour qu'on sache QUAND elle est partie. */
+/* Builds NCM : WiFi allume et son charge, la carte manque de memoire pour
+ * l'interface complete (7 668 o contre 8 192, MESURES §147) — c'est le cable
+ * qui la sert, la bascule « cable prioritaire » coupant alors le WiFi. La
+ * page de secours le dit a qui arrive par le WiFi. */
+#if defined(NIDMI_USB_NET) && NIDMI_USB_NET
+#define SECOURS_CABLE \
+    "<p><b>Par le cable USB</b>, l'interface complete se sert : <code>http://192.168.7.1</code>.\n" \
+    "Le cable vivant coupe le WiFi (reglage <i>cable prioritaire</i>), et c'est ce qui\n" \
+    "rend a la carte la memoire qu'il lui faut.</p>\n"
+#else
+#define SECOURS_CABLE ""
+#endif
+
 static const char SECOURS_HTML[] =
     "<!doctype html><meta charset=utf-8><title>NiDMI - secours</title>\n"
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">\n"
@@ -440,6 +453,7 @@ static const char SECOURS_HTML[] =
     "<p>A vide : la carte redemarre sans le son, ce qui lui rend la memoire d'un seul\n"
     "tenant dont le serveur web a besoin. <b>Pour ce seul demarrage</b> : le son\n"
     "revient au suivant. La composition n'est pas touchee : elle vit en flash.</p>\n"
+    SECOURS_CABLE
     "<script>\n"
     "const E=document.getElementById('e');\n"
     "async function etat(){try{const d=await(await fetch('/api/audio/status',{cache:'no-store'})).json();\n"

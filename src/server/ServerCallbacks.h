@@ -55,6 +55,14 @@ void nidmi_requestRallumerWifi(void);
 void nidmi_requestEssaiWifi(unsigned long dureeMs);
 
 /**
+ * @brief La bascule « cable prioritaire » — voir NiDMI.cpp. Demander de
+ * l'activer ou de la retirer (appliquee et memorisee en NVS par nidmi_loop),
+ * et savoir si c'est elle qui tient la radio coupee en ce moment.
+ */
+void nidmi_demanderCablePrioritaire(bool actif);
+bool nidmi_cableTientLeWifi(void);
+
+/**
  * @brief Demander un redémarrage différé "persist USB"
  * (utile quand on change la configuration/dé-énumération USB via TinyUSB)
  */

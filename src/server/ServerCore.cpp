@@ -21,16 +21,20 @@ ServerCore::ServerCore()
  * ne doit pas reconfigurer un AP qui sert deja des clients. */
 void ServerCore::demarrerRadioWifi() {
     if (radioAllumee) return;
-    radioAllumee = true;
 
     /* Sans STA enregistré : AP seul (WIFI_AP). APSTA avec interface STA inactive peut provoquer
      * échecs ou boucles « mot de passe » / reconnexion sur téléphones (notamment ESP32-C3/S3). */
-    if (apOnlyRetenu) {
-        WiFi.mode(WIFI_MODE_AP);
-        Serial.println("[ServerCore] WiFi: mode AP uniquement");
-    } else {
-        WiFi.mode(WIFI_MODE_APSTA);
+    /* ALLUMEE SEULEMENT SI LE PILOTE A DEMARRE. Rallumee en marche, la radio
+     * peut manquer de memoire (esp_wifi_init rend ESP_ERR_NO_MEM, WiFi.mode
+     * rend faux) : se dire allumee rendrait l'appel suivant muet, et le WiFi
+     * ne reviendrait jamais. Faux reste faux : l'appelant reessaie. */
+    const bool ok = apOnlyRetenu ? WiFi.mode(WIFI_MODE_AP) : WiFi.mode(WIFI_MODE_APSTA);
+    if (!ok) {
+        Serial.println("[ServerCore] WiFi: le pilote n'a pas demarre (memoire ?)");
+        return;
     }
+    radioAllumee = true;
+    if (apOnlyRetenu) Serial.println("[ServerCore] WiFi: mode AP uniquement");
 
     // Augmenter la puissance WiFi pour XIAO_ESP32C3
     WiFi.setTxPower(WIFI_POWER_19_5dBm); // Puissance maximale

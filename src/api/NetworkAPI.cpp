@@ -4,7 +4,8 @@
 #include "../server/WebDebugConsole.h"
 #include "../server/ServerCallbacks.h"
 #include "../network/UsbNetBootstrap.h"
-String nidmi_essaiWifiJson();   // NiDMI.cpp
+String nidmi_essaiWifiJson();          // NiDMI.cpp
+String nidmi_cablePrioritaireJson();   // NiDMI.cpp
 #include <Preferences.h>
 #include <WiFi.h>
 
@@ -69,22 +70,46 @@ void setupNetworkAPI(AsyncWebServer& server) {
     /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────────
      * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
      *
-     * La coupure LIBRE est retiree : son repli croyait linkUp(), qui a ete vu
-     * vrai sur un lien mort (§143). Reste l'ESSAI, qui ne compte que sur son
-     * minuteur : il coupe la radio N secondes, mesure le tas, la rallume. Il
-     * ne depend pas du lien USB — il marche donc sur TOUS les builds, et c'est
-     * ce qui permet de comparer avec et sans NCM par la meme methode. */
+     * La bascule « cable prioritaire » (NiDMI.cpp) coupe la radio quand le
+     * cable vit, sur une preuve de vie qui ne ment pas — des trames recues —
+     * et la rallume des qu'il se tait. Son reglage est en NVS, oui par defaut.
+     * La coupure LIBRE, elle, reste retiree : son repli croyait linkUp(), vu
+     * vrai sur un lien mort (§143). L'ESSAI ne compte que sur son minuteur : il
+     * coupe la radio N secondes, mesure le tas, la rallume — sur TOUS les
+     * builds. Pendant que la bascule tient la radio coupee, l'essai et
+     * etat=on sont refuses : ils defairaient ce qu'elle tient. */
     server.on("/api/reseau/liens", HTTP_GET, [](AsyncWebServerRequest *request){
         String j = "{\"wifi\":";
         j += serverCore.radioWifiAllumee() ? "true" : "false";
         j += ",\"usb\":" + nidmi_usbnet::etatJson();
-        j += ",\"essai_wifi\":" + nidmi_essaiWifiJson() + "}";
+        j += ",\"essai_wifi\":" + nidmi_essaiWifiJson();
+        j += ",\"cable\":" + nidmi_cablePrioritaireJson() + "}";
         request->send(200, "application/json", j);
+    });
+
+    server.on("/api/reseau/cable-prioritaire", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String etat = request->hasParam("etat", true)
+                          ? request->getParam("etat", true)->value() : String("");
+        if (etat != "on" && etat != "off") {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"etat=on ou etat=off\"}");
+            return;
+        }
+        nidmi_demanderCablePrioritaire(etat == "on");
+        request->send(200, "application/json",
+            String("{\"status\":\"ok\",\"prioritaire\":") + (etat == "on" ? "true" : "false") +
+            ",\"message\":\"applique et memorise dans la seconde\"}");
     });
 
     server.on("/api/reseau/wifi", HTTP_POST, [](AsyncWebServerRequest *request){
         const String etat = request->hasParam("etat", true)
                           ? request->getParam("etat", true)->value() : String("");
+        if ((etat == "on" || etat == "essai") && nidmi_cableTientLeWifi()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"Le cable prioritaire tient le WiFi coupe : "
+                "le retirer (POST /api/reseau/cable-prioritaire etat=off) pour rallumer ou essayer.\"}");
+            return;
+        }
         if (etat == "on") {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"wifi\":\"rallume dans 300 ms\"}");
@@ -107,7 +132,8 @@ void setupNetworkAPI(AsyncWebServer& server) {
             request->send(409, "application/json",
                 "{\"status\":\"error\",\"message\":\"Coupure libre retiree : le lien USB a "
                 "ete vu mort pendant que les deux bouts le disaient monte (MESURES §143). "
-                "Couper le WiFi rendrait la carte injoignable. Utiliser etat=essai.\"}");
+                "La bascule cable prioritaire coupe le WiFi sur preuve de vie "
+                "(POST /api/reseau/cable-prioritaire). Pour mesurer : etat=essai.\"}");
             return;
         }
         request->send(400, "application/json",

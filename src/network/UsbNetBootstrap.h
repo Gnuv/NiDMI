@@ -25,11 +25,10 @@
  * dans une boucle que setup() n'atteignait jamais (MESURES §142).
  *
  * Desormais le demarrage est TOUJOURS celui qui marche, radio allumee. Le WiFi
- * se coupe ensuite, sur commande (POST /api/reseau/wifi), et :
- *   - la commande est REFUSEE si aucun lien USB ne peut prendre le relais ;
- *   - si le lien USB tombe ensuite 20 s d'affilee, la radio se rallume ;
- *   - rien n'est memorise : un redemarrage ramene TOUJOURS le WiFi.
- * On ne peut pas s'enfermer dehors : le pire cas est un redemarrage. */
+ * se coupe ensuite, en marche, par la bascule « cable prioritaire » de
+ * nidmi_loop() (NiDMI.cpp) — et seulement sur une PREUVE DE VIE du cable :
+ * des trames recues de l'hote, pas linkUp(). Un redemarrage ramene TOUJOURS
+ * le WiFi. On ne peut pas s'enfermer dehors. */
 
 namespace nidmi_usbnet {
 
@@ -49,8 +48,25 @@ bool begin();
 /** A appeler dans nidmi_loop(). Non bloquant. */
 void update();
 
-/** Lien USB monte cote hote (interface de donnees activee). */
+/** USB configure par l'hote (tud_mounted). PAS une preuve de vie : vu vrai
+ *  sur un lien mort (§140, §143). La preuve de vie, ce sont les compteurs. */
 bool linkUp();
+
+/** Les compteurs de la preuve de vie : trames recues de l'hote, emissions
+ *  expirees. Zeros sans le variant USB net. */
+void compteurs(uint32_t& rx, uint32_t& txExpirees);
+
+/** Bus USB en veille : hote endormi — ou cable debranche, qui se voit ainsi
+ *  faute de detection de VBUS sur la XIAO. Faux sans le variant. */
+bool suspendu();
+
+/** L'hote a un bail de notre serveur DHCP : on sait qui sonder. */
+bool hoteConnu();
+
+/** Une requete ARP a l'hote : sa reponse fait bouger `rx`. Au repos, un Mac
+ *  se tait jusqu'a une minute (MESURES §148) ; la preuve de vie se PROVOQUE.
+ *  Faux si rien n'est parti. */
+bool sonder();
 
 /** Adresse de l'ESP32 sur le lien, "0.0.0.0" si indisponible. */
 String ip();

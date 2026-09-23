@@ -3,6 +3,7 @@
 #if NIDMI_USB_NET
 
 #include <nidmi_core.h>
+#include "tusb.h"   // tud_suspended
 
 namespace {
 
@@ -58,6 +59,24 @@ bool linkUp() {
   return g_usbNet.isLinkUp();
 }
 
+void compteurs(uint32_t& rx, uint32_t& txExpirees) {
+  const nidmi_core::UsbNetStats s = g_usbNet.stats();
+  rx = s.rxFrames;
+  txExpirees = s.txTimeouts;
+}
+
+bool suspendu() {
+  return tud_suspended();
+}
+
+bool hoteConnu() {
+  return g_usbNet.hoteConnu();
+}
+
+bool sonder() {
+  return g_usbNet.sonderHote();
+}
+
 String ip() {
   return g_usbNet.localIp().toString();
 }
@@ -106,6 +125,19 @@ bool begin() {
 }
 void update() {}
 bool linkUp() {
+  return false;
+}
+void compteurs(uint32_t& rx, uint32_t& txExpirees) {
+  rx = 0;
+  txExpirees = 0;
+}
+bool suspendu() {
+  return false;
+}
+bool hoteConnu() {
+  return false;
+}
+bool sonder() {
   return false;
 }
 String ip() {

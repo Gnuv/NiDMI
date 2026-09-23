@@ -37,16 +37,21 @@ static unsigned long g_lastStaConnectAttempt = 0;
 static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative après 10 s
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
 /* ── LE CABLE OU LE WIFI ─────────────────────────────────────────────────────
- * Une premiere version coupait le WiFi SUR COMMANDE, avec un repli : lien USB
- * bas 20 s -> radio rallumee. Le repli croyait linkUp(). Or linkUp() a ete vu
- * VRAI sur un lien MORT, deux fois (§140, §143) : les deux bouts disent
- * « monte », plus aucune trame ne passe. Couper le WiFi dans cet etat rendait
- * la carte injoignable jusqu'a ce qu'on la debranche. Cette coupure est
- * RETIREE tant que le lien USB n'a pas de preuve de vie qui ne mente pas.
+ * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
+ * Mesure (MESURES §147), son charge : cable seul, bloc 19 444 o et l'app
+ * servie, MIDI 0 retard, 0 sous-alimentation sous charge ; WiFi allume, 7 668
+ * o et la page de secours.
  *
- * Reste L'ESSAI : couper le WiFi N secondes, mesurer, le rallumer — sur son
- * SEUL minuteur, sans rien attendre du lien USB. Il marche donc sur tous les
- * builds, et le pire cas est N secondes sans reseau. Rien n'est memorise. */
+ * LA BASCULE « CABLE PRIORITAIRE » (reglage en NVS, oui par defaut) coupe la
+ * radio quand le cable VIT, et la rallume des qu'il se tait. Une premiere
+ * coupure croyait linkUp(), vu vrai sur un lien mort (§140, §143) : elle a ete
+ * retiree. La preuve de vie, ici, ce sont des TRAMES RECUES de l'hote — au
+ * repos, un Mac en envoie en continu — et des emissions qui n'expirent pas.
+ * Le demarrage, lui, allume TOUJOURS la radio (§142) : on coupe en marche.
+ *
+ * L'ESSAI, lui, coupe le WiFi N secondes sur son SEUL minuteur, pour mesurer.
+ * Il marche sur tous les builds. Refuse pendant que la bascule tient le WiFi
+ * coupe : il n'y aurait rien a mesurer. */
 static volatile bool g_wifiRallumerDemande = false;
 static unsigned long g_wifiRallumerA = 0;
 static volatile bool g_essaiDemande = false;
@@ -258,6 +263,80 @@ extern "C" void nidmi_requestEssaiWifi(unsigned long dureeMs){
     g_essaiDemandeA = millis();
     g_essaiDemande = true;
 }
+/* ── LA BASCULE « CABLE PRIORITAIRE » ─────────────────────────────────────
+ * Deux etats. VEILLE : la radio est la ; si le cable vit sans interruption
+ * CABLE_CONFIRMATION_MS, avec au moins CABLE_TRAMES_MIN trames, on la coupe.
+ * CABLE : la radio est coupee ; elle revient AUSSITOT si le bus USB n'est plus
+ * configure ou passe en veille (hote endormi, ou cable debranche : sans
+ * detection de VBUS, un debranchement se voit ainsi), si l'emission expire,
+ * ou si le reglage est retire ; et au bout de CABLE_SILENCE_MS sans une trame.
+ *
+ * LE SILENCE SE PROVOQUE. Au repos, un Mac se tait jusqu'a UNE MINUTE sur le
+ * lien (22 trames en 5 min, ecarts de 50 a 61 s, MESURES §148) : attendre qu'il
+ * parle ferait croire le cable mort — ou le rendrait lent a declarer mort.
+ * Apres CABLE_SONDE_APRES_MS sans trame, la carte lui envoie une requete ARP
+ * toutes les CABLE_SONDE_TOUS_MS ; un hote vivant repond toujours. Le cable
+ * n'est « vivant » que si l'hote a un bail : sans adresse, pas de sonde, et
+ * pas de coupure.
+ * Apres un retour, pas de nouvelle coupure avant CABLE_RECOUPE_MS : un cable
+ * qui clignote ne fait pas clignoter le WiFi.
+ * Tout se passe dans nidmi_loop() : l'API ne fait que lever un drapeau, et la
+ * NVS s'ecrit ici, hors du contexte async (§13). */
+static const unsigned long CABLE_CONFIRMATION_MS = 10000;
+static const uint32_t      CABLE_TRAMES_MIN      = 3;
+static const unsigned long CABLE_SILENCE_MS      = 30000;   // 4 sondes sans reponse (10, 15, 20, 25 s)
+static const unsigned long CABLE_SONDE_APRES_MS  = 10000;
+static const unsigned long CABLE_SONDE_TOUS_MS   = 5000;
+static const unsigned long CABLE_RECOUPE_MS      = 30000;
+static const unsigned long CABLE_RADIO_REESSAI_MS = 5000;
+struct BasculeCable {
+    bool lu = false;                  // reglage lu en NVS
+    bool prioritaire = true;          // NVS "cable_prio" ; absent = oui
+    bool tientLeWifi = false;         // etat CABLE : c'est nous qui avons coupe la radio
+    unsigned long depuis = 0;         // entree dans l'etat courant
+    uint32_t rx = 0, txExp = 0;       // derniers compteurs vus
+    unsigned long dernierRx = 0, derniereExpiree = 0;
+    unsigned long vivantDepuis = 0;   // fenetre de confirmation ; 0 = pas vivant
+    uint32_t tramesFenetre = 0;
+    unsigned long retourA = 0;        // dernier retour du WiFi (retours > 0)
+    bool radioEnAttente = false;      // la radio n'a pas pu revenir : on reessaie
+    unsigned long radioEchecA = 0;
+    unsigned long derniereSonde = 0;
+    uint32_t sondes = 0;
+    uint32_t coupures = 0, retours = 0;
+    const char* derniereCause = "";
+    unsigned long dernierTic = 0;
+};
+static BasculeCable g_bascule;
+static volatile int8_t g_basculeDemande = -1;   // -1 rien ; 0 retirer ; 1 activer
+
+extern "C" void nidmi_demanderCablePrioritaire(bool actif){
+    g_basculeDemande = actif ? 1 : 0;
+}
+extern "C" bool nidmi_cableTientLeWifi(){
+    return g_bascule.tientLeWifi;
+}
+String nidmi_cablePrioritaireJson(){
+    const BasculeCable b = g_bascule;
+    const unsigned long now = millis();
+    const char* etat = b.tientLeWifi ? "cable"
+                     : !b.prioritaire ? "desactive"
+                     : b.vivantDepuis ? "confirmation" : "veille";
+    String j = "{\"prioritaire\":";
+    j += b.prioritaire ? "true" : "false";
+    j += ",\"etat\":\"" + String(etat) + "\"";
+    j += ",\"depuis_ms\":" + String(now - b.depuis);
+    j += ",\"dernier_rx_ms\":" + (b.dernierRx ? String(now - b.dernierRx) : String("null"));
+    j += ",\"coupures\":" + String(b.coupures) + ",\"retours\":" + String(b.retours);
+    j += ",\"sondes\":" + String(b.sondes);
+    j += ",\"derniere_cause\":\"" + String(b.derniereCause) + "\"";
+    j += ",\"radio_en_attente\":";
+    j += b.radioEnAttente ? "true" : "false";
+    j += ",\"confirmation_ms\":" + String(CABLE_CONFIRMATION_MS);
+    j += ",\"silence_ms\":" + String(CABLE_SILENCE_MS) + "}";
+    return j;
+}
+
 String nidmi_essaiWifiJson(){
     const EssaiWifi e = g_essai;
     String j = "{\"etat\":\"";
@@ -267,6 +346,106 @@ String nidmi_essaiWifiJson(){
     j += ",\"wifi_coupe\":{\"bloc\":" + String(e.blocPendant) + ",\"tas\":" + String(e.tasPendant) + "}";
     j += ",\"apres\":{\"bloc\":"      + String(e.blocApres)   + ",\"tas\":" + String(e.tasApres)   + "}}";
     return j;
+}
+
+/* Rallumer la radio et relancer la STA tout de suite. Si le pilote n'a pas
+ * pu demarrer (memoire), on reessaie : la carte n'a PAS le droit de rester
+ * sans WiFi parce qu'un cable est mort. */
+/* DUREES ECOULEES, jamais des dates futures : millis() repasse par zero au
+ * bout de 49,7 jours, et une installation tourne aussi longtemps. */
+static void basculeRallumerRadio(unsigned long now){
+    serverCore.demarrerRadioWifi();
+    if (serverCore.radioWifiAllumee()) {
+        g_bascule.radioEnAttente = false;
+        g_lastStaConnectAttempt = 0;
+        g_staReconnectInterval = STA_RECONNECT_BASE_MS;
+    } else {
+        g_bascule.radioEnAttente = true;
+        g_bascule.radioEchecA = now;
+    }
+}
+
+static void basculeCableBoucle(){
+    BasculeCable& b = g_bascule;
+    const unsigned long now = millis();
+    if (now - b.dernierTic < 250) return;
+    b.dernierTic = now;
+
+    if (!b.lu) {
+        Preferences p;
+        p.begin("nidmi", true);
+        b.prioritaire = p.getBool("cable_prio", true);
+        p.end();
+        b.lu = true;
+        b.depuis = now;
+    }
+    const int8_t demande = g_basculeDemande;
+    if (demande >= 0) {
+        g_basculeDemande = -1;
+        if ((demande == 1) != b.prioritaire) {
+            b.prioritaire = (demande == 1);
+            Preferences p;
+            p.begin("nidmi", false);
+            p.putBool("cable_prio", b.prioritaire);
+            p.end();
+        }
+    }
+    if (b.radioEnAttente && now - b.radioEchecA >= CABLE_RADIO_REESSAI_MS) basculeRallumerRadio(now);
+
+    // La preuve de vie : des trames recues, des emissions qui n'expirent pas.
+    uint32_t rx = 0, txExp = 0;
+    nidmi_usbnet::compteurs(rx, txExp);
+    if (rx != b.rx)       { b.tramesFenetre += rx - b.rx; b.rx = rx; b.dernierRx = now; }
+    if (txExp != b.txExp) { b.txExp = txExp; b.derniereExpiree = now; }
+    const bool enVeille   = nidmi_usbnet::suspendu();
+    const bool branche    = nidmi_usbnet::linkUp() && !enVeille;
+    const bool silencieux = b.dernierRx == 0 || now - b.dernierRx >= CABLE_SILENCE_MS;
+    const bool enEchec    = b.derniereExpiree != 0 && now - b.derniereExpiree < 5000;
+
+    // Sonder l'hote qui se tait — seulement si la bascule a quelque chose a
+    // decider : reglage actif, ou radio tenue coupee.
+    if (branche && (b.prioritaire || b.tientLeWifi) && b.dernierRx != 0 &&
+        now - b.dernierRx >= CABLE_SONDE_APRES_MS && now - b.derniereSonde >= CABLE_SONDE_TOUS_MS) {
+        b.derniereSonde = now;
+        if (nidmi_usbnet::sonder()) b.sondes++;
+    }
+
+    if (b.tientLeWifi) {
+        const char* cause = !b.prioritaire ? "reglage"
+                          : enVeille       ? "veille ou debranche"
+                          : !branche       ? "demonte"
+                          : enEchec        ? "emission"
+                          : silencieux     ? "silence" : nullptr;
+        if (!cause) return;
+        b.tientLeWifi = false;
+        b.depuis = now;
+        b.retours++;
+        b.derniereCause = cause;
+        b.retourA = now;
+        b.vivantDepuis = 0;
+        basculeRallumerRadio(now);
+        NIDMI_WEB_LOG("[NiDMI] cable prioritaire : WiFi rallume (%s)", cause);
+        return;
+    }
+
+    const bool vivant = branche && !silencieux && !enEchec && nidmi_usbnet::hoteConnu();
+    const bool essai  = g_essai.enCours || g_essaiDemande;
+    const bool auRepos = b.retours > 0 && now - b.retourA < CABLE_RECOUPE_MS;
+    if (!b.prioritaire || !vivant || essai || !serverCore.radioWifiAllumee() || auRepos) {
+        b.vivantDepuis = 0;
+        return;
+    }
+    if (b.vivantDepuis == 0) {
+        b.vivantDepuis = now;
+        b.tramesFenetre = 0;
+        return;
+    }
+    if (now - b.vivantDepuis < CABLE_CONFIRMATION_MS || b.tramesFenetre < CABLE_TRAMES_MIN) return;
+    serverCore.couperRadioWifi();
+    b.tientLeWifi = true;
+    b.depuis = now;
+    b.coupures++;
+    b.vivantDepuis = 0;
 }
 
 // Le mapping GPIO est maintenant géré par PinMapper
@@ -631,6 +810,7 @@ void nidmi_loop() {
         g_essai.tasApres  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         g_essai.mesureApres = true;
     }
+    basculeCableBoucle();
 
     // Tentative de reconnexion STA automatique si des identifiants sont connus.
     // connectSta() est non bloquant : on se contente de relancer WiFi.begin() et
@@ -670,9 +850,10 @@ void nidmi_loop() {
 
     serverCore.update();
 
-    // Porte l'annonce de lien vers l'hôte et l'activation mDNS sur le lien USB.
-    // Ces deux annonces doivent être répétées : émises une seule fois elles se
-    // perdent si l'hôte n'a pas fini de se configurer, et rien ne le signale.
+    // Lien USB : épingle la tâche usbd au cœur de l'interruption (sans quoi
+    // l'émission se fige, MESURES §147), suit le montage pour le netif, et
+    // porte l'activation mDNS. N'annonce PAS l'état du lien : il appartient
+    // au pilote NCM.
     nidmi_usbnet::update();
 
     // La sante de la carte : calculee une fois par seconde, annoncee si elle change.
