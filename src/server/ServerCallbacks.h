@@ -47,20 +47,36 @@ unsigned char nidmi_sante(void);
 void nidmi_santeTexte(unsigned char f, char* out, unsigned n);
 
 /**
- * @brief Le cable OU le WiFi — voir NiDMI.cpp, « LE CABLE OU LE WIFI ».
- * Rallumer la radio, ou l'ESSAI : la couper dureeMs, mesurer, la rallumer sur
- * son seul minuteur. Differes de 300 ms. Rien n'est memorise.
+ * @brief L'ESSAI — voir NiDMI.cpp, « LE CABLE OU LE WIFI » : couper la radio
+ * dureeMs, mesurer, la rallumer sur son seul minuteur. Differe de 300 ms. Rien
+ * n'est memorise. (Rallumer la radio, c'est le forcage :
+ * nidmi_demanderWifiForce.)
  */
-void nidmi_requestRallumerWifi(void);
 void nidmi_requestEssaiWifi(unsigned long dureeMs);
 
 /**
  * @brief La bascule « cable prioritaire » — voir NiDMI.cpp. Demander de
- * l'activer ou de la retirer (appliquee et memorisee en NVS par nidmi_loop),
- * et savoir si c'est elle qui tient la radio coupee en ce moment.
+ * l'activer ou de la retirer (appliquee par nidmi_loop dans la seconde,
+ * memorisee en NVS 3 s apres le dernier changement).
  */
 void nidmi_demanderCablePrioritaire(bool actif);
-bool nidmi_cableTientLeWifi(void);
+
+/**
+ * @brief Le WiFi : trois regles, un seul chef — voir NiDMI.cpp (MESURES §155).
+ * L'option « Instrument autonome » (memorisee), le forcage (jamais memorise :
+ * un redemarrage le retire), et si c'est une REGLE qui tient la radio coupee
+ * en ce moment (bascule ou autonomie).
+ */
+void nidmi_demanderAutonome(bool actif);
+void nidmi_demanderWifiForce(bool actif);
+bool nidmi_regleTientLeWifiCoupe(void);
+
+/**
+ * @brief s("sys.<nom>") dans un script .nms : demander a la carte (NiDMI.cpp,
+ * « LES FONCTIONS DE LA CARTE, POUR LES SCRIPTS »). Pose une demande, rien
+ * d'autre : appelable depuis une tache temps reel.
+ */
+void nidmi_sys_recevoir(const char* nom, float valeur);
 
 /**
  * @brief Relancer le cable : refaire l'enumeration USB (MESURES §154). Executee

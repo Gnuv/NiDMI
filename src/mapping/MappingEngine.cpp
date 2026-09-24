@@ -10,6 +10,7 @@
 #include "../Globals.h"
 #include "../midi/MidiSender.h"
 #include "../server/ServerCore.h"
+#include "../server/ServerCallbacks.h"   // nidmi_sys_recevoir : s("sys.<nom>")
 #endif
 
 // INITIALISATION DES STATICS (Obligatoire dans le .cpp)
@@ -794,10 +795,27 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
                 // Rien a afficher sur une carte sans ecran, mais on PUBLIE la
                 // valeur : c'est ce qui permet a l'app de la lire, et a un
                 // autre pipeline de la relire par r("fader").
+#ifndef NMS_BANC_HOTE
+                // Sauf sous un nom sys.* : la carte y publie son etat, et ne
+                // le republie qu'a un changement — une valeur ecrite la par
+                // un script mentirait a r("sys.<nom>") jusque-la.
+                if (f.startsWith("sys.")) return true;
+#endif
                 FluxRegistry::update(f.c_str(), courant);
             }
             return true;
         }
+#ifndef NMS_BANC_HOTE
+        /* s("sys.<nom>") : une fonction de la CARTE, pas une variable — la
+         * valeur courante est une demande (NiDMI.cpp, « LES FONCTIONS DE LA
+         * CARTE, POUR LES SCRIPTS »). Elle n'est pas ecrite dans le bus : c'est
+         * la carte qui y publie l'ETAT, que r("sys.<nom>") relit. Sur le poste
+         * (banc de conformite), une variable ordinaire : il n'y a pas de carte. */
+        if (nom.startsWith("sys.")) {
+            nidmi_sys_recevoir(nom.c_str(), courant);
+            return true;
+        }
+#endif
         FluxRegistry::update(nom.c_str(), courant);
         return true;
     }

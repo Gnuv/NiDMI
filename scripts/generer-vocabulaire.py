@@ -31,6 +31,7 @@ import re, sys, pathlib
 
 RACINE  = pathlib.Path(__file__).resolve().parent.parent
 MOTEUR  = RACINE / "src/mapping/MappingEngine.cpp"
+CARTE   = RACINE / "src/NiDMI.cpp"
 SORTIE  = RACINE / "src/mapping/VocabulaireEmbarque.h"
 
 # Le moteur reconnait ses objets de DEUX facons, et de deux seulement :
@@ -47,6 +48,44 @@ def noms_du_moteur(source):
     for m in FORME_EGAL.finditer(source):  noms.add(m.group(1))
     return sorted(noms)
 
+# LES FONCTIONS DE LA CARTE (MESURES §155). s("sys.<nom>") commande la carte,
+# r("sys.<nom>") relit son etat. Les deux listes ne sont pas les memes —
+# sys.reconnect se commande et ne se lit pas, sys.cable se lit et ne se
+# commande pas — et chacune vit a UN endroit de NiDMI.cpp :
+#     nidmi_sys_recevoir()  strcmp(nom, "sys.<nom>")              ce que s() commande
+#     publierEtatsSys()     FluxRegistry::update("sys.<nom>", …)  ce que r() relit
+# On les lit la, dans le corps de ces deux fonctions et nulle part ailleurs :
+# un nom cite dans un commentaire n'est pas une fonction.
+FORME_SYS_ENVOI   = re.compile(r'strcmp\(nom,\s*"(sys\.[^"]+)"\)')
+FORME_SYS_LECTURE = re.compile(r'FluxRegistry::update\("(sys\.[^"]+)"')
+
+def corps_de(source, signature):
+    """Le corps, accolades comprises, de la definition qui suit `signature`."""
+    i = source.find(signature)
+    if i < 0: return None
+    j = source.find("{", i)
+    profondeur = 0
+    for k in range(j, len(source)):
+        if source[k] == "{": profondeur += 1
+        elif source[k] == "}":
+            profondeur -= 1
+            if profondeur == 0: return source[j:k + 1]
+    return None
+
+def dans_l_ordre(motif, texte):
+    # L'ordre du source, pas l'ordre alphabetique : c'est l'ordre dans lequel
+    # la carte les decrit, et l'editeur les cite ainsi.
+    vus = []
+    for m in motif.finditer(texte):
+        if m.group(1) not in vus: vus.append(m.group(1))
+    return vus
+
+def fonctions_de_la_carte(source):
+    envoi   = corps_de(source, "void nidmi_sys_recevoir(")
+    lecture = corps_de(source, "static void publierEtatsSys(")
+    if envoi is None or lecture is None: return None
+    return dans_l_ordre(FORME_SYS_ENVOI, envoi), dans_l_ordre(FORME_SYS_LECTURE, lecture)
+
 def echappe(n):
     return n.replace('\\', '\\\\').replace('"', '\\"')
 
@@ -59,13 +98,24 @@ def main():
     if not noms:
         print("✗ aucun objet extrait — la forme de reconnaissance a change ?", file=sys.stderr)
         return 1
+    if not CARTE.exists():
+        print(f"✗ carte introuvable : {CARTE}", file=sys.stderr)
+        return 1
+    sysfn = fonctions_de_la_carte(CARTE.read_text(encoding="utf-8", errors="replace"))
+    if not sysfn or not sysfn[0] or not sysfn[1]:
+        print("✗ fonctions sys.* introuvables dans NiDMI.cpp — nidmi_sys_recevoir() ou "
+              "publierEtatsSys() a change de forme ?", file=sys.stderr)
+        return 1
+    sys_s, sys_r = sysfn
 
     # La reponse est ecrite ICI, une fois, et vit en flash. La route n'a plus
     # qu'a la servir : pas de String construite a chaque requete, donc pas un
     # octet de tas pris a AsyncTCP — c'est le bloc contigu le plus grand qui
     # conditionne le serveur, et il est deja la ressource rare.
     objets = ",".join(f'"{echappe(n)}"' for n in noms)
-    corps  = f'{{"n":{len(noms)},"objets":[{objets}]}}'
+    liste  = lambda l: ",".join(f'"{echappe(n)}"' for n in l)
+    corps  = (f'{{"n":{len(noms)},"objets":[{objets}],'
+              f'"sys":{{"s":[{liste(sys_s)}],"r":[{liste(sys_r)}]}}}}')
 
     # Decoupe en lignes de source lisibles (~90 colonnes) sans couper un nom.
     lignes, courante = [], ""
@@ -79,7 +129,9 @@ def main():
 //
 //     python3 scripts/generer-vocabulaire.py
 //
-// CE QUE CETTE CARTE-CI EXECUTE du langage .nms, derive de MappingEngine.cpp.
+// CE QUE CETTE CARTE-CI EXECUTE du langage .nms, derive de MappingEngine.cpp ;
+// et ses fonctions pour les scripts — "sys" : ce que s("sys.<nom>") commande,
+// ce que r("sys.<nom>") relit —, derivees de NiDMI.cpp (MESURES §155).
 //
 // L'app ne le devine plus : elle le DEMANDE, a /api/mapping/vocabulaire. Elle
 // en portait une copie ecrite a la main — dix noms quand la carte en executait
@@ -94,10 +146,15 @@ def main():
 static const char VOCABULAIRE_EMBARQUE_JSON[] =
 {litteral};
 
-// {len(noms)} objets.
+// Ce que s("sys.<nom>") commande, pour le message qu'une faute de nom fait
+// ecrire a la carte (NiDMI.cpp) : la meme liste, pas une recopie.
+#define VOCABULAIRE_SYS_COMMANDES "{", ".join(sys_s)}"
+
+// {len(noms)} objets ; s() commande {", ".join(sys_s)} ; r() relit {", ".join(sys_r)}.
 ''', encoding="utf-8")
 
-    print(f"✓ {len(noms)} objets → src/mapping/VocabulaireEmbarque.h ({len(corps)} octets servis)")
+    print(f"✓ {len(noms)} objets, {len(sys_s)} + {len(sys_r)} fonctions sys "
+          f"→ src/mapping/VocabulaireEmbarque.h ({len(corps)} octets servis)")
     return 0
 
 sys.exit(main())

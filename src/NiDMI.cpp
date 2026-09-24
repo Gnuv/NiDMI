@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include "audio/AudioEngine.h"
 #include "mapping/CueStore.h"
+#include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
 #endif
@@ -38,22 +39,22 @@ static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative apr�
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
 /* ── LE CABLE OU LE WIFI ─────────────────────────────────────────────────────
  * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
- * Mesure (MESURES §147), son charge : cable seul, bloc 19 444 o et l'app
- * servie, MIDI 0 retard, 0 sous-alimentation sous charge ; WiFi allume, 7 668
- * o et la page de secours.
+ * Mesure (MESURES §147), son charge, sous charge : cable seul, MIDI 0 retard et
+ * 0 sous-alimentation ; WiFi allume, des retards MIDI et des decrochages — les
+ * paquets de la radio passent avant tout. (La memoire, elle, ne l'impose plus
+ * depuis le §152 : WiFi allume, 31 732 o d'un seul tenant.)
  *
- * LA BASCULE « CABLE PRIORITAIRE » (reglage en NVS, oui par defaut) coupe la
- * radio quand le cable VIT, et la rallume des qu'il se tait. Une premiere
- * coupure croyait linkUp(), vu vrai sur un lien mort (§140, §143) : elle a ete
- * retiree. La preuve de vie, ici, ce sont des TRAMES RECUES de l'hote — au
- * repos, un Mac en envoie en continu — et des emissions qui n'expirent pas.
- * Le demarrage, lui, allume TOUJOURS la radio (§142) : on coupe en marche.
+ * Qui decide : « LE WIFI : TROIS REGLES, UN SEUL CHEF » — le forcage,
+ * l'instrument autonome, puis la bascule « cable prioritaire », qui coupe la
+ * radio quand le cable VIT et la rallume des qu'il se tait. La preuve de vie,
+ * ce sont des TRAMES RECUES de l'hote (linkUp() a ete vu vrai sur un lien mort,
+ * §140, §143) ; au repos un Mac se tait jusqu'a une minute : on le sonde
+ * (§148). Le demarrage, lui, allume TOUJOURS la radio (§142) : on coupe en
+ * marche.
  *
- * L'ESSAI, lui, coupe le WiFi N secondes sur son SEUL minuteur, pour mesurer.
- * Il marche sur tous les builds. Refuse pendant que la bascule tient le WiFi
- * coupe : il n'y aurait rien a mesurer. */
-static volatile bool g_wifiRallumerDemande = false;
-static unsigned long g_wifiRallumerA = 0;
+ * L'ESSAI coupe le WiFi N secondes sur son SEUL minuteur, pour mesurer. Il
+ * marche sur tous les builds. Refuse pendant qu'une regle tient le WiFi coupe :
+ * il n'y aurait rien a mesurer. */
 static volatile bool g_essaiDemande = false;
 static unsigned long g_essaiDemandeA = 0;
 static unsigned long g_essaiDureeDemandee = 10000;
@@ -254,10 +255,6 @@ extern "C" void nidmi_requestDownloadMode(const char* par){
 }
 
 // Le cable OU le WiFi — voir « LE CABLE OU LE WIFI ».
-extern "C" void nidmi_requestRallumerWifi(){
-    g_wifiRallumerA = millis();
-    g_wifiRallumerDemande = true;
-}
 extern "C" void nidmi_requestEssaiWifi(unsigned long dureeMs){
     g_essaiDureeDemandee = dureeMs;
     g_essaiDemandeA = millis();
@@ -310,6 +307,31 @@ struct BasculeCable {
 static BasculeCable g_bascule;
 static volatile int8_t g_basculeDemande = -1;   // -1 rien ; 0 retirer ; 1 activer
 
+// La politique du WiFi (forcage, autonomie) — voir « LE WIFI : TROIS REGLES ».
+struct PolitiqueWifi {
+    bool lu = false;
+    bool autonome = false;                 // NVS "standalone"
+    bool force = false;                    // jamais memorise
+    bool autonomeTient = false;            // c'est l'autonomie qui a coupe la radio
+    bool autonomeAEcrire = false, prioAEcrire = false;
+    unsigned long autonomeChangeA = 0, prioChangeA = 0;
+    unsigned long derniereRelanceScript = 0;
+    bool sysInconnuDit = false;
+    // Ce que coute la memorisation d'une option (MESURES §155) : une ecriture
+    // NVS qui efface une page arrete l'autre coeur le temps de l'effacement.
+    uint32_t ecrituresNvs = 0, ecritureNvsPireUs = 0, ecritureNvsDerniereUs = 0;
+    uint32_t ecrituresSuiviesDeRetard = 0, sousAlimAvant = 0;
+    bool retardAVerifier = false;
+};
+static PolitiqueWifi g_politique;
+static volatile int8_t g_demandeAutonome = -1;   // -1 rien ; 0 retirer ; 1 activer
+static volatile int8_t g_demandeForce = -1;
+static volatile bool g_relanceDemandeScript = false;
+static volatile bool g_sysInconnu = false;
+static char g_sysInconnuNom[16];                 // le premier, pour le dire
+static const unsigned long OPTION_MEMORISEE_APRES_MS = 3000;
+static const unsigned long RELANCE_SCRIPT_TOUS_MS = 10000;
+
 extern "C" void nidmi_demanderCablePrioritaire(bool actif){
     g_basculeDemande = actif ? 1 : 0;
 }
@@ -324,17 +346,21 @@ static volatile bool g_relanceDemande = false;
 extern "C" void nidmi_demanderRelanceCable(){
     g_relanceDemande = true;
 }
-extern "C" bool nidmi_cableTientLeWifi(){
-    return g_bascule.tientLeWifi;
-}
 String nidmi_cablePrioritaireJson(){
     const BasculeCable b = g_bascule;
+    const PolitiqueWifi pol = g_politique;
     const unsigned long now = millis();
-    const char* etat = b.tientLeWifi ? "cable"
-                     : !b.prioritaire ? "desactive"
-                     : b.vivantDepuis ? "confirmation" : "veille";
+    const char* etat = pol.force         ? "force"
+                     : pol.autonomeTient ? "autonome"
+                     : b.tientLeWifi     ? "cable"
+                     : !b.prioritaire    ? "desactive"
+                     : b.vivantDepuis    ? "confirmation" : "veille";
     String j = "{\"prioritaire\":";
     j += b.prioritaire ? "true" : "false";
+    j += ",\"autonome\":";
+    j += pol.autonome ? "true" : "false";
+    j += ",\"wifi_force\":";
+    j += pol.force ? "true" : "false";
     j += ",\"etat\":\"" + String(etat) + "\"";
     j += ",\"depuis_ms\":" + String(now - b.depuis);
     j += ",\"dernier_rx_ms\":" + (b.dernierRx ? String(now - b.dernierRx) : String("null"));
@@ -343,6 +369,10 @@ String nidmi_cablePrioritaireJson(){
     j += ",\"derniere_cause\":\"" + String(b.derniereCause) + "\"";
     j += ",\"radio_en_attente\":";
     j += b.radioEnAttente ? "true" : "false";
+    j += ",\"nvs\":{\"ecritures\":" + String(pol.ecrituresNvs)
+       + ",\"pire_us\":" + String(pol.ecritureNvsPireUs)
+       + ",\"derniere_us\":" + String(pol.ecritureNvsDerniereUs)
+       + ",\"suivies_d_un_retard_audio\":" + String(pol.ecrituresSuiviesDeRetard) + "}";
     j += ",\"confirmation_ms\":" + String(CABLE_CONFIRMATION_MS);
     j += ",\"silence_ms\":" + String(CABLE_SILENCE_MS) + "}";
     return j;
@@ -376,32 +406,10 @@ static void basculeRallumerRadio(unsigned long now){
     }
 }
 
-static void basculeCableBoucle(){
+// La regle « cable prioritaire » elle-meme — appelee par wifiBoucle() quand ni
+// le forcage ni l'autonomie ne decident (voir « LE WIFI : TROIS REGLES »).
+static void basculeCable(unsigned long now){
     BasculeCable& b = g_bascule;
-    const unsigned long now = millis();
-    if (now - b.dernierTic < 250) return;
-    b.dernierTic = now;
-
-    if (!b.lu) {
-        Preferences p;
-        p.begin("nidmi", true);
-        b.prioritaire = p.getBool("cable_prio", true);
-        p.end();
-        b.lu = true;
-        b.depuis = now;
-    }
-    const int8_t demande = g_basculeDemande;
-    if (demande >= 0) {
-        g_basculeDemande = -1;
-        if ((demande == 1) != b.prioritaire) {
-            b.prioritaire = (demande == 1);
-            Preferences p;
-            p.begin("nidmi", false);
-            p.putBool("cable_prio", b.prioritaire);
-            p.end();
-        }
-    }
-    if (b.radioEnAttente && now - b.radioEchecA >= CABLE_RADIO_REESSAI_MS) basculeRallumerRadio(now);
 
     // La preuve de vie : des trames recues, des emissions qui n'expirent pas.
     uint32_t rx = 0, txExp = 0;
@@ -457,6 +465,214 @@ static void basculeCableBoucle(){
     b.depuis = now;
     b.coupures++;
     b.vivantDepuis = 0;
+}
+
+/* ── LE WIFI : TROIS REGLES, UN SEUL CHEF ────────────────────────────────
+ * Qui decide si la radio est allumee, dans cet ordre (MESURES §155) :
+ *   1. FORCE — un bouton (s("sys.wifi") recoit une valeur > 0) ou l'app
+ *      (POST /api/reseau/wifi etat=on) : la radio est allumee, quelle que soit
+ *      la regle, jusqu'a une valeur 0 (etat=off) ou au redemarrage. C'est la
+ *      porte de secours d'un instrument autonome. Pas memorise, a dessein.
+ *   2. AUTONOME — l'option « Instrument autonome » (NVS "standalone") : la
+ *      radio est coupee, cable branche ou non. On ne branche l'instrument a
+ *      l'ordinateur que pour le configurer, par le cable (192.168.7.1). Refusee
+ *      sur un firmware sans lien reseau USB : on s'enfermerait dehors.
+ *   3. CABLE PRIORITAIRE — la bascule ci-dessus.
+ * Le demarrage allume TOUJOURS la radio (§142) : la regle coupe en marche.
+ * Les deux options se memorisent 3 s apres leur dernier changement : un bouton
+ * qui bascule vite n'use pas la flash. Un tour toutes les 250 ms. */
+
+extern "C" void nidmi_demanderAutonome(bool actif){
+    g_demandeAutonome = actif ? 1 : 0;
+}
+extern "C" void nidmi_demanderWifiForce(bool actif){
+    g_demandeForce = actif ? 1 : 0;
+}
+extern "C" bool nidmi_regleTientLeWifiCoupe(){
+    return g_bascule.tientLeWifi || g_politique.autonomeTient;
+}
+
+/* ── LES FONCTIONS DE LA CARTE, POUR LES SCRIPTS ─────────────────────────
+ * Un s("sys.<nom>") dans un script .nms — bouton, capteur, bloc map — n'ecrit
+ * pas le bus : il demande a la carte (MappingEngine.cpp). Appele depuis la
+ * tache qui execute le script, MIDI ou capteurs : on ne fait que POSER la
+ * demande, et nidmi_loop l'execute — jamais la radio, l'USB ou la NVS depuis
+ * une tache temps reel. La valeur est celle qui entre dans le s() : > 0 = oui,
+ * 0 = non.
+ *   sys.wifi        force la radio allumee ; 0 rend la main a la regle
+ *   sys.standalone  l'option « Instrument autonome »
+ *   sys.cablefirst  l'option « Cable prioritaire »
+ *   sys.reconnect   front montant : relancer le cable (au plus toutes les 10 s)
+ * Et r() relit l'etat : ces noms-la, plus sys.cable (1 si l'ordinateur utilise
+ * le reseau du cable) — publies dans le bus par nidmi_loop. */
+extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
+    const bool oui = valeur > 0.0f;
+    if (!strcmp(nom, "sys.wifi"))              g_demandeForce = oui ? 1 : 0;
+    else if (!strcmp(nom, "sys.standalone"))   g_demandeAutonome = oui ? 1 : 0;
+    else if (!strcmp(nom, "sys.cablefirst"))   g_basculeDemande = oui ? 1 : 0;
+    else if (!strcmp(nom, "sys.reconnect")) {
+        static bool avant = false;             // front montant : une relance par appui
+        if (oui && !avant) g_relanceDemandeScript = true;
+        avant = oui;
+    } else if (!g_sysInconnu) {
+        strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
+        __sync_synchronize();                  // le nom avant le drapeau
+        g_sysInconnu = true;
+    }
+}
+
+// Les etats, lus par r("sys.<nom>"). Publies a chaque changement seulement.
+static void publierEtatsSys(){
+    static int8_t wifi = -1, cable = -1, autonome = -1, prio = -1;
+    const int8_t w = serverCore.radioWifiAllumee() ? 1 : 0;
+    const int8_t c = nidmi_usbnet::reseauActif() ? 1 : 0;
+    const int8_t a = g_politique.autonome ? 1 : 0;
+    const int8_t p = g_bascule.prioritaire ? 1 : 0;
+    if (w != wifi)     { wifi = w;     FluxRegistry::update("sys.wifi", w); }
+    if (c != cable)    { cable = c;    FluxRegistry::update("sys.cable", c); }
+    if (a != autonome) { autonome = a; FluxRegistry::update("sys.standalone", a); }
+    if (p != prio)     { prio = p;     FluxRegistry::update("sys.cablefirst", p); }
+}
+
+static void wifiBoucle(){
+    PolitiqueWifi& p = g_politique;
+    BasculeCable& b = g_bascule;
+    const unsigned long now = millis();
+    if (now - b.dernierTic < 250) return;
+    b.dernierTic = now;
+
+    if (!p.lu) {
+        Preferences prefs;
+        prefs.begin("nidmi", true);
+        b.prioritaire = prefs.getBool("cable_prio", true);
+        p.autonome = prefs.getBool("standalone", false) && nidmi_usbnet::enabled();
+        prefs.end();
+        p.lu = true;
+        b.lu = true;
+        b.depuis = now;
+    }
+
+    // Les demandes — de l'app ou d'un script. L'etat change tout de suite ; la
+    // memorisation attend que l'option se soit posee.
+    const int8_t dPrio = g_basculeDemande;
+    if (dPrio >= 0) {
+        g_basculeDemande = -1;
+        if ((dPrio == 1) != b.prioritaire) {
+            b.prioritaire = (dPrio == 1);
+            p.prioAEcrire = true;
+            p.prioChangeA = now;
+        }
+    }
+    const int8_t dAuto = g_demandeAutonome;
+    if (dAuto >= 0) {
+        g_demandeAutonome = -1;
+        const bool voulu = (dAuto == 1) && nidmi_usbnet::enabled();
+        if (voulu != p.autonome) {
+            p.autonome = voulu;
+            p.autonomeAEcrire = true;
+            p.autonomeChangeA = now;
+        }
+    }
+    const int8_t dForce = g_demandeForce;
+    if (dForce >= 0) {
+        g_demandeForce = -1;
+        p.force = (dForce == 1);
+    }
+    if (g_relanceDemandeScript) {
+        g_relanceDemandeScript = false;
+        if (p.derniereRelanceScript == 0 || now - p.derniereRelanceScript >= RELANCE_SCRIPT_TOUS_MS) {
+            p.derniereRelanceScript = now;
+            nidmi_usbnet::relancer();
+        }
+    }
+    if (g_sysInconnu && !p.sysInconnuDit) {
+        p.sysInconnuDit = true;
+        NIDMI_WEB_LOG("[NiDMI] s(\"%s\") : la carte n'a pas cette fonction — elle connait "
+                      VOCABULAIRE_SYS_COMMANDES, g_sysInconnuNom);
+    }
+    // Un bloc audio en retard dans le quart de seconde qui suit une ecriture ?
+    if (p.retardAVerifier) {
+        p.retardAVerifier = false;
+        if (AudioEngine::metriques().sousAlimentations > p.sousAlimAvant) p.ecrituresSuiviesDeRetard++;
+    }
+    if ((p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS) ||
+        (p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS)) {
+        Preferences prefs;
+        prefs.begin("nidmi", false);
+        p.sousAlimAvant = AudioEngine::metriques().sousAlimentations;
+        const uint32_t t0 = micros();
+        bool ecrit = false;
+        if (p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS) {
+            p.prioAEcrire = false;
+            if (prefs.getBool("cable_prio", true) != b.prioritaire) {
+                prefs.putBool("cable_prio", b.prioritaire);
+                ecrit = true;
+            }
+        }
+        if (p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS) {
+            p.autonomeAEcrire = false;
+            if (prefs.getBool("standalone", false) != p.autonome) {
+                prefs.putBool("standalone", p.autonome);
+                ecrit = true;
+            }
+        }
+        const uint32_t dt = micros() - t0;
+        prefs.end();
+        if (ecrit) {
+            p.ecrituresNvs++;
+            p.ecritureNvsDerniereUs = dt;
+            if (dt > p.ecritureNvsPireUs) p.ecritureNvsPireUs = dt;
+            p.retardAVerifier = true;
+        }
+    }
+
+    const bool essai = g_essai.enCours || g_essaiDemande;
+    // Une remise en marche qui a manque de memoire se retente — si la radio
+    // est encore voulue : l'instrument autonome l'annule.
+    const bool reessai = b.radioEnAttente && now - b.radioEchecA >= CABLE_RADIO_REESSAI_MS;
+
+    if (p.force) {
+        // La radio doit etre la : on la reprend a qui la tient.
+        if (b.tientLeWifi || p.autonomeTient) {
+            b.tientLeWifi = false;
+            p.autonomeTient = false;
+            b.depuis = now;
+            b.retours++;
+            b.derniereCause = "force";
+            b.retourA = now;
+            b.vivantDepuis = 0;
+        }
+        if (reessai || (!serverCore.radioWifiAllumee() && !b.radioEnAttente && !essai))
+            basculeRallumerRadio(now);
+    } else if (p.autonome) {
+        // La radio doit etre coupee. Deja coupee par la bascule, ou en attente
+        // d'etre rallumee : elle change de main, sans rallumage inutile.
+        if (b.tientLeWifi || b.radioEnAttente) {
+            b.tientLeWifi = false;
+            b.radioEnAttente = false;
+            b.depuis = now;
+            b.vivantDepuis = 0;
+            p.autonomeTient = true;
+        }
+        if (!p.autonomeTient && serverCore.radioWifiAllumee() && !essai) {
+            serverCore.couperRadioWifi();
+            p.autonomeTient = true;
+            NIDMI_WEB_LOG("[NiDMI] instrument autonome : WiFi coupe");
+        }
+    } else {
+        if (reessai) basculeRallumerRadio(now);
+        if (p.autonomeTient) {                     // l'autonomie retiree : la radio revient
+            p.autonomeTient = false;
+            b.depuis = now;
+            b.retourA = now;
+            b.retours++;
+            b.derniereCause = "autonome";
+            basculeRallumerRadio(now);
+            NIDMI_WEB_LOG("[NiDMI] instrument autonome retire : WiFi rallume");
+        }
+        basculeCable(now);
+    }
+    publierEtatsSys();
 }
 
 // Le mapping GPIO est maintenant géré par PinMapper
@@ -729,6 +945,11 @@ void nidmi_begin() {
     
     touchDiag("AVANT ComponentManager.begin");
 
+    // Les etats de la carte, lisibles par r("sys.<nom>") : poses AVANT que les
+    // taches des scripts ne demarrent, pour que le bus n'ait plus qu'a en
+    // changer les valeurs (NiDMI.cpp, « LES FONCTIONS DE LA CARTE »).
+    publierEtatsSys();
+
     // Initialiser ComponentManager
     g_componentManager.begin(&g_midiRouter);
     NIDMI_WEB_LOG("[MEM] apres ComponentManager: %d\n", (int)ESP.getFreeHeap());
@@ -781,12 +1002,6 @@ void nidmi_loop() {
     }
 
     /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────── */
-    if (g_wifiRallumerDemande && millis() - g_wifiRallumerA >= 300) {
-        g_wifiRallumerDemande = false;
-        serverCore.demarrerRadioWifi();
-        g_lastStaConnectAttempt = 0;             // reconnexion STA sans attendre
-        g_staReconnectInterval = STA_RECONNECT_BASE_MS;
-    }
     if (g_essaiDemande && !g_essai.enCours && millis() - g_essaiDemandeA >= 300) {
         g_essaiDemande = false;
         g_essai = EssaiWifi();
@@ -821,7 +1036,7 @@ void nidmi_loop() {
         g_essai.tasApres  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         g_essai.mesureApres = true;
     }
-    basculeCableBoucle();
+    wifiBoucle();
     if (g_relanceDemande) {
         g_relanceDemande = false;
         nidmi_usbnet::relancer();

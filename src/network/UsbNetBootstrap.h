@@ -75,6 +75,11 @@ bool sonder();
  *  nidmi_loop(). Faux sans le variant, ou si une relance est en cours. */
 bool relancer();
 
+/** L'ordinateur utilise le reseau du cable (interface de donnees activee).
+ *  Faux avec le bus monte : il l'a laissee inactive — relancer(). Faux sans
+ *  le variant. */
+bool reseauActif();
+
 /** Adresse de l'ESP32 sur le lien, "0.0.0.0" si indisponible. */
 String ip();
 

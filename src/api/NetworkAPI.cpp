@@ -78,14 +78,16 @@ void setupNetworkAPI(AsyncWebServer& server) {
     /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────────
      * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
      *
-     * La bascule « cable prioritaire » (NiDMI.cpp) coupe la radio quand le
-     * cable vit, sur une preuve de vie qui ne ment pas — des trames recues —
-     * et la rallume des qu'il se tait. Son reglage est en NVS, oui par defaut.
-     * La coupure LIBRE, elle, reste retiree : son repli croyait linkUp(), vu
-     * vrai sur un lien mort (§143). L'ESSAI ne compte que sur son minuteur : il
-     * coupe la radio N secondes, mesure le tas, la rallume — sur TOUS les
-     * builds. Pendant que la bascule tient la radio coupee, l'essai et
-     * etat=on sont refuses : ils defairaient ce qu'elle tient. */
+     * Qui decide de la radio : NiDMI.cpp, « LE WIFI : TROIS REGLES, UN SEUL
+     * CHEF » (MESURES §155) — le forcage (/api/reseau/wifi etat=on|off),
+     * l'instrument autonome (/api/reseau/autonome), puis la bascule « cable
+     * prioritaire » (/api/reseau/cable-prioritaire), qui coupe la radio quand
+     * le cable vit, sur une preuve de vie qui ne ment pas — des trames recues —
+     * et la rallume des qu'il se tait. Les deux options sont en NVS. La coupure
+     * LIBRE reste retiree : son repli croyait linkUp(), vu vrai sur un lien
+     * mort (§143). L'ESSAI ne compte que sur son minuteur : il coupe la radio N
+     * secondes, mesure le tas, la rallume — sur TOUS les builds ; refuse quand
+     * une regle tient deja la radio coupee. */
     server.on("/api/reseau/liens", HTTP_GET, [](AsyncWebServerRequest *request){
         String j = "{\"wifi\":";
         j += serverCore.radioWifiAllumee() ? "true" : "false";
@@ -106,7 +108,31 @@ void setupNetworkAPI(AsyncWebServer& server) {
         nidmi_demanderCablePrioritaire(etat == "on");
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"prioritaire\":") + (etat == "on" ? "true" : "false") +
-            ",\"message\":\"applique et memorise dans la seconde\"}");
+            ",\"message\":\"applique dans la seconde, memorise 3 s apres\"}");
+    });
+
+    /* INSTRUMENT AUTONOME (MESURES §155) : le WiFi coupe, cable branche ou
+     * non — on ne branche l'instrument a l'ordinateur que pour le configurer.
+     * Refuse sans lien reseau USB : la carte n'aurait plus aucun chemin de
+     * configuration. Memorise par nidmi_loop ; s("sys.standalone") fait de meme. */
+    server.on("/api/reseau/autonome", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String etat = request->hasParam("etat", true)
+                          ? request->getParam("etat", true)->value() : String("");
+        if (etat != "on" && etat != "off") {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"etat=on ou etat=off\"}");
+            return;
+        }
+        if (etat == "on" && !nidmi_usbnet::enabled()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"pas de lien reseau USB dans ce firmware : "
+                "sans WiFi, la carte ne serait plus configurable\"}");
+            return;
+        }
+        nidmi_demanderAutonome(etat == "on");
+        request->send(200, "application/json",
+            String("{\"status\":\"ok\",\"autonome\":") + (etat == "on" ? "true" : "false") +
+            ",\"message\":\"applique dans la seconde, memorise 3 s apres\"}");
     });
 
     /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand
@@ -128,16 +154,21 @@ void setupNetworkAPI(AsyncWebServer& server) {
     server.on("/api/reseau/wifi", HTTP_POST, [](AsyncWebServerRequest *request){
         const String etat = request->hasParam("etat", true)
                           ? request->getParam("etat", true)->value() : String("");
-        if ((etat == "on" || etat == "essai") && nidmi_cableTientLeWifi()) {
-            request->send(409, "application/json",
-                "{\"status\":\"error\",\"message\":\"Le cable prioritaire tient le WiFi coupe : "
-                "le retirer (POST /api/reseau/cable-prioritaire etat=off) pour rallumer ou essayer.\"}");
+        /* on / off : le FORCAGE (MESURES §155) — la radio allumee quelle que
+         * soit la regle, jusqu'a etat=off ou au redemarrage ; off rend la main
+         * a la regle (autonomie, cable prioritaire), il ne coupe pas a
+         * l'aveugle. Le meme que s("sys.wifi") dans un script. */
+        if (etat == "on" || etat == "off") {
+            nidmi_demanderWifiForce(etat == "on");
+            request->send(200, "application/json", etat == "on"
+                ? "{\"status\":\"ok\",\"wifi\":\"force allume dans la seconde, jusqu'a etat=off ou redemarrage\"}"
+                : "{\"status\":\"ok\",\"wifi\":\"la regle reprend la main dans la seconde\"}");
             return;
         }
-        if (etat == "on") {
-            request->send(200, "application/json",
-                "{\"status\":\"ok\",\"wifi\":\"rallume dans 300 ms\"}");
-            nidmi_requestRallumerWifi();
+        if (etat == "essai" && nidmi_regleTientLeWifiCoupe()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"Une regle tient le WiFi coupe (cable prioritaire "
+                "ou instrument autonome) : l'essai n'a rien a couper.\"}");
             return;
         }
         if (etat == "essai") {
@@ -152,16 +183,8 @@ void setupNetworkAPI(AsyncWebServer& server) {
             nidmi_requestEssaiWifi((unsigned long)d * 1000UL);
             return;
         }
-        if (etat == "off") {
-            request->send(409, "application/json",
-                "{\"status\":\"error\",\"message\":\"Coupure libre retiree : le lien USB a "
-                "ete vu mort pendant que les deux bouts le disaient monte (MESURES §143). "
-                "La bascule cable prioritaire coupe le WiFi sur preuve de vie "
-                "(POST /api/reseau/cable-prioritaire). Pour mesurer : etat=essai.\"}");
-            return;
-        }
         request->send(400, "application/json",
-            "{\"status\":\"error\",\"message\":\"etat=essai, etat=on (etat=off est retire)\"}");
+            "{\"status\":\"error\",\"message\":\"etat=on (forcer), etat=off (rendre la main), etat=essai\"}");
     });
 
     server.on("/api/sta", HTTP_POST, [](AsyncWebServerRequest *request){

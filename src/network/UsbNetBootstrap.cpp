@@ -84,6 +84,10 @@ bool relancer() {
   return g_usbNet.relancerEnumeration();
 }
 
+bool reseauActif() {
+  return g_usbNet.reseauActif();
+}
+
 String ip() {
   return g_usbNet.localIp().toString();
 }
@@ -155,6 +159,9 @@ bool sonder() {
   return false;
 }
 bool relancer() {
+  return false;
+}
+bool reseauActif() {
   return false;
 }
 String ip() {
