@@ -65,8 +65,10 @@ QueueHandle_t s_file = nullptr;
 UBaseType_t s_capacite = 0;
 
 // Statiques : la creation ne peut pas echouer, il n'y a pas de chemin
-// « sans file » ou l'on reviendrait a l'ecriture directe.
-StackType_t s_pilePompe[2048];   // en octets sous ESP-IDF
+// « sans file » ou l'on reviendrait a l'ecriture directe. 2 560 o : elle en
+// utilise 1 072 au plus, releve apres les rafales du banc (MESURES §151) ;
+// c'est le chemin du MIDI, la marge est large a dessein.
+StackType_t s_pilePompe[2560];   // en octets sous ESP-IDF
 StaticTask_t s_tcbPompe;
 
 std::atomic<uint32_t> s_voulues[16][4];   // 128 bits par canal
