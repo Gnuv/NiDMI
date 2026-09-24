@@ -29,8 +29,14 @@ void setupOtaAPI(AsyncWebServer& server) {
     server.on("/api/ota", HTTP_POST,
         // onRequest : appelé une fois tout le corps reçu (uploads complets seulement)
         [](AsyncWebServerRequest *request) {
+            /* La marge de pile de la tache web a la fin de l'OTA : le chemin le
+             * plus profond qu'elle connaisse (ecriture flash, verification de
+             * l'image), et le seul qu'on ne puisse pas relire apres coup — la
+             * carte redemarre. Le flasheur l'affiche. MESURES §152. */
+            const unsigned marge = (unsigned)(uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
             if (s_otaOk && Update.isFinished() && !Update.hasError()) {
-                request->send(200, "application/json", "{\"status\":\"ok\",\"reboot\":true}");
+                request->send(200, "application/json",
+                              "{\"status\":\"ok\",\"reboot\":true,\"marge_pile\":" + String(marge) + "}");
                 NIDMI_WEB_LOG("[OTA] Image validée, redémarrage...");
                 nidmi_requestReboot((String("flash · ") + request->client()->remoteIP().toString()).c_str());
             } else {
@@ -38,7 +44,7 @@ void setupOtaAPI(AsyncWebServer& server) {
                                                : String("upload incomplet ou invalide");
                 if (Update.isRunning()) Update.abort();
                 request->send(500, "application/json",
-                              "{\"status\":\"error\",\"error\":\"" + err + "\"}");
+                              "{\"status\":\"error\",\"error\":\"" + err + "\",\"marge_pile\":" + String(marge) + "}");
                 NIDMI_WEB_LOG("[OTA] Echec: %s", err.c_str());
             }
             s_otaOk = false;

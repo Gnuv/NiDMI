@@ -787,6 +787,11 @@ compile_sketch() {
         # ou elle montait le coeur 0 — celui que le chien de garde surveille — a
         # 90 % sous charge (MESURES §149).
         EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_RUNNING_CORE=1")
+        # Sa pile : 10 Ko au lieu des 16 de la bibliotheque, prise au tas
+        # interne. Mesure : ~3 Ko au plus en service courant (app servie,
+        # charge du §82) ; l'OTA rend la marge qu'il laisse (reponse de
+        # /api/ota). MESURES §152.
+        EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_STACK_SIZE=10240")
 
 
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
@@ -906,6 +911,11 @@ build_binary() {
         # ou elle montait le coeur 0 — celui que le chien de garde surveille — a
         # 90 % sous charge (MESURES §149).
         EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_RUNNING_CORE=1")
+        # Sa pile : 10 Ko au lieu des 16 de la bibliotheque, prise au tas
+        # interne. Mesure : ~3 Ko au plus en service courant (app servie,
+        # charge du §82) ; l'OTA rend la marge qu'il laisse (reponse de
+        # /api/ota). MESURES §152.
+        EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_STACK_SIZE=10240")
 
 
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
