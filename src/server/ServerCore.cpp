@@ -1,3 +1,4 @@
+#include <esp_heap_caps.h>
 #include "ServerCore.h"
 #include "../Globals.h"
 #include <ESPmDNS.h>
@@ -337,23 +338,28 @@ bool nidmi_ws_peut_emettre(AsyncWebSocket& ws) {
 }
 
 /* ── La file de sortie ─────────────────────────────────────────────────────
- * Statique : pas un octet pris au tas, dont le plus gros bloc contigu decide
- * si AsyncTCP peut encore recevoir une image OTA. 24 x 216 = 5,2 ko en .bss. */
+ * Pas un octet pris au TAS INTERNE, dont le plus gros bloc contigu decide si
+ * AsyncTCP peut encore recevoir une image OTA : 24 x 216 = 5,2 ko, en PSRAM —
+ * ils etaient en .bss, donc retires a ce meme tas avant le demarrage (MESURES
+ * §152). Seules des taches y touchent, jamais cache coupe ; la structure de la
+ * file, qui porte son verrou, reste en RAM interne. Sans PSRAM, le tas interne. */
 namespace {
     constexpr size_t   kTrameMax   = 216;   // « DEBUG_LOG: » + 200 = le pire cas
     constexpr UBaseType_t kFileLen = 24;
     struct TrameWs { char t[kTrameMax]; };
 
     StaticQueue_t  g_fileTCB;
-    uint8_t        g_fileStock[kFileLen * sizeof(TrameWs)];
     QueueHandle_t  g_fileWs = nullptr;
     volatile int      g_clientsWs = 0;
     volatile uint32_t g_jetees   = 0;
 }
 
 void nidmi_ws_file_init() {
-    if (!g_fileWs)
-        g_fileWs = xQueueCreateStatic(kFileLen, sizeof(TrameWs), g_fileStock, &g_fileTCB);
+    if (g_fileWs) return;
+    const size_t taille = kFileLen * sizeof(TrameWs);
+    uint8_t* stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!stock) stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (stock) g_fileWs = xQueueCreateStatic(kFileLen, sizeof(TrameWs), stock, &g_fileTCB);
 }
 void nidmi_ws_client_arrive() { g_clientsWs++; }
 void nidmi_ws_client_parti()  { if (g_clientsWs > 0) g_clientsWs--; }

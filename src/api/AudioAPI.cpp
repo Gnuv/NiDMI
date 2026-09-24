@@ -906,13 +906,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
 
         // Le texte vit en PSRAM jusqu'au dernier morceau envoye.
         std::shared_ptr<char> garde(texte, [](char* p) { heap_caps_free(p); });
-        AsyncWebServerResponse *rep = request->beginResponse("application/json", n,
-            [garde, n](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-                const size_t k = (n - index < maxLen) ? (n - index) : maxLen;
-                memcpy(buffer, garde.get() + index, k);
-                return k;
-            });
-        request->send(rep);
+        request->send(nidmi_reponse_tampon(request, "application/json", garde, n));
     });
 
     /* ── LES RESERVOIRS, DITS PAR LA CARTE ────────────────────────────────

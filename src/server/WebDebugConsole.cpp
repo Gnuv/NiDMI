@@ -8,6 +8,7 @@
 #include <AsyncWebSocket.h>
 #include <cstdarg>
 #include <cstring>
+#include <esp_heap_caps.h>
 
 static AsyncWebSocket* g_ws = nullptr;
 static bool g_subscribe = false;
@@ -17,11 +18,32 @@ enum : uint16_t {
     kLineCap = 200,
 };
 
-static char g_ring[kRingLines][kLineCap];
+/* L'historique en PSRAM, pris au premier besoin : 9,6 Ko qu'un tableau
+ * statique retirait au tas interne en permanence (MESURES §152). Le premier
+ * appel peut venir de n'importe quelle tache, deux a la fois : l'adresse se
+ * pose par echange atomique, et le perdant rend son tampon. Sans PSRAM, la
+ * ligne ne va qu'au port serie. */
+typedef char LigneRing[kLineCap];
+static LigneRing* g_ring = nullptr;
 static uint16_t g_start = 0;
 static uint16_t g_size = 0;
 
+static LigneRing* ring() {
+    LigneRing* r = __atomic_load_n(&g_ring, __ATOMIC_ACQUIRE);
+    if (r) return r;
+    LigneRing* neuf = (LigneRing*)heap_caps_calloc(kRingLines, sizeof(LigneRing), MALLOC_CAP_SPIRAM);
+    if (!neuf) return nullptr;
+    LigneRing* attendu = nullptr;
+    if (!__atomic_compare_exchange_n(&g_ring, &attendu, neuf, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        heap_caps_free(neuf);
+        return attendu;
+    }
+    return neuf;
+}
+
 static void ring_push(const char* line) {
+    LigneRing* r = ring();
+    if (!r) return;
     uint16_t pos;
     if (g_size < kRingLines) {
         pos = (g_start + g_size) % kRingLines;
@@ -30,8 +52,8 @@ static void ring_push(const char* line) {
         pos = g_start;
         g_start = (g_start + 1) % kRingLines;
     }
-    strncpy(g_ring[pos], line, kLineCap - 1);
-    g_ring[pos][kLineCap - 1] = '\0';
+    strncpy(r[pos], line, kLineCap - 1);
+    r[pos][kLineCap - 1] = '\0';
 }
 
 static void send_debug_log(AsyncWebSocketClient* client, const char* line) {
@@ -65,6 +87,7 @@ static uint16_t g_flushIndex  = 0;
 
 void nidmi_web_debug_init(AsyncWebSocket* ws) {
     g_ws = ws;
+    ring();   // pris ici, au demarrage : jamais par une tache temps reel au premier journal
 }
 
 bool nidmi_web_debug_is_supported() {
@@ -81,7 +104,8 @@ void nidmi_web_debug_pump() {
         g_flushClient = 0;
         return;
     }
-    send_debug_log(c, g_ring[(g_start + g_flushIndex) % kRingLines]);
+    LigneRing* r = ring();
+    if (r) send_debug_log(c, r[(g_start + g_flushIndex) % kRingLines]);
     ++g_flushIndex;
 }
 

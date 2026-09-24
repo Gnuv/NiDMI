@@ -37,17 +37,23 @@ void setupComponentsAPI(AsyncWebServer& server) {
      * version du source dont elles viennent.
      *
      * FNV-1a 32 bits sur le JSON de toutes les pages, calcule une seule fois et
-     * garde : ~43 rendus dans le tampon statique, quelques dizaines de ms, et
-     * seulement si quelqu'un demande. */
+     * garde : ~43 rendus dans un tampon pris le temps du calcul (en PSRAM, voir
+     * nidmi_tampon_reponse), quelques dizaines de ms, et seulement si quelqu'un
+     * demande. */
     server.on("/api/components/empreinte", HTTP_GET, [](AsyncWebServerRequest* request) {
         static char cache[16] = {0};
         if (!cache[0]) {
-            static char tampon[10240];
+            constexpr size_t kTampon = 10240;
+            std::shared_ptr<char> tampon = nidmi_tampon_reponse(kTampon);
+            if (!tampon) {
+                request->send(503, "application/json", "{\"error\":\"memoire\"}");
+                return;
+            }
             uint32_t h = 2166136261u;                 // FNV-1a, valeur de depart
             const int total = (int)ComponentRegistry::count();
             for (int p = 0; p < total; p++) {
-                const int n = ComponentRegistry::toJsonArrayPage(tampon, sizeof(tampon), p, 1);
-                for (int i = 0; i < n; i++) { h ^= (uint8_t)tampon[i]; h *= 16777619u; }
+                const int n = ComponentRegistry::toJsonArrayPage(tampon.get(), kTampon, p, 1);
+                for (int i = 0; i < n; i++) { h ^= (uint8_t)tampon.get()[i]; h *= 16777619u; }
             }
             // Le NOMBRE compte aussi : deux jeux differents pourraient, a la
             // marge, donner le meme condense d'octets.
@@ -70,28 +76,34 @@ void setupComponentsAPI(AsyncWebServer& server) {
         /* Ignore le paramètre limit du client : on force 1 composant par page.
          * Raison : sur C3 avec ~29 KB heap libre, une copie String de 8 KB échoue
          * silencieusement quand le heap est fragmenté → JSON vide → boucle infinie.
-         * Avec limit=1, le JSON max est ~5 KB (un seul composant) et on utilise
-         * beginResponse_P (lecture directe depuis le buffer statique, zéro copie heap).
-         * LWIP tourne dans une seule tâche (tcpip_thread) → buffer statique sans race. */
+         * Avec limit=1, le JSON max est ~5 KB (un seul composant). */
         (void)limit;
         limit = 1;
 
         const int totalCount = static_cast<int>(ComponentRegistry::count());
         int totalPages = totalCount; // 1 composant par page
 
-        /* Buffer statique 10 KB : après optimisation JSON (clés courtes + options inline)
-         * lis3dh (le composant le plus lourd) tient en ~7-8 KB.
-         * beginResponse_P lit depuis ce buffer SANS copie heap → 0 allocation par requête. */
-        static char jsonBuffer[10240];
-        int written = ComponentRegistry::toJsonArrayPage(jsonBuffer, sizeof(jsonBuffer), page, limit);
+        /* 10 Ko : après optimisation JSON (clés courtes + options inline), lis3dh
+         * (le composant le plus lourd) tient en ~7-8 Ko. Le tampon appartient a
+         * CETTE reponse et la suit jusqu'au dernier envoi, en PSRAM (voir
+         * nidmi_tampon_reponse). Il etait statique et commun : 10 Ko de RAM
+         * interne en permanence, et relu APRES le retour du gestionnaire quand
+         * une page depasse le tampon d'envoi TCP — une deuxieme requete aurait
+         * pu le reecrire entre-temps (jamais vu : 0 page fausse sur 220 a 8
+         * requetes en parallele, MESURES §152). */
+        constexpr size_t kTampon = 10240;
+        std::shared_ptr<char> tampon = nidmi_tampon_reponse(kTampon);
+        if (!tampon) {
+            request->send(503, "application/json", "{\"error\":\"memoire\"}");
+            return;
+        }
+        int written = ComponentRegistry::toJsonArrayPage(tampon.get(), kTampon, page, limit);
 
-        if (written > 2 && written < (int)sizeof(jsonBuffer) - 2) {
+        if (written > 2 && written < (int)kTampon - 2) {
             Serial.printf("[API] page=%d/%d written=%d heap=%d\n",
                 page, totalPages-1, written, (int)ESP.getFreeHeap());
-            /* beginResponse_P lit depuis le buffer statique sans copie heap */
-            AsyncWebServerResponse* response = request->beginResponse_P(
-                200, "application/json",
-                (const uint8_t*)jsonBuffer, (size_t)written);
+            AsyncWebServerResponse* response =
+                nidmi_reponse_tampon(request, "application/json", tampon, (size_t)written);
             response->addHeader("X-Total-Count", String(totalCount));
             response->addHeader("X-Total-Pages", String(totalPages));
             response->addHeader("X-Current-Page", String(page));
@@ -104,25 +116,33 @@ void setupComponentsAPI(AsyncWebServer& server) {
         }
 #else
         /* Mode normal (sans pagination)
-         * Buffer 32 Ko pour les définitions avec MIDI params, formFields, etc.
-         * Chaque composant peut prendre ~500-2000 bytes selon sa complexité. */
-        static char jsonBuffer[32768];
+         * 32 Ko pour les définitions avec MIDI params, formFields, etc. Chaque
+         * composant peut prendre ~500-2000 bytes selon sa complexité. Tampon
+         * propre a la reponse, en PSRAM (voir nidmi_tampon_reponse). */
+        constexpr size_t kTampon = 32768;
+        std::shared_ptr<char> tampon = nidmi_tampon_reponse(kTampon);
+        if (!tampon) {
+            request->send(503, "application/json", "{\"error\":\"memoire\"}");
+            return;
+        }
+        char* jsonBuffer = tampon.get();
+        jsonBuffer[0] = '\0';
 
-        int written = ComponentRegistry::toJsonArray(jsonBuffer, sizeof(jsonBuffer));
+        int written = ComponentRegistry::toJsonArray(jsonBuffer, kTampon);
 
         /* Sécurité : s'assurer que written correspond au contenu réel (strlen).
          * Protège contre un compteur written désynchronisé du buffer réel
          * (par ex. si snprintf a tronqué mais que toJson n'a pas détecté). */
         size_t actualLen = strlen(jsonBuffer);
-        if (written > 0 && actualLen > 0 && actualLen < sizeof(jsonBuffer)) {
+        if (written > 0 && actualLen > 0 && actualLen < kTampon) {
             if ((size_t)written != actualLen) {
                 Serial.printf("[ComponentsAPI] WARNING: written=%d != strlen=%zu, utilisation strlen\n", written, actualLen);
             }
-            /* Envoyer avec la longueur réelle (strlen) via String pour éviter d'envoyer du garbage */
-            request->send(200, "application/json", String(jsonBuffer));
+            /* Envoyer avec la longueur réelle (strlen), pour ne pas envoyer de garbage */
+            request->send(nidmi_reponse_tampon(request, "application/json", tampon, actualLen));
         } else {
             Serial.printf("[ComponentsAPI] WARNING: Serialization failed (written=%d, strlen=%zu, bufSize=%zu)\n",
-                         written, actualLen, sizeof(jsonBuffer));
+                         written, actualLen, kTampon);
             request->send(500, "application/json", "{\"error\":\"Buffer too small for component definitions\"}");
         }
 #endif
@@ -153,9 +173,7 @@ void setupComponentsAPI(AsyncWebServer& server) {
      * }
      */
     server.on("/api/components/used-gpios", HTTP_GET, [](AsyncWebServerRequest* request) {
-        static char jsonBuffer[2048];
-        int written = 0;
-        
+
         // Créer un set des GPIOs utilisés
         std::set<uint8_t> usedGpios;
         
@@ -188,20 +206,16 @@ void setupComponentsAPI(AsyncWebServer& server) {
             }
         }
         
-        // Générer le JSON
-        written = snprintf(jsonBuffer, sizeof(jsonBuffer), "{\"gpios\":[");
-        
+        // Générer le JSON : quelques dizaines de broches au plus, une petite
+        // chaine suffit (un tampon statique de 2 Ko l'occupait en permanence).
+        String json = "{\"gpios\":[";
         bool first = true;
         for (uint8_t gpio : usedGpios) {
-            if (!first) {
-                written += snprintf(jsonBuffer + written, sizeof(jsonBuffer) - written, ",");
-            }
+            if (!first) json += ',';
             first = false;
-            written += snprintf(jsonBuffer + written, sizeof(jsonBuffer) - written, "%d", gpio);
+            json += String((int)gpio);
         }
-        
-        written += snprintf(jsonBuffer + written, sizeof(jsonBuffer) - written, "]}");
-        
-        request->send(200, "application/json", jsonBuffer);
+        json += "]}";
+        request->send(200, "application/json", json);
     });
 }
