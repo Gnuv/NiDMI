@@ -19,8 +19,25 @@ ServerCore::ServerCore()
  *
  * Idempotent. Le repli de nidmi_loop() appelle sans savoir, et un second appel
  * ne doit pas reconfigurer un AP qui sert deja des clients. */
+static SemaphoreHandle_t verrouRadio() {
+    static SemaphoreHandle_t v = xSemaphoreCreateRecursiveMutex();
+    return v;
+}
+
+ServerCore::LectureRadio::LectureRadio(TickType_t attente)
+    : pris(xSemaphoreTakeRecursive(verrouRadio(), attente) == pdTRUE) {}
+
+ServerCore::LectureRadio::~LectureRadio() {
+    if (pris) xSemaphoreGiveRecursive(verrouRadio());
+}
+
+bool ServerCore::LectureRadio::allumee() const {
+    return pris && serverCore.radioWifiAllumee();
+}
+
 void ServerCore::demarrerRadioWifi() {
     if (radioAllumee) return;
+    LectureRadio transition(portMAX_DELAY);   // voir « LE VERROU RADIO »
 
     /* Sans STA enregistré : AP seul (WIFI_AP). APSTA avec interface STA inactive peut provoquer
      * échecs ou boucles « mot de passe » / reconnexion sur téléphones (notamment ESP32-C3/S3). */
@@ -63,8 +80,9 @@ void ServerCore::demarrerRadioWifi() {
  * seulement quand un lien USB peut prendre le relais. */
 void ServerCore::couperRadioWifi() {
     if (!radioAllumee) return;
+    LectureRadio transition(portMAX_DELAY);   // voir « LE VERROU RADIO »
+    radioAllumee = false;                     // avant : un lecteur qui attend lira « coupee »
     WiFi.mode(WIFI_OFF);
-    radioAllumee = false;
 }
 
 void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode) {
@@ -74,7 +92,10 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
      * event WiFi, pour éviter les races avec la tâche serveur (AsyncWebSocket). */
     WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info){
         if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-            Serial.printf("[WiFi] STA got IP: %s\n", WiFi.localIP().toString().c_str());
+            // L'adresse de l'EVENEMENT, pas WiFi.localIP() : pas de lecture
+            // d'interface depuis cette tache (voir « LE VERROU RADIO »).
+            Serial.printf("[WiFi] STA got IP: %s\n",
+                          IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
         } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
             Serial.printf("[WiFi] STA déconnectée (raison=%d)\n", (int)info.wifi_sta_disconnected.reason);
         }

@@ -3,6 +3,7 @@
 #endif
 #include "OSCManager.h"
 #include <WiFi.h>
+#include "../server/ServerCore.h"   // LectureRadio : lire le WiFi sans courir apres une transition
 
 OSCManager::OSCManager() : 
     targetIP(""),
@@ -38,8 +39,10 @@ bool OSCManager::begin(const String& target_ip, uint16_t target_port, uint16_t l
     initialized = true;
     enabled = true;
 
-    // Calculer l'adresse broadcast selon le réseau actuel
-    if (WiFi.status() == WL_CONNECTED) {
+    // Calculer l'adresse broadcast selon le réseau actuel — sous le verrou
+    // radio, sans attendre (voir ServerCore.h, « LE VERROU RADIO »).
+    ServerCore::LectureRadio radio(0);
+    if (radio.allumee() && WiFi.status() == WL_CONNECTED) {
         // Mode STA : broadcast du réseau WiFi
         IPAddress ip = WiFi.localIP();
         IPAddress subnet = WiFi.subnetMask();
@@ -215,15 +218,23 @@ bool OSCManager::sendOSCMessage(OSCMessage& msg) {
             }
         }
         
-        if ((networkInterface == OSC_INTERFACE_STA || networkInterface == OSC_INTERFACE_BOTH) && 
-            WiFi.status() == WL_CONNECTED) {
+        // Adresse de diffusion STA lue sous le verrou radio, SANS attendre : une
+        // tache temps reel saute la diffusion plutot que d'attendre une
+        // transition du WiFi (voir ServerCore.h, « LE VERROU RADIO »).
+        bool staPret = false;
+        IPAddress broadcast;
+        if (networkInterface == OSC_INTERFACE_STA || networkInterface == OSC_INTERFACE_BOTH) {
+            ServerCore::LectureRadio radio(0);
+            if (radio.allumee() && WiFi.status() == WL_CONNECTED) {
+                IPAddress ip = WiFi.localIP();
+                IPAddress subnet = WiFi.subnetMask();
+                broadcast = IPAddress(ip[0] | (~subnet[0]), ip[1] | (~subnet[1]),
+                                      ip[2] | (~subnet[2]), ip[3] | (~subnet[3]));
+                staPret = true;
+            }
+        }
+        if (staPret) {
             // Broadcast sur STA (calculé selon le réseau)
-            IPAddress ip = WiFi.localIP();
-            IPAddress subnet = WiFi.subnetMask();
-            IPAddress broadcast = IPAddress(ip[0] | (~subnet[0]), 
-                                           ip[1] | (~subnet[1]), 
-                                           ip[2] | (~subnet[2]), 
-                                           ip[3] | (~subnet[3]));
             
             retryCount = 0;
             while (retryCount <= maxRetries && !success) {

@@ -54,6 +54,29 @@ public:
     void demarrerRadioWifi();
     void couperRadioWifi();
     bool radioWifiAllumee() const { return radioAllumee; }
+
+    /* ── LE VERROU RADIO ──────────────────────────────────────────────────
+     * WiFi.mode(WIFI_OFF) detruit les interfaces AP et STA (wifiLowLevelDeinit),
+     * attend esp_wifi_deinit(), et SEULEMENT ENSUITE remet a NULL les pointeurs
+     * que lisent WiFi.softAPIP(), WiFi.localIP()… (WiFiGeneric.cpp, core 3.3.5).
+     * Pendant cette attente, une autre tache qui lit l'etat du WiFi lit une
+     * interface DETRUITE, dont la memoire a deja pu servir a autre chose : vu,
+     * async_tcp dans /api/status, LoadProhibited (MESURES §149). La bascule
+     * « cable prioritaire » rend ces transitions courantes.
+     * Les transitions tiennent ce verrou ; toute lecture d'un etat WiFi depuis
+     * une AUTRE tache que loopTask le prend aussi, le temps de ses lectures.
+     * attente 0 : ne jamais attendre — ce qu'une tache temps reel doit faire. */
+    class LectureRadio {
+    public:
+        explicit LectureRadio(TickType_t attente);
+        ~LectureRadio();
+        /** Verrou pris ET radio allumee : les lectures WiFi.* sont sures. */
+        bool allumee() const;
+        LectureRadio(const LectureRadio&) = delete;
+        LectureRadio& operator=(const LectureRadio&) = delete;
+    private:
+        bool pris;
+    };
     void connectSta(const char* staSsid, const char* staPass);
     void setStaticStaIp(IPAddress ip, IPAddress gateway, IPAddress subnet);
     void reconfigureMdns(const char* hostname);

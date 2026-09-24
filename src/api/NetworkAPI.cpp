@@ -39,11 +39,19 @@ void setupNetworkAPI(AsyncWebServer& server) {
         preferences.end();
         
         String json = "{";
-        json += "\"ap_ssid\":\"" + WiFi.softAPSSID() + "\",";
-        json += "\"ap_ip\":\"" + WiFi.softAPIP().toString() + "\",";
-        json += "\"sta_ssid\":\"" + WiFi.SSID() + "\",";
-        json += "\"sta_ip\":\"" + WiFi.localIP().toString() + "\",";
-        json += "\"sta_connected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+        {
+            /* Lire le WiFi SOUS LE VERROU RADIO : une transition de la bascule
+             * detruit les interfaces avant d'en effacer les pointeurs. Sans
+             * verrou, ce gestionnaire a lu une interface detruite et fait
+             * paniquer la carte (MESURES §149). Radio coupee : champs vides. */
+            ServerCore::LectureRadio radio(pdMS_TO_TICKS(300));
+            const bool r = radio.allumee();
+            json += "\"ap_ssid\":\"" + (r ? WiFi.softAPSSID() : String("")) + "\",";
+            json += "\"ap_ip\":\"" + (r ? WiFi.softAPIP().toString() : String("")) + "\",";
+            json += "\"sta_ssid\":\"" + (r ? WiFi.SSID() : String("")) + "\",";
+            json += "\"sta_ip\":\"" + (r ? WiFi.localIP().toString() : String("")) + "\",";
+            json += "\"sta_connected\":" + String(r && WiFi.status() == WL_CONNECTED ? "true" : "false") + ",";
+        }
         json += "\"mdns_name\":\"" + mdnsName + "\",";
         json += "\"mdns_address\":\"" + mdnsName + ".local\",";
         json += "\"osc_target\":\"" + oscTarget + "\",";
