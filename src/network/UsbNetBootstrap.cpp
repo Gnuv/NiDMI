@@ -43,6 +43,9 @@ bool begin() {
   // Ni routeur ni DNS dans le bail : brancher l'instrument ne doit jamais
   // detourner la route par defaut de la machine hote.
   cfg.advertiseRouter = false;
+  // usbnet_rx (12) sur le coeur 0, sous le MIDI (19) et les capteurs (20) :
+  // hors du coeur de l'audio, a une place previsible (MESURES §149).
+  cfg.rxCore = 0;
 
   g_started = g_usbNet.begin(cfg);
   if (!g_started) {

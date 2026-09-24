@@ -79,6 +79,13 @@ bool UsbMidiManager::isUsbOtgEnabled() const {
 #endif
 }
 
+/* ── LE COEUR DE L'INTERRUPTION USB ───────────────────────────────────────
+ * esp_intr_alloc(), appele par USB.begin() (tinyusb_driver_install), attache
+ * l'interruption au coeur QUI L'APPELLE : depuis setup(), le coeur 1, celui de
+ * l'audio. La tache usbd la suit (nidmi-core, UsbNetService). C'est VOULU,
+ * et mesure (MESURES §149) : l'avoir mise sur le coeur 0 donnait plus de
+ * decrochages audio (+6 a +38 par 20 s de charge au lieu de +1 a +3) et
+ * effondrait le MIDI. Ne pas la deplacer sans remesurer. */
 bool UsbMidiManager::begin() {
     if (isStarted) {
         return true;

@@ -571,7 +571,9 @@ void MuxManager::begin() {
         "MuxTask",         // Nom
         4096,              // Stack size (4KB)
         this,              // Paramètre (instance)
-        5,                 // Priorité (haute priorité pour temps réel)
+        20,                // AU-DESSUS de la pile reseau (tiT, 18) : « le web cede,
+                           // jamais les capteurs ». A 5, tiT les retardait de 270 µs
+                           // en moyenne sous charge ; a 20, de 8 µs (MESURES §149).
         &muxTaskHandle,    // Handle
         0                  // Core 0 (PRO_CPU - processeur principal)
     );

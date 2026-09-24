@@ -727,7 +727,16 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += "\"web\":{\"tache\":\"" + String(pcTaskGetName(nullptr)) + "\"";
         json += ",\"priorite\":"  + String((unsigned)uxTaskPriorityGet(nullptr));
         json += ",\"coeur\":"     + String((int)xPortGetCoreID());
-        json += "},\"temps_reel\":{\"mux\":5,\"midi\":4,\"audio\":11},";
+        /* Les priorites LUES, pas ecrites en dur : elles etaient recopiees ici
+         * (5, 4, 11), et ont change au §149 — une valeur recopiee finit par
+         * mentir. */
+        auto prio = [](const char* nom) -> int {
+            TaskHandle_t t = xTaskGetHandle(nom);
+            return t ? (int)uxTaskPriorityGet(t) : -1;
+        };
+        json += "},\"temps_reel\":{\"mux\":" + String(prio("MuxTask"));
+        json += ",\"midi\":" + String(prio("MidiTask"));
+        json += ",\"audio\":" + String(prio("audio")) + "},";
         json += "\"midi\":{\"periode_us\":10000";
         json += ",\"tours\":"     + String(nMidi);
         json += ",\"max_us\":"    + String(g_gigueMidiMaxUs);
@@ -739,6 +748,31 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"moy_us\":"    + String(nMux ? (g_gigueMuxCumulUs / nMux) : 0);
         json += ",\"retards\":"   + String(g_gigueMuxRetards) + "}}";
         request->send(200, "application/json", json);
+    });
+
+    /* ── OU PASSE LE TEMPS DE CALCUL : TACHE PAR TACHE, COEUR PAR COEUR ─────
+     * Compteurs de FreeRTOS (horloge esp_timer, µs, 32 bits : ils repassent par
+     * zero toutes les 71 min — ne comparer que des ecarts courts). Le client lit
+     * AVANT et APRES une charge et fait la difference : n = nom, p = priorite,
+     * c = coeur impose (-1 : aucun), t = temps cumule. IDLE0/IDLE1 donnent la
+     * part libre de chaque coeur. Limite : le temps passe en INTERRUPTION est
+     * compte a la tache interrompue. MESURES §149. */
+    server.on("/api/diag/taches", HTTP_GET, [](AsyncWebServerRequest *request){
+        const UBaseType_t n = uxTaskGetNumberOfTasks() + 4;
+        TaskStatus_t* st = (TaskStatus_t*)malloc(n * sizeof(TaskStatus_t));
+        if (!st) { request->send(503, "application/json", "{\"erreur\":\"memoire\"}"); return; }
+        uint32_t total = 0;
+        const UBaseType_t k = uxTaskGetSystemState(st, n, &total);
+        String j = "{\"total_us\":" + String((unsigned long)total) + ",\"taches\":[";
+        for (UBaseType_t i = 0; i < k; ++i) {
+            if (i) j += ',';
+            const int coeur = (st[i].xCoreID == 0 || st[i].xCoreID == 1) ? (int)st[i].xCoreID : -1;
+            j += "{\"n\":\"" + String(st[i].pcTaskName) + "\",\"p\":" + String((unsigned)st[i].uxCurrentPriority);
+            j += ",\"c\":" + String(coeur) + ",\"t\":" + String((unsigned long)st[i].ulRunTimeCounter) + "}";
+        }
+        free(st);
+        j += "]}";
+        request->send(200, "application/json", j);
     });
 
     /* ── LES RESERVOIRS, DITS PAR LA CARTE ────────────────────────────────

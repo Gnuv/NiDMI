@@ -140,7 +140,9 @@ void ComponentManager::begin(MidiSender* sender) {
         "MidiTask",
         midiTaskStackBytes,
         this,
-        4,                 // Priorité légèrement inférieure à MuxTask
+        19,                // Juste sous MuxTask (20), AU-DESSUS de la pile reseau
+                           // (tiT, 18) : a 4, le MIDI prenait 335 µs de retard moyen
+                           // sous charge reseau ; a 19, 4 a 15 µs (MESURES §149).
         midiTaskStack,
         &midiTaskTCB,
         midiTaskCore
@@ -152,7 +154,9 @@ void ComponentManager::begin(MidiSender* sender) {
         "MidiTask",
         midiTaskStackBytes,
         this,
-        4,                 // Priorité légèrement inférieure à MuxTask
+        19,                // Juste sous MuxTask (20), AU-DESSUS de la pile reseau
+                           // (tiT, 18) : a 4, le MIDI prenait 335 µs de retard moyen
+                           // sous charge reseau ; a 19, 4 a 15 µs (MESURES §149).
         &midiTaskHandle,
         midiTaskCore
     );

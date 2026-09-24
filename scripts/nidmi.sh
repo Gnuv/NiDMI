@@ -781,6 +781,13 @@ compile_sketch() {
             EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_NET=1")
         fi
 
+        # Le serveur web (tache async_tcp) EPINGLE au coeur 1, sous l'audio (11)
+        # qui le preempte. Sans ce drapeau, AsyncTCP la cree « sur n'importe quel
+        # coeur » : relevee tantot sur le 1, tantot sur le 0 selon le demarrage,
+        # ou elle montait le coeur 0 — celui que le chien de garde surveille — a
+        # 90 % sous charge (MESURES §149).
+        EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_RUNNING_CORE=1")
+
 
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
         if [ ${#USB_MIDI_DEFINE[@]} -gt 0 ]; then
@@ -892,6 +899,13 @@ build_binary() {
         if [ "$USB_NET_MODE" = true ]; then
             EXTRA_FLAGS_ARRAY+=("-DNIDMI_USB_NET=1")
         fi
+
+        # Le serveur web (tache async_tcp) EPINGLE au coeur 1, sous l'audio (11)
+        # qui le preempte. Sans ce drapeau, AsyncTCP la cree « sur n'importe quel
+        # coeur » : relevee tantot sur le 1, tantot sur le 0 selon le demarrage,
+        # ou elle montait le coeur 0 — celui que le chien de garde surveille — a
+        # 90 % sous charge (MESURES §149).
+        EXTRA_FLAGS_ARRAY+=("-DCONFIG_ASYNC_TCP_RUNNING_CORE=1")
 
 
         # --variant : forcer le flag USB-MIDI au build (sans éditer le header)
