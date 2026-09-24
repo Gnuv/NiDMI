@@ -11,9 +11,11 @@
 #include "../mapping/CueStore.h"
 #include "../audio/SampleStore.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
+#include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
 #include <nvs.h>
 #include <esp_heap_caps.h>   // le bloc contigu : le reservoir qui predit la panne
 #include <memory>          // la carte du tas garde son texte jusqu'au dernier envoi
+#include <esp_timer.h>
 
 /*
  * API audio — pilotage et MÉTROLOGIE.
@@ -782,6 +784,48 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json", j);
     });
 
+    /* ── BANC : UNE RAFALE MIDI SUR L'USB ─────────────────────────────────
+     * Un accord de `notes` notes (128 au plus) par canal, sur `canaux` canaux
+     * a partir de `canal` : toutes les note-on, puis toutes les note-off,
+     * d'un seul coup — ce qu'un script ou un GO de cue peut produire. Envoye
+     * DIRECTEMENT a la sortie USB (sans l'echo audio ni les autres transports
+     * de MidiRouter) : c'est elle qu'on eprouve. `direct=1` rejoue l'ancien
+     * chemin (ecriture dans la file de TinyUSB, retour ignore) pour mesurer
+     * ce qu'il perdait, dans le meme demarrage. `nettoyer=1` envoie seulement
+     * un CC 123 (toutes notes eteintes) par canal, par le chemin normal —
+     * apres un essai `direct`, qui laisse des notes bloquees chez l'hote.
+     * Lecteur : hardware/bench/midi/rafale-usb.py. MESURES §151. */
+    server.on("/api/diag/midi-rafale", HTTP_POST, [](AsyncWebServerRequest *request){
+        auto entier = [request](const char* nom, long defaut, long mini, long maxi) {
+            long v = request->hasParam(nom, true) ? request->getParam(nom, true)->value().toInt() : defaut;
+            return v < mini ? mini : (v > maxi ? maxi : v);
+        };
+        const uint16_t notes = (uint16_t)entier("notes", 64, 1, 128);
+        const uint8_t canal = (uint8_t)entier("canal", 16, 1, 16);
+        const uint8_t canaux = (uint8_t)entier("canaux", 1, 1, (long)(17 - canal));
+        const uint8_t velocite = (uint8_t)entier("velocite", 1, 1, 127);
+        const bool direct = entier("direct", 0, 0, 1) == 1;
+        const bool nettoyer = entier("nettoyer", 0, 0, 1) == 1;
+        UsbMidiManager& usb = serverCore.usbMidi();
+        if (!usb.isConnected()) {
+            request->send(409, "application/json", "{\"erreur\":\"MIDI USB non demarre\"}");
+            return;
+        }
+        const int64_t t0 = esp_timer_get_time();
+        for (uint8_t k = 0; k < canaux; ++k) {
+            if (nettoyer) {
+                usb.sendControlChange((uint8_t)(canal + k), 123, 0);
+            } else {
+                usb.rafaleBanc(notes, (uint8_t)(canal + k), velocite, direct);
+            }
+        }
+        const uint32_t duree = (uint32_t)(esp_timer_get_time() - t0);
+        const unsigned messages = nettoyer ? canaux : 2u * notes * canaux;
+        request->send(200, "application/json",
+            String("{\"messages\":") + messages + ",\"direct\":" + (direct ? "true" : "false") +
+            ",\"duree_us\":" + duree + "}");
+    });
+
     /* ── LA CARTE DU TAS INTERNE ──────────────────────────────────────────
      * Le plus gros bloc contigu est le chiffre qui decide ; mais un chiffre ne
      * dit pas CE QUI le borne. Cette route parcourt le tas interne bloc par
@@ -907,6 +951,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     server.on("/api/diag/reservoirs", HTTP_GET, [](AsyncWebServerRequest *request){
         if (request->hasParam("reset")) {
             MappingEngine::reinitStatsReprises();
+            UsbMidiManager::reinitStatsSortie();
             request->send(200, "application/json", "{\"reset\":true}");
             return;
         }
@@ -963,6 +1008,19 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"max\":"      + String((unsigned)maxVu);
         json += ",\"refus\":"    + String((unsigned)refus);
         json += ",\"capacite\":" + String((unsigned)capacite) + "}";
+
+        /* La sortie MIDI USB (MESURES §151) : notre file devant celle de
+         * TinyUSB. `debordes` et `sans_hote` ne sont pas des pertes de
+         * note-off — la reconciliation les rattrape (`relaches`). */
+        UsbMidiManager::StatsSortie mu;
+        UsbMidiManager::statsSortie(mu);
+        json += ",\"midi_usb\":{\"envoyes\":" + String((unsigned long)mu.envoyes);
+        json += ",\"attentes\":"  + String((unsigned long)mu.attentes);
+        json += ",\"debordes\":"  + String((unsigned long)mu.debordes);
+        json += ",\"sans_hote\":" + String((unsigned long)mu.sansHote);
+        json += ",\"relaches\":"  + String((unsigned long)mu.relaches);
+        json += ",\"max\":"       + String((unsigned)mu.fileMax);
+        json += ",\"capacite\":"  + String((unsigned)mu.capacite) + "}";
 
         /* La borne par broche, pour que le client n'ait pas a la recopier :
          * elle est deja publiee par /api/pins/caps, et deux copies d'un meme

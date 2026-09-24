@@ -90,9 +90,27 @@ public:
     bool isConnected() const;
     bool isInitialized() const { return isStarted; }
     bool isSupported() const;
-    
+
+    /** La sortie USB ne perd rien (voir « LA SORTIE MIDI USB NE PERD RIEN »
+     *  dans le .cpp) : ce qu'elle a fait, pour /api/diag/reservoirs. */
+    struct StatsSortie {
+        uint32_t envoyes;     // paquets remis a TinyUSB
+        uint32_t attentes;    // tours ou la file de TinyUSB (16 messages) etait pleine
+        uint32_t debordes;    // refuses par NOTRE file pleine (rattrapes par la reconciliation)
+        uint32_t sansHote;    // non remis : USB non monte, ou en veille
+        uint32_t relaches;    // note-off emis par la reconciliation
+        uint16_t fileMax;     // remplissage maximal vu de notre file
+        uint16_t capacite;
+    };
+    static void statsSortie(StatsSortie& s);
+    static void reinitStatsSortie();
+
+    /** Banc (POST /api/diag/midi-rafale) : un accord de `notes` notes, toutes
+     *  les note-on puis toutes les note-off, d'un seul coup. `direct` rejoue
+     *  l'ANCIEN chemin — ecriture directe dans la file de TinyUSB, retour
+     *  ignore — pour mesurer ce qu'il perdait, dans le meme demarrage. */
+    void rafaleBanc(uint16_t notes, uint8_t canal, uint8_t velocite, bool direct);
+
 private:
-    void sendMidiMessage(uint8_t status, uint8_t data1, uint8_t data2);
-    void sendMidiMessage(uint8_t status, uint8_t data1);
     bool isUsbOtgEnabled() const;
 };
