@@ -187,33 +187,67 @@ void setupNetworkAPI(AsyncWebServer& server) {
             "{\"status\":\"error\",\"message\":\"etat=on (forcer), etat=off (rendre la main), etat=essai\"}");
     });
 
+    /* LES IDENTIFIANTS DU RESEAU (MESURES §158). Le mot de passe n'est jamais
+     * relu par l'app : son champ est vide a chaque affichage. Or la route
+     * exigeait `pass` et l'ecrivait meme vide — « Connecter » sans retaper
+     * effacait donc le mot de passe enregistre, et la carte ne rejoignait plus
+     * le reseau (vecu le 24/09 : has_pass faux).
+     *   pass absent ou vide -> on GARDE le mot de passe enregistre ;
+     *   open=1              -> reseau OUVERT, declare, jamais par defaut ;
+     *   nouveau reseau sans mot de passe ni open=1 -> refuse ;
+     *   rien a changer      -> aucune ecriture, aucun redemarrage.
+     * Ecrit dans le gestionnaire : geste de Reglages, qui redemarre la carte
+     * (exception dite au §157). */
     server.on("/api/sta", HTTP_POST, [](AsyncWebServerRequest *request){
-        if (request->hasParam("ssid", true) && request->hasParam("pass", true)) {
-            String ssid = request->getParam("ssid", true)->value();
-            String pass = request->getParam("pass", true)->value();
-            String ip = request->hasParam("ip", true) ? request->getParam("ip", true)->value() : String("");
-            String gateway = request->hasParam("gw", true) ? request->getParam("gw", true)->value() : String("");
-            String subnet = request->hasParam("sn", true) ? request->getParam("sn", true)->value() : String("");
-
-            Preferences preferences;
-            preferences.begin("nidmi", false);
-            preferences.putString("sta_ssid", ssid);
-            preferences.putString("sta_pass", pass);
-            if (ip.length() > 0 && gateway.length() > 0 && subnet.length() > 0) {
-                preferences.putString("sta_ip", ip);
-                preferences.putString("sta_gw", gateway);
-                preferences.putString("sta_sn", subnet);
-            }
-            preferences.end();
-
-            // Reboot différé (~2 s, géré dans nidmi_loop) pour appliquer la config STA :
-            // g_staSsid/g_staPass ne sont lus qu'au boot. L'AP reste actif (APSTA),
-            // donc l'accès web n'est pas perdu. La réponse part avant le redémarrage.
-            nidmi_requestReboot((String("wifi · ") + request->client()->remoteIP().toString()).c_str());
-            request->send(200, "application/json", "{\"status\":\"ok\",\"reboot\":true}");
-        } else {
-            request->send(400, "application/json", "{\"error\":\"ssid and pass required\"}");
+        auto par = [&](const char* n) -> String {
+            return request->hasParam(n, true) ? request->getParam(n, true)->value() : String("");
+        };
+        const String ssid = par("ssid");
+        if (!ssid.length()) {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"ssid requis\"}");
+            return;
         }
+        const String pass = par("pass");
+        const bool ouvert = par("open") == "1";
+        const String ip = par("ip"), gateway = par("gw"), subnet = par("sn");
+        const bool ipFixe = ip.length() && gateway.length() && subnet.length();
+
+        Preferences preferences;
+        preferences.begin("nidmi", false);
+        const String ssidAvant = preferences.getString("sta_ssid", "");
+        const bool avaitPass = preferences.getString("sta_pass", "").length() > 0;
+        if (ssid != ssidAvant && !pass.length() && !ouvert) {
+            preferences.end();
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"nouveau reseau : mot de passe requis "
+                "(ou open=1 pour un reseau ouvert)\"}");
+            return;
+        }
+        const bool changePass = pass.length() || (ouvert && avaitPass);
+        if (ssid == ssidAvant && !changePass && !ipFixe) {
+            preferences.end();
+            request->send(200, "application/json",
+                "{\"status\":\"ok\",\"reboot\":false,\"message\":\"rien a changer : "
+                "le mot de passe enregistre est garde\"}");
+            return;
+        }
+        if (ssid != ssidAvant) preferences.putString("sta_ssid", ssid);
+        if (changePass) preferences.putString("sta_pass", ouvert ? String("") : pass);
+        if (ipFixe) {
+            preferences.putString("sta_ip", ip);
+            preferences.putString("sta_gw", gateway);
+            preferences.putString("sta_sn", subnet);
+        }
+        preferences.end();
+
+        // Reboot différé (~2 s, géré dans nidmi_loop) pour appliquer la config STA :
+        // g_staSsid/g_staPass ne sont lus qu'au boot. L'AP reste actif (APSTA),
+        // donc l'accès web n'est pas perdu. La réponse part avant le redémarrage.
+        nidmi_requestReboot((String("wifi · ") + request->client()->remoteIP().toString()).c_str());
+        request->send(200, "application/json",
+            String("{\"status\":\"ok\",\"reboot\":true,\"mot_de_passe\":\"")
+            + (changePass ? (ouvert ? "ouvert" : "remplace") : "garde") + "\"}");
     });
 
     // API - Lecture des identifiants STA stockés en NVS
