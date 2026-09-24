@@ -13,6 +13,7 @@
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include <nvs.h>
 #include <esp_heap_caps.h>   // le bloc contigu : le reservoir qui predit la panne
+#include <memory>          // la carte du tas garde son texte jusqu'au dernier envoi
 
 /*
  * API audio — pilotage et MÉTROLOGIE.
@@ -756,7 +757,10 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * AVANT et APRES une charge et fait la difference : n = nom, p = priorite,
      * c = coeur impose (-1 : aucun), t = temps cumule. IDLE0/IDLE1 donnent la
      * part libre de chaque coeur. Limite : le temps passe en INTERRUPTION est
-     * compte a la tache interrompue. MESURES §149. */
+     * compte a la tache interrompue. MESURES §149.
+     * Et pour la memoire (§150) : m = marge de pile jamais entamee depuis le
+     * demarrage (octets), b = adresse de la pile, h = celle du TCB — que
+     * /api/diag/tas retrouve dans la carte du tas. */
     server.on("/api/diag/taches", HTTP_GET, [](AsyncWebServerRequest *request){
         const UBaseType_t n = uxTaskGetNumberOfTasks() + 4;
         TaskStatus_t* st = (TaskStatus_t*)malloc(n * sizeof(TaskStatus_t));
@@ -768,11 +772,103 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
             if (i) j += ',';
             const int coeur = (st[i].xCoreID == 0 || st[i].xCoreID == 1) ? (int)st[i].xCoreID : -1;
             j += "{\"n\":\"" + String(st[i].pcTaskName) + "\",\"p\":" + String((unsigned)st[i].uxCurrentPriority);
-            j += ",\"c\":" + String(coeur) + ",\"t\":" + String((unsigned long)st[i].ulRunTimeCounter) + "}";
+            j += ",\"c\":" + String(coeur) + ",\"t\":" + String((unsigned long)st[i].ulRunTimeCounter);
+            j += ",\"m\":" + String((unsigned long)st[i].usStackHighWaterMark * sizeof(StackType_t));
+            j += ",\"b\":" + String((unsigned long)(uintptr_t)st[i].pxStackBase);
+            j += ",\"h\":" + String((unsigned long)(uintptr_t)st[i].xHandle) + "}";
         }
         free(st);
         j += "]}";
         request->send(200, "application/json", j);
+    });
+
+    /* ── LA CARTE DU TAS INTERNE ──────────────────────────────────────────
+     * Le plus gros bloc contigu est le chiffre qui decide ; mais un chiffre ne
+     * dit pas CE QUI le borne. Cette route parcourt le tas interne bloc par
+     * bloc (heap_caps_walk) et rend, region par region, chaque bloc : decalage
+     * depuis le debut de la region, taille, occupe (1) ou libre (0). Croisee
+     * avec /api/diag/taches (adresse de chaque pile et de chaque TCB), elle dit
+     * qui est ou. Lecteur : hardware/bench/memoire/tas.py. MESURES §150.
+     *
+     * Le releve est pris AVANT d'allouer quoi que ce soit pour la reponse, dans
+     * des tampons en PSRAM : il ne deplace pas ce qu'il mesure. Le parcours
+     * tient le verrou du tas — une section critique, interruptions masquees sur
+     * ce coeur — le temps de ranger quelques centaines de blocs : un outil de
+     * banc, jamais une sonde. */
+    server.on("/api/diag/tas", HTTP_GET, [](AsyncWebServerRequest *request){
+        struct Bloc { uint32_t adr; uint32_t taille; uint8_t occupe; uint8_t region; };
+        struct Releve {
+            enum { MAX_BLOCS = 2048, MAX_REGIONS = 8 };
+            uint32_t debut[MAX_REGIONS], fin[MAX_REGIONS];
+            int nRegions, nBlocs;
+            bool tronque;
+            Bloc blocs[MAX_BLOCS];
+        };
+        constexpr size_t TEXTE_MAX = Releve::MAX_BLOCS * 28 + 1024;
+        Releve* r = (Releve*)heap_caps_calloc(1, sizeof(Releve), MALLOC_CAP_SPIRAM);
+        char* texte = (char*)heap_caps_malloc(TEXTE_MAX, MALLOC_CAP_SPIRAM);
+        if (!r || !texte) {
+            heap_caps_free(r);
+            heap_caps_free(texte);
+            request->send(503, "application/json", "{\"erreur\":\"psram\"}");
+            return;
+        }
+        const size_t gros = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        const size_t libre = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+        const size_t mini = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+        heap_caps_walk(MALLOC_CAP_INTERNAL, [](walker_heap_into_t h, walker_block_info_t b, void* u) -> bool {
+            Releve* r = static_cast<Releve*>(u);
+            int reg = r->nRegions - 1;
+            if (reg < 0 || r->debut[reg] != (uint32_t)h.start) {
+                if (r->nRegions >= Releve::MAX_REGIONS) { r->tronque = true; return false; }
+                reg = r->nRegions++;
+                r->debut[reg] = (uint32_t)h.start;
+                r->fin[reg] = (uint32_t)h.end;
+            }
+            if (r->nBlocs >= Releve::MAX_BLOCS) { r->tronque = true; return false; }
+            Bloc& x = r->blocs[r->nBlocs++];
+            x.adr = (uint32_t)(uintptr_t)b.ptr;
+            x.taille = (uint32_t)b.size;
+            x.occupe = b.used ? 1 : 0;
+            x.region = (uint8_t)reg;
+            return true;
+        }, r);
+
+        // Borne par construction (2 048 blocs de 18 caracteres au plus) ; la
+        // garde tient quand meme : jamais d'ecriture au-dela du tampon.
+        size_t n = 0;
+        auto ecrire = [&](const char* fmt, auto... a) {
+            if (n >= TEXTE_MAX - 1) return;
+            const int k = snprintf(texte + n, TEXTE_MAX - n, fmt, a...);
+            if (k > 0) n = (n + (size_t)k < TEXTE_MAX - 1) ? n + (size_t)k : TEXTE_MAX - 1;
+        };
+        ecrire("{\"gros\":%u,\"libre\":%u,\"mini\":%u,\"tronque\":%s,\"regions\":[",
+               (unsigned)gros, (unsigned)libre, (unsigned)mini, r->tronque ? "true" : "false");
+        for (int g = 0; g < r->nRegions; ++g) {
+            ecrire("%s{\"d\":%lu,\"f\":%lu,\"blocs\":[", g ? "," : "",
+                   (unsigned long)r->debut[g], (unsigned long)r->fin[g]);
+            bool premier = true;
+            for (int i = 0; i < r->nBlocs; ++i) {
+                const Bloc& x = r->blocs[i];
+                if (x.region != g) continue;
+                ecrire("%s[%lu,%lu,%u]", premier ? "" : ",",
+                       (unsigned long)(x.adr - r->debut[g]), (unsigned long)x.taille, (unsigned)x.occupe);
+                premier = false;
+            }
+            ecrire("%s", "]}");
+        }
+        ecrire("%s", "]}");
+        heap_caps_free(r);
+
+        // Le texte vit en PSRAM jusqu'au dernier morceau envoye.
+        std::shared_ptr<char> garde(texte, [](char* p) { heap_caps_free(p); });
+        AsyncWebServerResponse *rep = request->beginResponse("application/json", n,
+            [garde, n](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+                const size_t k = (n - index < maxLen) ? (n - index) : maxLen;
+                memcpy(buffer, garde.get() + index, k);
+                return k;
+            });
+        request->send(rep);
     });
 
     /* ── LES RESERVOIRS, DITS PAR LA CARTE ────────────────────────────────
