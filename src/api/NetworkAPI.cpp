@@ -109,6 +109,22 @@ void setupNetworkAPI(AsyncWebServer& server) {
             ",\"message\":\"applique et memorise dans la seconde\"}");
     });
 
+    /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand
+     * l'hote laisse le cable « inactive » sans jamais le reactiver (§153).
+     * Coupe AUSSI le MIDI USB une a deux secondes — geste manuel (Reglages →
+     * Carte → Reseau), jamais automatique. Executee par nidmi_loop dans la
+     * seconde ; ici on ne fait que la demander. */
+    server.on("/api/reseau/cable/relancer", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!nidmi_usbnet::enabled()) {
+            request->send(409, "application/json",
+                "{\"status\":\"error\",\"message\":\"pas de lien reseau USB dans ce firmware\"}");
+            return;
+        }
+        nidmi_demanderRelanceCable();
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"message\":\"relance dans la seconde : le cable repart, puis revient\"}");
+    });
+
     server.on("/api/reseau/wifi", HTTP_POST, [](AsyncWebServerRequest *request){
         const String etat = request->hasParam("etat", true)
                           ? request->getParam("etat", true)->value() : String("");

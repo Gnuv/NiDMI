@@ -80,6 +80,10 @@ bool sonder() {
   return g_usbNet.sonderHote();
 }
 
+bool relancer() {
+  return g_usbNet.relancerEnumeration();
+}
+
 String ip() {
   return g_usbNet.localIp().toString();
 }
@@ -110,6 +114,13 @@ String etatJson() {
   j += ",\"rx_rejetees\":" + String(s.rxDropped);
   j += ",\"tx\":" + String(s.txFrames);
   j += ",\"tx_expirees\":" + String(s.txTimeouts);
+  j += ",\"relance_en_cours\":";
+  j += g_usbNet.relanceEnCours() ? "true" : "false";
+  j += ",\"relances\":" + String(g_usbNet.relances());
+  // L'hote utilise-t-il le reseau du cable ? Bus monte mais faux : il l'a
+  // laisse desactive — ce que « Relancer le cable » resout (MESURES §154).
+  j += ",\"reseau_actif\":";
+  j += g_usbNet.reseauActif() ? "true" : "false";
   j += ",\"diag\":" + g_usbNet.diagJson() + "}";
   return j;
 }
@@ -141,6 +152,9 @@ bool hoteConnu() {
   return false;
 }
 bool sonder() {
+  return false;
+}
+bool relancer() {
   return false;
 }
 String ip() {

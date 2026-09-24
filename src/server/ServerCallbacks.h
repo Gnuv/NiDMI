@@ -63,6 +63,12 @@ void nidmi_demanderCablePrioritaire(bool actif);
 bool nidmi_cableTientLeWifi(void);
 
 /**
+ * @brief Relancer le cable : refaire l'enumeration USB (MESURES §154). Executee
+ * par nidmi_loop ; coupe aussi le MIDI USB une a deux secondes.
+ */
+void nidmi_demanderRelanceCable(void);
+
+/**
  * @brief Demander un redémarrage différé "persist USB"
  * (utile quand on change la configuration/dé-énumération USB via TinyUSB)
  */

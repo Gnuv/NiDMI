@@ -313,6 +313,17 @@ static volatile int8_t g_basculeDemande = -1;   // -1 rien ; 0 retirer ; 1 activ
 extern "C" void nidmi_demanderCablePrioritaire(bool actif){
     g_basculeDemande = actif ? 1 : 0;
 }
+
+/* Relancer le cable (MESURES §154) : quand macOS releve lui-meme l'interface
+ * reseau du cable, il repasse en alt 0 une milliseconde apres l'avoir activee
+ * et ne revient plus (§153) ; seule une nouvelle enumeration rend le lien. Le
+ * gestionnaire HTTP leve le drapeau, la boucle execute : jamais le pilote USB
+ * depuis async_tcp. La bascule voit ensuite le cable repartir puis revivre,
+ * comme a un branchement. */
+static volatile bool g_relanceDemande = false;
+extern "C" void nidmi_demanderRelanceCable(){
+    g_relanceDemande = true;
+}
 extern "C" bool nidmi_cableTientLeWifi(){
     return g_bascule.tientLeWifi;
 }
@@ -811,6 +822,10 @@ void nidmi_loop() {
         g_essai.mesureApres = true;
     }
     basculeCableBoucle();
+    if (g_relanceDemande) {
+        g_relanceDemande = false;
+        nidmi_usbnet::relancer();
+    }
 
     // Tentative de reconnexion STA automatique si des identifiants sont connus.
     // connectSta() est non bloquant : on se contente de relancer WiFi.begin() et
