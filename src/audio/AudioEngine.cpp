@@ -40,6 +40,11 @@ volatile bool tacheArretee = false;
 
 uint32_t heapAvant = 0, heapApres = 0, srReel = SAMPLE_RATE;
 volatile uint32_t nBlocs = 0, nRetards = 0;
+// Les ecritures en flash VOLONTAIRES, faites en silence (§155, §156) : un compteur
+// de sequence — impair pendant l'ecriture —, et les blocs en retard qui l'ont
+// chevauchee. Ils sont dans nRetards (ils ont eu lieu) ET ici (rien ne s'est
+// entendu) : le voyant ne compte que la difference.
+volatile uint32_t ecrituresFlash = 0, nRetardsEcritures = 0;
 
 // Une note en attente, déposée par MidiTask ou par un rappel RTP.
 struct Evenement { uint8_t note; uint8_t velo; };   // velo 0 = extinction
@@ -338,6 +343,7 @@ void boucleAudio(void*) {
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
 
     const uint32_t t0 = millis();
+    const uint32_t e0 = ecrituresFlash;
     const uint32_t c0 = ESP.getCycleCount();
     if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
       rendreSample();
@@ -380,7 +386,12 @@ void boucleAudio(void*) {
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
-    if (millis() - t0 > 20) nRetards++;
+    if (millis() - t0 > 20) {
+      nRetards++;
+      // Ce bloc a-t-il chevauche une ecriture volontaire ? (commencee avant lui,
+      // ou pendant : la sequence a bouge, ou elle etait impaire a son debut)
+      if ((e0 & 1u) || ecrituresFlash != e0) nRetardsEcritures++;
+    }
     nBlocs++;
   }
 }
@@ -932,6 +943,12 @@ void setVolume(float v) {
 }
 float volume() { return gVolume; }
 
+bool silencePourLaFlash() {
+  return silenceDepuisMs() >= SILENCE_POUR_LA_FLASH_MS;
+}
+void ecritureFlashDebut() { ecrituresFlash = ecrituresFlash + 1; }   // -> impair
+void ecritureFlashFin()   { ecrituresFlash = ecrituresFlash + 1; }   // -> pair
+
 uint32_t silenceDepuisMs() {
   if (!demarre) return UINT32_MAX;          // pas de son a proteger
   // Le dernier son D'ABORD, l'heure ensuite : lus dans l'autre ordre, un bloc
@@ -958,6 +975,7 @@ Metriques metriques() {
   m.sampleRateReel    = srReel;
   m.blocsRendus       = nBlocs;
   m.sousAlimentations = nRetards;
+  m.retardsEcritures  = nRetardsEcritures;
   // Plancher historique : si ce chiffre frôle zéro, le crash est un épuisement
   // du tas, pas un chien de garde. C'est la mesure qui départage.
   m.heapMiniJamais    = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);

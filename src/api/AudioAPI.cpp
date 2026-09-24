@@ -9,6 +9,7 @@
 #include "../mapping/VocabulaireEmbarque.h"
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
+#include "../mapping/CompoStore.h"
 #include "../audio/SampleStore.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
@@ -40,6 +41,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"sample_rate\":"        + String(m.sampleRateReel) + ",";
         json += "\"blocks\":"             + String(m.blocsRendus) + ",";
         json += "\"underruns\":"          + String(m.sousAlimentations) + ",";
+        // dont ceux d'une ecriture flash faite en silence : inaudibles (§156)
+        json += "\"underruns_ecritures\":" + String(m.retardsEcritures) + ",";
         // Plaits demande 16 ko contigus, plus sa marge de manœuvre.
         json += "\"engine\":"             + String(m.moteur) + ",";
         json += "\"plaits_ready\":"       + String(m.plaitsPret ? "true" : "false") + ",";
@@ -494,6 +497,52 @@ void setupAudioAPI(AsyncWebServer& server) {
                       String("{\"status\":\"") + (ok ? "ok" : "error")
                       + "\",\"n\":" + Cues::nombre() + "}");
     });
+
+    /* ── LA COMPOSITION, GARDEE PAR LA CARTE (MESURES §156) ─────────────────
+     * La source de cues.txt et des .nms — le JSON que l'app serialise —, pour
+     * que l'app la recharge en se connectant : la page montre alors ce que la
+     * carte porte. La carte ne la lit pas ; elle la garde et la rend.
+     * GET : 204 si elle n'en a pas. POST : le corps JSON brut (pas un
+     * formulaire : il depasse les parametres), recu en PSRAM morceau par
+     * morceau ; rendu aussitot, ecrit en flash au premier silence. */
+    server.on("/api/compo", HTTP_GET, [](AsyncWebServerRequest *request){
+        size_t n = 0;
+        auto t = Compo::courante(n);
+        if (!t || !n) { request->send(204); return; }
+        request->send(nidmi_reponse_tampon(request, "application/json", t, n));
+    });
+    server.on("/api/compo", HTTP_POST,
+        [](AsyncWebServerRequest *request){
+            char* p = (char*)request->_tempObject;
+            const size_t n = request->contentLength();
+            if (!p || !n) {
+                request->send(n > Compo::MAX_OCTETS ? 413 : 400, "application/json",
+                    n > Compo::MAX_OCTETS
+                    ? String("{\"status\":\"error\",\"message\":\"composition trop grosse : plafond ")
+                      + String((unsigned)Compo::MAX_OCTETS) + " octets\"}"
+                    : String("{\"status\":\"error\",\"message\":\"corps JSON attendu\"}"));
+                return;
+            }
+            if (p[0] != '{') {
+                request->send(400, "application/json",
+                    "{\"status\":\"error\",\"message\":\"une composition est un objet JSON\"}");
+                return;
+            }
+            request->_tempObject = nullptr;   // la carte le garde : le serveur ne le liberera pas
+            Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n);
+            request->send(200, "application/json",
+                String("{\"status\":\"ok\",\"octets\":") + String((unsigned)n)
+                + ",\"message\":\"rendue tout de suite, ecrite en flash au premier silence\"}");
+        },
+        nullptr,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+            if (index == 0) {
+                if (!total || total > Compo::MAX_OCTETS) return;   // refusee a la fin
+                request->_tempObject = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
+            if (request->_tempObject && index + len <= total)
+                memcpy((char*)request->_tempObject + index, data, len);
+        });
 
 server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         /* `actif` : le nom de l'emplacement 0 — conserve pour ne pas casser
@@ -995,6 +1044,8 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"octets_contenu\":" + String((unsigned)oc);
         json += ",\"octets_utilises\":"+ String((unsigned)ou_);
         json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
+        // La composition gardee pour l'app (§156) : recue, rendue, ecrite au silence.
+        json += ",\"compo\":" + Compo::etatJson();
 
         uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
         MappingEngine::statsReprises(enCours, maxVu, refus, capacite);

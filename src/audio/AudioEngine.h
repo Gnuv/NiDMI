@@ -230,6 +230,19 @@ float volume();
  * rien ne s'entend. */
 uint32_t silenceDepuisMs();
 
+/* LE MOMENT D'ECRIRE EN FLASH (MESURES §155, §156). Une ecriture qui efface une
+ * page arrete les deux coeurs ~45 ms, plus que les 30 ms d'avance du DMA : ce
+ * qui peut attendre attend donc que la sortie soit muette depuis 0,5 s. */
+constexpr uint32_t SILENCE_POUR_LA_FLASH_MS = 500;
+bool silencePourLaFlash();
+
+/* L'ecrivain ANNONCE son ecriture — faite en silence, par la regle ci-dessus.
+ * Les blocs rendus en retard pendant qu'elle a lieu sont comptes deux fois :
+ * dans `sousAlimentations` (ils ont eu lieu) et dans `retardsEcritures` (rien
+ * ne s'est entendu). Le voyant « decrochages » ne compte que la difference. */
+void ecritureFlashDebut();
+void ecritureFlashFin();
+
 // Métrologie — répond à la question §12.7 de CONVERGENCE_NIDMI.md : combien de
 // tas reste-t-il réellement une fois WiFi + serveur async + app embarquée en
 // place ? Le plus gros bloc contigu compte autant que le total : Plaits demande
@@ -244,6 +257,7 @@ struct Metriques {
   uint32_t sampleRateReel;     // ce que l'I2S a vraiment obtenu (pas d'APLL sur S3)
   uint32_t blocsRendus;
   uint32_t sousAlimentations;  // blocs rendus en retard (indicateur de craquement)
+  uint32_t retardsEcritures;   // dont : pendant une ecriture flash volontaire, en silence
   int      moteur;             // -1 sinus, 0..15 Plaits
   bool     plaitsPret;
   uint32_t plaitsOctets;       // ce que Plaits a réellement pris sur le tas

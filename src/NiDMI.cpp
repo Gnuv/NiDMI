@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include "audio/AudioEngine.h"
 #include "mapping/CueStore.h"
+#include "mapping/CompoStore.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -189,15 +190,6 @@ enum : uint8_t {
 static volatile uint8_t s_sante = 0;
 static unsigned long s_santeProchain = 0, s_decrochagesJusqua = 0, s_reprisesJusqua = 0;
 static uint32_t s_sousAlimAvant = 0, s_refusAvant = 0;
-/* Les retards audio causes par une memorisation d'option faite EN SILENCE
- * (MESURES §155) : reels — le compteur du moteur les garde —, mais rien ne
- * s'est entendu, donc ils ne rallument pas le voyant. Seule une ecriture LENTE
- * (un effacement : >= 20 ms, le seuil de retard du moteur) peut en causer ;
- * wifiBoucle() lui attribue ceux du quart de seconde qui suit, et d'ici la le
- * voyant attend. Un retard apres une ecriture rapide a une autre cause : il
- * rallume le voyant comme n'importe quel autre. */
-static uint32_t s_retardsInaudibles = 0;
-static bool     s_ecritureAVerifier = false;
 
 extern "C" uint8_t nidmi_sante() { return s_sante; }
 extern "C" void nidmi_santeTexte(uint8_t f, char* out, unsigned n) {
@@ -222,11 +214,12 @@ static void verifierSante() {
     const AudioEngine::Metriques m = AudioEngine::metriques();
     uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
     MappingEngine::statsReprises(enCours, maxVu, refus, capacite);
-    if (!s_ecritureAVerifier) {
-        const uint32_t audibles = m.sousAlimentations - s_retardsInaudibles;
-        if (audibles > s_sousAlimAvant) s_decrochagesJusqua = maintenant + 60000;
-        s_sousAlimAvant = audibles;
-    }
+    /* Les blocs en retard pendant une ecriture flash VOLONTAIRE — faite en
+     * silence, annoncee au moteur (§156) — ont eu lieu, mais rien ne s'est
+     * entendu : ils ne rallument pas le voyant. Tous les autres, si. */
+    const uint32_t audibles = m.sousAlimentations - m.retardsEcritures;
+    if (audibles > s_sousAlimAvant) s_decrochagesJusqua = maintenant + 60000;
+    s_sousAlimAvant = audibles;
     if (refus > s_refusAvant) s_reprisesJusqua = maintenant + 60000;
     s_refusAvant = refus;
 
@@ -330,9 +323,8 @@ struct PolitiqueWifi {
     unsigned long derniereRelanceScript = 0;
     bool sysInconnuDit = false;
     // Ce que coute la memorisation d'une option (MESURES §155) : une ecriture
-    // NVS qui efface une page arrete l'autre coeur le temps de l'effacement.
+    // NVS qui efface une page arrete les deux coeurs le temps de l'effacement.
     uint32_t ecrituresNvs = 0, ecrituresLentes = 0, ecritureNvsPireUs = 0, ecritureNvsDerniereUs = 0;
-    uint32_t retardsDesEcritures = 0, sousAlimAvant = 0;
 };
 static PolitiqueWifi g_politique;
 static volatile int8_t g_demandeAutonome = -1;   // -1 rien ; 0 retirer ; 1 activer
@@ -341,7 +333,6 @@ static volatile bool g_relanceDemandeScript = false;
 static volatile bool g_sysInconnu = false;
 static char g_sysInconnuNom[16];                 // le premier, pour le dire
 static const unsigned long OPTION_MEMORISEE_APRES_MS = 3000;
-static const uint32_t SILENCE_AVANT_MEMORISATION_MS = 500;
 static const uint32_t ECRITURE_LENTE_US = 20000;      // le seuil de retard du moteur audio
 static const unsigned long RELANCE_SCRIPT_TOUS_MS = 10000;
 
@@ -387,7 +378,6 @@ String nidmi_cablePrioritaireJson(){
        + ",\"pire_us\":" + String(pol.ecritureNvsPireUs)
        + ",\"derniere_us\":" + String(pol.ecritureNvsDerniereUs)
        + ",\"lentes\":" + String(pol.ecrituresLentes)
-       + ",\"retards_audio_causes\":" + String(pol.retardsDesEcritures)
        + ",\"en_attente\":" + ((pol.prioAEcrire || pol.autonomeAEcrire) ? "true" : "false")
        + ",\"sortie_muette_ms\":" + (muette == UINT32_MAX ? String("null") : String(muette)) + "}";
     j += ",\"confirmation_ms\":" + String(CABLE_CONFIRMATION_MS);
@@ -613,22 +603,12 @@ static void wifiBoucle(){
         NIDMI_WEB_LOG("[NiDMI] s(\"%s\") : la carte n'a pas cette fonction — elle connait "
                       VOCABULAIRE_SYS_COMMANDES, g_sysInconnuNom);
     }
-    // Un bloc audio en retard dans le quart de seconde qui suit une ecriture
-    // LENTE ? Elle l'a cause, et elle a eu lieu en silence : rien ne s'est entendu.
-    if (s_ecritureAVerifier) {
-        s_ecritureAVerifier = false;
-        const uint32_t sa = AudioEngine::metriques().sousAlimentations;
-        if (sa > p.sousAlimAvant) {
-            p.retardsDesEcritures += sa - p.sousAlimAvant;
-            s_retardsInaudibles += sa - p.sousAlimAvant;
-        }
-    }
     const bool prioMure = p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS;
     const bool autoMure = p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS;
-    if ((prioMure || autoMure) && AudioEngine::silenceDepuisMs() >= SILENCE_AVANT_MEMORISATION_MS) {
+    if ((prioMure || autoMure) && AudioEngine::silencePourLaFlash()) {
         Preferences prefs;
         prefs.begin("nidmi", false);
-        p.sousAlimAvant = AudioEngine::metriques().sousAlimentations;
+        AudioEngine::ecritureFlashDebut();
         const uint32_t t0 = micros();
         bool ecrit = false;
         if (prioMure) {
@@ -646,15 +626,13 @@ static void wifiBoucle(){
             }
         }
         const uint32_t dt = micros() - t0;
+        AudioEngine::ecritureFlashFin();
         prefs.end();
         if (ecrit) {
             p.ecrituresNvs++;
             p.ecritureNvsDerniereUs = dt;
             if (dt > p.ecritureNvsPireUs) p.ecritureNvsPireUs = dt;
-            if (dt >= ECRITURE_LENTE_US) {
-                p.ecrituresLentes++;
-                s_ecritureAVerifier = true;
-            }
+            if (dt >= ECRITURE_LENTE_US) p.ecrituresLentes++;
         }
     }
 
@@ -847,6 +825,11 @@ void nidmi_begin() {
 
     touchDiag("AVANT WiFi/serveur");
 
+    // La composition que la carte garde pour l'app (MESURES §156) : lue en PSRAM
+    // AVANT que le serveur ne reponde — une page chargee pendant le demarrage
+    // recevrait sinon « aucune », et repartirait vide.
+    Compo::demarrer();
+
     // Démarre l’AP : AP seul si aucun STA en NVS (évite soucis d’association client en APSTA « vide »)
     NIDMI_WEB_LOG("[MEM] avant WiFi: %d\n", (int)ESP.getFreeHeap());
     serverCore.begin(apSsid, apPass, host, g_staSsid.length() == 0);
@@ -1023,6 +1006,7 @@ void nidmi_loop() {
 
     AudioEngine::entretienBoot();   // écrit la NVS hors du contexte async
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
+    Compo::boucle();                // écrit la composition reçue, au premier silence
 
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
