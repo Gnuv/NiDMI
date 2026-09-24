@@ -17,6 +17,7 @@
 #include "audio/AudioEngine.h"
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
+#include "config/EcrituresDifferees.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -102,6 +103,7 @@ static unsigned long g_rebootRequestTime = 0;
  * d'autre. La boucle garde son propre chemin pour les cas ordinaires. */
 static void tacheRedemarrage(void*) {
     vTaskDelay(pdMS_TO_TICKS(2000));
+    Differe::toutEcrireMaintenant();   // ce qui attendait le silence : le son s'arrete
     esp_restart();
 }
 
@@ -246,7 +248,8 @@ extern "C" void nidmi_requestReboot(const char* par){
     g_rebootRequestTime = millis();
     g_requestReboot = true;
     // Filet de securite : si la boucle est morte, cette tache redemarre quand meme.
-    xTaskCreate(tacheRedemarrage, "reboot", 2048, nullptr, configMAX_PRIORITIES - 2, nullptr);
+    // 4 Ko : elle vide les ecritures differees (LittleFS, NVS) avant de redemarrer.
+    xTaskCreate(tacheRedemarrage, "reboot", 4096, nullptr, configMAX_PRIORITIES - 2, nullptr);
 }
 
 // Mode téléchargement (bootloader ROM), demandé par l'API. Même différé que le
@@ -401,8 +404,10 @@ String nidmi_essaiWifiJson(){
  * sans WiFi parce qu'un cable est mort. */
 /* DUREES ECOULEES, jamais des dates futures : millis() repasse par zero au
  * bout de 49,7 jours, et une installation tourne aussi longtemps. */
+static unsigned long g_rallumageA = 0;      // MESURE : la fenetre qui suit un rallumage
 static void basculeRallumerRadio(unsigned long now){
     serverCore.demarrerRadioWifi();
+    g_rallumageA = now ? now : 1;
     if (serverCore.radioWifiAllumee()) {
         g_bascule.radioEnAttente = false;
         g_lastStaConnectAttempt = 0;
@@ -636,6 +641,22 @@ static void wifiBoucle(){
         }
     }
 
+    /* LE SURVEILLANT DE L'AUDIO. Un bloc dure 2,5 ms et son aller-retour
+     * normal ~4,7 ms ; au-dela de 8 ms, quelque chose l'a retenu — on le dit,
+     * avec ce qui se passait : c'est la seule facon de relier un decrochage a
+     * sa cause. Rare par construction (rien a dire en regime normal). */
+    {
+        const uint32_t pire = AudioEngine::pireBlocEtRaz();
+        if (pire > 8000) {
+            NIDMI_WEB_LOG("[audio] bloc lent : %lu.%lu ms (radio %d, sta %d, cable %d, %lus depuis un rallumage)",
+                          (unsigned long)(pire / 1000), (unsigned long)((pire % 1000) / 100),
+                          serverCore.radioWifiAllumee() ? 1 : 0,
+                          // radio coupee, l'interface STA est detruite : ne pas la lire
+                          serverCore.radioWifiAllumee() ? (int)WiFi.status() : -1,
+                          nidmi_usbnet::reseauActif() ? 1 : 0,
+                          g_rallumageA ? (unsigned long)((now - g_rallumageA) / 1000) : 0UL);
+        }
+    }
     const bool essai = g_essai.enCours || g_essaiDemande;
     // Une remise en marche qui a manque de memoire se retente — si la radio
     // est encore voulue : l'instrument autonome l'annule.
@@ -1004,16 +1025,17 @@ void nidmi_loop() {
         AudioEngine::restaurerAuBoot();
     }
 
-    AudioEngine::entretienBoot();   // écrit la NVS hors du contexte async
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
-    Compo::boucle();                // écrit la composition reçue, au premier silence
+    Differe::boucle();              // ce qui attend le silence pour s'écrire en flash
 
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
+        Differe::toutEcrireMaintenant();
         REG_WRITE(RTC_CNTL_OPTION1_REG, 0x1);   // force_download_boot
         ESP.restart();
     }
     if (g_requestReboot && (millis() - g_rebootRequestTime >= 2000)) {
+        Differe::toutEcrireMaintenant();
         ESP.restart();
     }
 

@@ -11,8 +11,8 @@
 // connectant, et la page montre ce que la carte porte.
 //
 // Recue en PSRAM, rendue depuis la PSRAM, ecrite en flash AU SILENCE seulement
-// (AudioEngine::silencePourLaFlash) : une ecriture en flash qui efface arrete
-// les deux coeurs ~45 ms, et une composition de quelques ko en efface
+// (Differe, src/config/EcrituresDifferees.h) : une ecriture en flash qui efface
+// arrete les deux coeurs ~45 ms, et une composition de quelques ko en efface
 // plusieurs. La plus recente est toujours celle qu'on rend, ecrite ou non.
 
 #include <Arduino.h>
@@ -29,12 +29,10 @@ void demarrer();                   // lit /compo.json de mapfs, s'il existe
 std::shared_ptr<char> courante(size_t& octets);
 
 // Adopter une composition recue (tampon PSRAM, JSON). Rendue tout de suite ;
-// ecrite en flash au premier silence, 3 s au moins apres la derniere.
-void adopter(std::shared_ptr<char> tampon, size_t octets);
+// ecrite en flash au premier silence, 3 s au moins apres la derniere. false :
+// la file des ecritures differees est pleine — rien n'a change.
+bool adopter(std::shared_ptr<char> tampon, size_t octets);
 
-void boucle();                     // depuis nidmi_loop : l'ecriture differee
-
-bool enAttente();                  // une composition recue n'est pas encore en flash
-String etatJson();                 // octets, ecritures, pire, echecs, en attente
+String etatJson();                 // octets, en attente
 
 }  // namespace Compo

@@ -377,9 +377,8 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
             size_t aEcrire = (taille - index < maxLen) ? (taille - index) : maxLen;
             if (aEcrire > 0) memcpy_P(buffer, donnees + index, aEcrire);
             // Dernier morceau du corps : la réponse est entièrement écoulée.
-            // validerConfigBoot() ne fait que lever un drapeau — on est dans
-            // async_tcp, on n'y écrit pas la flash (l'écriture a lieu dans
-            // nidmi_loop(), via entretienBoot()).
+            // validerConfigBoot() n'écrit que la mémoire RTC (§157) :
+            // appelable d'async_tcp.
             if (validerAuBout && aEcrire > 0 && index + aEcrire >= taille)
                 AudioEngine::validerConfigBoot();
             return aEcrire;
@@ -414,8 +413,10 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
  * lui faisait couper le son. Il coupait l'AUDIO pour une famine causee par le
  * SERVEUR WEB, l'inverse exact de l'ordre du projet.
  *
- * Il garde tout son role : quand meme CETTE page ne part plus, rien ne valide,
- * et il tranche. C'est le seul cas ou il doit encore le faire.
+ * Depuis le §157, le garde-fou ne compte plus les demarrages sans page, mais
+ * les PLANTAGES consecutifs (memoire RTC) : une famine qui ne plante pas ne le
+ * declenche plus du tout. Cette page reste une preuve de vie — elle remet le
+ * compteur a zero.
  *
  * ── ET LA PREUVE EST SUR LE DERNIER MORCEAU DU CORPS ───────────────────────
  * Pas a l'entree du gestionnaire. Cette faute a DEJA ete commise ici (§20,
@@ -484,9 +485,8 @@ static void _sertSecours(AsyncWebServerRequest *request){
         [taille](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
             const size_t aEcrire = (taille - index < maxLen) ? (taille - index) : maxLen;
             if (aEcrire > 0) memcpy(buffer, SECOURS_HTML + index, aEcrire);
-            /* Dernier morceau : le corps est entierement ecoule. Ne fait que
-               lever un drapeau — on est dans async_tcp, l'ecriture NVS a lieu
-               dans nidmi_loop() via entretienBoot(). */
+            /* Dernier morceau : le corps est entierement ecoule. N'ecrit que
+               la memoire RTC (§157) : appelable d'async_tcp. */
             if (aEcrire > 0 && index + aEcrire >= taille)
                 AudioEngine::validerConfigBoot();
             return aEcrire;

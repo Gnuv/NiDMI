@@ -67,19 +67,17 @@ bool arreter();
 void restaurerAuBoot();
 
 // Garde-fou, qui remplace la protection qu'offrait l'initialisation paresseuse
-// (« un échec ici ne doit pas pouvoir coûter l'OTA »). Le compteur de tentatives
-// est écrit en NVS AVANT d'allouer, et remis à zéro quand l'interface a
-// réellement été servie. Au bout de TENTATIVES_MAX boots sans cette preuve de
-// vie, la restauration se coupe : la carte démarre nue, joignable, flashable.
-// Une action humaine explicite (choix d'un moteur dans l'UI) la réarme.
+// (« un échec ici ne doit pas pouvoir coûter l'OTA »). Il compte les PLANTAGES
+// CONSECUTIFS (panique, chien de garde) après une restauration, en mémoire RTC :
+// un allumage, un redémarrage voulu, un OTA le remettent à zéro, et il n'écrit
+// jamais la flash (MESURES §157). Au bout de TENTATIVES_MAX plantages de suite,
+// la restauration se coupe : la carte démarre nue, joignable, flashable. Une
+// action humaine explicite (choix d'un moteur dans l'UI) la réarme.
 constexpr uint8_t TENTATIVES_MAX = 3;
 
-// Appelée par la route "/" : ne fait que lever un drapeau (contexte async_tcp,
-// on n'y écrit pas la flash).
+// Appelée quand l'interface est servie (page, ou page de secours) : preuve de
+// vie, qui remet le compteur à zéro. Mémoire RTC : appelable d'async_tcp.
 void validerConfigBoot();
-
-// Appelée par nidmi_loop() : c'est elle qui écrit la NVS, hors du contexte async.
-void entretienBoot();
 
 // Thread-safe. velocity 0 sur noteOn = noteOff (convention MIDI).
 void noteOn(uint8_t note, uint8_t velocity);
@@ -236,6 +234,11 @@ uint32_t silenceDepuisMs();
 constexpr uint32_t SILENCE_POUR_LA_FLASH_MS = 500;
 bool silencePourLaFlash();
 
+/* Le pire aller-retour d'un bloc audio depuis le dernier appel, en µs (et
+ * remise a zero). Un bloc dure 2,5 ms ; le DMA en garde 30 d'avance. Sert a
+ * mesurer ce qu'un geste coute a l'audio sans attendre qu'il decroche. */
+uint32_t pireBlocEtRaz();
+
 /* L'ecrivain ANNONCE son ecriture — faite en silence, par la regle ci-dessus.
  * Les blocs rendus en retard pendant qu'elle a lieu sont comptes deux fois :
  * dans `sousAlimentations` (ils ont eu lieu) et dans `retardsEcritures` (rien
@@ -267,7 +270,7 @@ struct Metriques {
   int      causeReset;         // esp_reset_reason() : panique ? chien de garde ?
   const char* causeResetTexte;
   uint32_t seuilBascule;       // plus gros bloc requis pour basculer à chaud
-  uint8_t  bootEssais;         // boots consécutifs sans interface servie
+  uint8_t  bootEssais;         // plantages consécutifs après restauration (RTC)
   bool     bootCoupe;          // restauration coupée : garde-fou atteint
   bool     silence;            // porte de silence fermée (STOP)
   uint16_t niveau;             // crête réellement envoyée au DAC (0 = muet)

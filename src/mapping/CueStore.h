@@ -32,10 +32,12 @@
 // 11 ko (MESURES.md §15). Un format ligne se lit en STREAMING, sans document
 // intermediaire.
 //
-// POURQUOI PAS DE LISTE EN RAM : 64 cues avec noms et params tiendraient
-// plusieurs kilo-octets — sur ce budget, c'est refuse. Seule la cue ACTIVE vit
-// en RAM ; les autres restent dans le fichier et sont relues au changement.
-// Un changement de cue est un evenement rare, pas un chemin temps reel.
+// LA LISTE VIT EN PSRAM (MESURES §157), pas dans le tas interne — dont le
+// budget interdisait de la garder, et qui la faisait relire de mapfs a chaque
+// changement de cue. Le texte entier y est tenu, lu de la memoire a chaque GO ;
+// ecrireTout() le rend aussitot et ne l'ecrit en flash qu'au premier silence
+// (src/config/EcrituresDifferees.h) : l'ecriture qui efface arrete l'audio.
+// Seule la cue ACTIVE est decodee (struct Cue) ; les autres restent du texte.
 #pragma once
 #include <Arduino.h>
 
@@ -57,7 +59,7 @@ struct Cue {
 // ── Magasin ───────────────────────────────────────────────────────────────
 bool   monter();
 int    nombre();                       // compte les lignes utiles
-bool   lire(int index, Cue& sortie);   // relit la cue N depuis mapfs
+bool   lire(int index, Cue& sortie);   // decode la cue N (texte en PSRAM)
 bool   ecrireTout(const String& contenu);
 String contenu();                      // le fichier brut, pour l'app
 

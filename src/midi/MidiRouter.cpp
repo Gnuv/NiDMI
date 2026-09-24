@@ -1,4 +1,5 @@
 #include "MidiRouter.h"
+#include "../config/EcrituresDifferees.h"
 #include "../mapping/MappingEngine.h"
 #include "../mapping/ScriptStore.h"
 #include <Preferences.h>
@@ -400,8 +401,7 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
     const String cle = cleNvsEmplacement(emplacement);
     if (!script.length()) {
         em.nom = "";
-        Preferences p;
-        if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(cle.c_str()); p.end(); }
+        Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
         Serial.printf("[MidiRouter] emplacement %u : vide\n", (unsigned)emplacement);
         return;
     }
@@ -410,8 +410,7 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
     if (!memeCode || em.nom != fichier) {
         if (ScriptStore::ecrire(fichier.c_str(), script)) {
             em.nom = fichier;
-            Preferences p;
-            if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(cle.c_str(), em.nom); p.end(); }
+            Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), em.nom);   // au silence (§157)
         } else {
             /* mapfs pleine ou absente : le script TOURNE quand meme, mais il ne
              * survivra pas au redemarrage. On le DIT — un comportement qui
@@ -508,8 +507,6 @@ void MidiRouter::_reduireChaine(uint8_t n) {
      * plus tendu de la carte (630 entrees pour TOUT, §101). Vu au compteur —
      * 114 entrees avant l'essai, 129 apres, et elles ne redescendaient pas.
      * Une seule ouverture de NVS pour toute la reduction. */
-    Preferences p;
-    const bool nvs = p.begin(NVS_ESPACE_MIDI, false);
     while (emplacements.size() > n) {
         Emplacement* em = emplacements.back();
         /* Les reprises retiennent un pointeur sur le texte : les purger AVANT
@@ -517,9 +514,8 @@ void MidiRouter::_reduireChaine(uint8_t n) {
         MappingEngine::viderDifferes(em->contenu.c_str());
         delete em;
         emplacements.pop_back();
-        if (nvs) p.remove(cleNvsEmplacement((uint8_t)emplacements.size()).c_str());
+        Differe::nvsRetirer(NVS_ESPACE_MIDI, cleNvsEmplacement((uint8_t)emplacements.size()).c_str());
     }
-    if (nvs) p.end();
 }
 
 /* Combien de maillons appartiennent a la zone MAIN. Persiste, comme la
@@ -529,8 +525,7 @@ void MidiRouter::fixerMaillonsPermanents(uint8_t n) {
     if (n > emplacements.size()) n = (uint8_t)emplacements.size();
     if (n == _nPermanents) return;
     _nPermanents = n;
-    Preferences p;
-    if (p.begin(NVS_ESPACE_MIDI, false)) { p.putUChar("nperm", n); p.end(); }
+    Differe::nvsOctet(NVS_ESPACE_MIDI, "nperm", n);   // au silence (§157)
     Serial.printf("[MidiRouter] %u maillon(s) permanent(s) — les cues n'y touchent pas\n",
                   (unsigned)n);
 }
@@ -548,8 +543,7 @@ uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
     /* La longueur va en NVS avec les noms : sans elle, une carte redemarree
      * retrouverait ses scripts mais pas sa chaine, et les emplacements au-dela
      * du premier seraient muets sans rien dire. */
-    Preferences p;
-    if (p.begin(NVS_ESPACE_MIDI, false)) { p.putUChar("nmap", obtenu); p.end(); }
+    Differe::nvsOctet(NVS_ESPACE_MIDI, "nmap", obtenu);   // au silence ; identique : rien (§157)
     Serial.printf("[MidiRouter] chaine dimensionnee a %u emplacement(s)%s\n",
                   (unsigned)obtenu, (obtenu < n) ? " — memoire insuffisante" : "");
     return obtenu;
@@ -571,8 +565,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
         em.nom = "";
         for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
         if (persister) {
-            Preferences p;
-            if (p.begin(NVS_ESPACE_MIDI, false)) { p.remove(cle.c_str()); p.end(); }
+            Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
         }
         Serial.printf("[MidiRouter] emplacement %u : aucun script\n", (unsigned)emplacement);
         return true;
@@ -588,8 +581,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
     em.initEnAttente = true;
     for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
     if (persister) {
-        Preferences p;
-        if (p.begin(NVS_ESPACE_MIDI, false)) { p.putString(cle.c_str(), em.nom); p.end(); }
+        Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), em.nom);   // au silence (§157)
     }
     Serial.printf("[MidiRouter] emplacement %u : '%s' charge (%u o)%s\n",
                   (unsigned)emplacement, nom, (unsigned)contenu.length(),

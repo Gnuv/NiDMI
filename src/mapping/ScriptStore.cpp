@@ -1,4 +1,5 @@
 #include "ScriptStore.h"
+#include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
 
 namespace ScriptStore {
@@ -36,22 +37,50 @@ bool monter() {
   return true;
 }
 
+/* LA LISTE DIT CE QUE LA CARTE PORTE, pas ce que la flash a deja recu : un
+ * script envoye attend le silence pour s'ecrire (§157) — il existe pourtant,
+ * une cue peut l'appeler. Donc : la flash, corrigee de ce qui attend. */
+namespace {
+struct Liste { String* out; String* vus; bool* premier; };
+void _ajouter(Liste& l, const String& nom, size_t octets) {
+  if (!*l.premier) *l.out += ",";
+  *l.premier = false;
+  *l.out += "{\"name\":\"" + nom + "\",\"bytes\":" + String((unsigned)octets) + "}";
+  *l.vus += "|" + nom + "|";
+}
+}  // namespace
+
 String listerJson() {
   if (!monter()) return "[]";
-  String out = "[";
+  String out = "[", vus;
+  bool premier = true;
+  Liste l{ &out, &vus, &premier };
   File d = LittleFS.open(DOSSIER);
   if (d && d.isDirectory()) {
-    bool premier = true;
     for (File f = d.openNextFile(); f; f = d.openNextFile()) {
       if (f.isDirectory()) continue;
       String n = String(f.name());
       const int slash = n.lastIndexOf('/');
       if (slash >= 0) n = n.substring(slash + 1);
-      if (!premier) out += ",";
-      premier = false;
-      out += "{\"name\":\"" + n + "\",\"bytes\":" + String((unsigned)f.size()) + "}";
+      if (n.endsWith(".tmp")) continue;            // une ecriture en cours
+      std::shared_ptr<char> t; size_t na = 0; bool sup = false;
+      if (Differe::attente(_chemin(n.c_str()).c_str(), t, na, sup)) {
+        if (!sup) _ajouter(l, n, na);
+        else vus += "|" + n + "|";
+        continue;
+      }
+      _ajouter(l, n, f.size());
     }
   }
+  // Ce qui attend et que la flash n'a pas encore.
+  Differe::visiterAttente((String(DOSSIER) + "/").c_str(),
+    [](const char* chemin, size_t n, bool supprime, void* ctx) {
+      Liste& l = *(Liste*)ctx;
+      const char* base = strrchr(chemin, '/');
+      const String nom = base ? base + 1 : chemin;
+      if (supprime || l.vus->indexOf("|" + nom + "|") >= 0) return;
+      _ajouter(l, nom, n);
+    }, &l);
   out += "]";
   return out;
 }
@@ -82,9 +111,13 @@ void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
 
 bool existe(const char* nom) {
   if (!nom || !*nom || !monter()) return false;
+  std::shared_ptr<char> t; size_t n = 0; bool sup = false;
+  if (Differe::attente(_chemin(nom).c_str(), t, n, sup)) return !sup;
   return LittleFS.exists(_chemin(nom));
 }
 
+/* Recu tout de suite, ecrit en flash au premier silence (§157) : l'ecriture
+ * qui efface arrete l'audio. lire() rend deja le nouveau contenu. */
 bool ecrire(const char* nom, const String& contenu) {
   if (!nom || !*nom || !monter()) return false;
   if (contenu.length() > TAILLE_MAX) {
@@ -92,22 +125,28 @@ bool ecrire(const char* nom, const String& contenu) {
                   nom, (unsigned)contenu.length(), (unsigned)TAILLE_MAX);
     return false;
   }
-  File f = LittleFS.open(_chemin(nom), FILE_WRITE);
-  if (!f) return false;
-  const size_t ecrit = f.print(contenu);
-  f.close();
-  Serial.printf("[scripts] %s ecrit (%u o)\n", nom, (unsigned)ecrit);
-  return ecrit == contenu.length();
+  if (!Differe::poserFichierCopie(_chemin(nom).c_str(), contenu.c_str(), contenu.length()))
+    return false;
+  Serial.printf("[scripts] %s recu (%u o, flash au premier silence)\n", nom, (unsigned)contenu.length());
+  return true;
 }
 
 bool supprimer(const char* nom) {
-  if (!nom || !*nom || !monter()) return false;
-  return LittleFS.remove(_chemin(nom));
+  if (!nom || !*nom || !monter() || !existe(nom)) return false;
+  return Differe::supprimerFichier(_chemin(nom).c_str());
 }
 
 bool lire(const char* nom, String& contenu) {
   contenu = "";
   if (!nom || !*nom || !monter()) return false;
+  {
+    std::shared_ptr<char> t; size_t n = 0; bool sup = false;
+    if (Differe::attente(_chemin(nom).c_str(), t, n, sup)) {
+      if (sup) return false;
+      if (t && n) contenu.concat(t.get(), (unsigned)n);
+      return true;
+    }
+  }
   File f = LittleFS.open(_chemin(nom), FILE_READ);
   if (!f) return false;
   // On lit d'un bloc : un .nms est petit, et un flux caractere par caractere

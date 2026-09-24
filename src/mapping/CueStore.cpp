@@ -4,7 +4,12 @@
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
 #include "../server/ServerCore.h"     // nidmi_ws_pousser : la carte ANNONCE son etat
+#include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
+#include <memory>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace Cues {
 namespace {
@@ -318,33 +323,91 @@ void _appliquer(const Cue& c) {
 
 }  // namespace
 
+namespace {
+
+/* ── LA LISTE EN PSRAM (MESURES §157) ──────────────────────────────────────
+ * Elle ne vivait que dans mapfs, relue a chaque changement de cue — par budget :
+ * le tas INTERNE ne pouvait pas la porter. La PSRAM, si (8 Mo, §152). Lue de la
+ * memoire a chaque GO, ecrite en flash au premier silence (Differe) : cinq
+ * reecritures de cues.txt pendant le jeu avaient coute un bloc audio de 26 ms. */
+SemaphoreHandle_t _verrouTexte = nullptr;
+std::shared_ptr<char> _texte;
+size_t _octets = 0;
+
+std::shared_ptr<char> _texteCourant(size_t& n) {
+  if (!_verrouTexte) { n = 0; return nullptr; }
+  xSemaphoreTake(_verrouTexte, portMAX_DELAY);
+  auto t = _texte;
+  n = _octets;
+  xSemaphoreGive(_verrouTexte);
+  return t;
+}
+void _adopterTexte(std::shared_ptr<char> t, size_t n) {
+  xSemaphoreTake(_verrouTexte, portMAX_DELAY);
+  _texte = t;
+  _octets = n;
+  xSemaphoreGive(_verrouTexte);
+}
+std::shared_ptr<char> _tamponPsram(size_t n) {
+  char* p = (char*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) return nullptr;
+  return std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); });
+}
+
+// Chaque ligne du texte ; `f` rend false pour s'arreter.
+template <typename F>
+void _pourChaqueLigne(const char* d, size_t n, F f) {
+  size_t i = 0;
+  while (i < n) {
+    size_t j = i;
+    while (j < n && d[j] != '\n') j++;
+    String l;
+    l.concat(d + i, (unsigned)(j - i));
+    if (!f(l)) return;
+    i = j + 1;
+  }
+}
+
+}  // namespace
+
 bool monter() {
   if (_monte) return true;
   if (!LittleFS.begin(true, BASE, 10, PARTITION)) return false;
+  if (!_verrouTexte) _verrouTexte = xSemaphoreCreateMutex();
+  // La liste de la flash, une fois, en PSRAM.
+  if (LittleFS.exists(FICHIER)) {
+    File f = LittleFS.open(FICHIER, FILE_READ);
+    if (f) {
+      const size_t n = f.size();
+      auto t = _tamponPsram(n);
+      if (t && f.read((uint8_t*)t.get(), n) == n) _adopterTexte(t, n);
+      f.close();
+    }
+  }
   _monte = true;
   return true;
 }
 
 int nombre() {
-  if (!monter() || !LittleFS.exists(FICHIER)) return 0;
-  File f = LittleFS.open(FICHIER, FILE_READ);
-  if (!f) return 0;
-  int n = 0;
-  while (f.available()) if (_ligneUtile(f.readStringUntil('\n'))) n++;
-  f.close();
-  return n;
+  if (!monter()) return 0;
+  size_t n = 0;
+  auto t = _texteCourant(n);
+  if (!t) return 0;
+  int k = 0;
+  _pourChaqueLigne(t.get(), n, [&](const String& l) { if (_ligneUtile(l)) k++; return true; });
+  return k;
 }
 
 bool lire(int index, Cue& sortie) {
-  if (index < 0 || !monter() || !LittleFS.exists(FICHIER)) return false;
-  File f = LittleFS.open(FICHIER, FILE_READ);
-  if (!f) return false;
-  int n = 0;
+  if (index < 0 || !monter()) return false;
+  size_t n = 0;
+  auto t = _texteCourant(n);
+  if (!t) return false;
+  int k = 0;
   bool trouve = false;
-  while (f.available()) {
-    const String l = f.readStringUntil('\n');
-    if (!_ligneUtile(l)) continue;
-    if (n++ != index) continue;
+  _pourChaqueLigne(t.get(), n, [&](const String& l) {
+    if (!_ligneUtile(l)) return true;
+    if (k++ != index) return true;
     sortie.nom    = _champ(l, 0);
     sortie.duree  = _champ(l, 1).toFloat();
     sortie.script = _champ(l, 2);
@@ -354,18 +417,20 @@ bool lire(int index, Cue& sortie) {
     sortie.paramsScript = _champ(l, 5);
     sortie.env          = _champ(l, 6);   // absent sur une cue sans automation
     trouve = true;
-    break;
-  }
-  f.close();
+    return false;
+  });
   return trouve;
 }
 
 bool ecrireTout(const String& contenuTexte) {
   if (!monter()) return false;
-  File f = LittleFS.open(FICHIER, FILE_WRITE);
-  if (!f) return false;
-  const size_t n = f.print(contenuTexte);
-  f.close();
+  const size_t n = contenuTexte.length();
+  auto t = _tamponPsram(n);
+  if (!t) return false;
+  if (n) memcpy(t.get(), contenuTexte.c_str(), n);
+  // Rendue tout de suite ; en flash au premier silence.
+  if (!Differe::poserFichier(FICHIER, t, n)) return false;
+  _adopterTexte(t, n);
   /* UNE LISTE PLUS COURTE NE LAISSE PAS LA TETE DEHORS. L'index memorise
    * pouvait depasser la nouvelle fin — installer une composition plus courte
    * laissait alors le transport bloque : `demarrer()` ne trouvait plus sa cue et
@@ -373,18 +438,16 @@ bool ecrireTout(const String& contenuTexte) {
    * sons dans le vide. Trouve par le banc trig-wav (MESURES §136). */
   const int total = nombre();
   if (_index >= total) _index = (total > 0) ? total - 1 : 0;
-  Serial.printf("[cues] liste ecrite : %u o, %d cues\n", (unsigned)n, total);
-  return n == contenuTexte.length();
+  Serial.printf("[cues] liste recue : %u o, %d cues (flash au premier silence)\n", (unsigned)n, total);
+  return true;
 }
 
 String contenu() {
-  if (!monter() || !LittleFS.exists(FICHIER)) return String("");
-  File f = LittleFS.open(FICHIER, FILE_READ);
-  if (!f) return String("");
+  if (!monter()) return String("");
+  size_t n = 0;
+  auto t = _texteCourant(n);
   String out;
-  out.reserve(f.size() + 1);
-  while (f.available()) out += (char)f.read();
-  f.close();
+  if (t && n) out.concat(t.get(), (unsigned)n);
   return out;
 }
 

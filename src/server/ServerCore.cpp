@@ -1,6 +1,8 @@
 #include <esp_heap_caps.h>
 #include "ServerCore.h"
 #include "../Globals.h"
+#include "../audio/AudioEngine.h"
+#include "WebDebugConsole.h"
 #include <ESPmDNS.h>
 #include <Preferences.h>
 // setupWebAPI est déclaré plus bas et défini dans WebAPI.cpp
@@ -46,7 +48,19 @@ void ServerCore::demarrerRadioWifi() {
      * peut manquer de memoire (esp_wifi_init rend ESP_ERR_NO_MEM, WiFi.mode
      * rend faux) : se dire allumee rendrait l'appel suivant muet, et le WiFi
      * ne reviendrait jamais. Faux reste faux : l'appelant reessaie. */
+    /* MESURE (tache « rallumage sans effet sur le son ») : le pire bloc audio
+     * pendant chaque etape. */
+    struct Etape { const char* nom; uint32_t us; uint32_t audio; };
+    Etape etapes[5]; int ne = 0;
+    AudioEngine::pireBlocEtRaz();
+    uint32_t te = micros();
+    auto noter = [&](const char* nom) {
+        const uint32_t now = micros();
+        etapes[ne++] = { nom, now - te, AudioEngine::pireBlocEtRaz() };
+        te = micros();
+    };
     const bool ok = apOnlyRetenu ? WiFi.mode(WIFI_MODE_AP) : WiFi.mode(WIFI_MODE_APSTA);
+    noter("mode");
     if (!ok) {
         Serial.println("[ServerCore] WiFi: le pilote n'a pas demarre (memoire ?)");
         return;
@@ -56,18 +70,31 @@ void ServerCore::demarrerRadioWifi() {
 
     // Augmenter la puissance WiFi pour XIAO_ESP32C3
     WiFi.setTxPower(WIFI_POWER_19_5dBm); // Puissance maximale
+    noter("txpower");
 
     /* Configurer l'IP de l'AP explicitement à 192.168.4.1 */
     IPAddress apIp = IPAddress(192, 168, 4, 1);
     IPAddress apGateway = IPAddress(192, 168, 4, 1);
     IPAddress apSubnet = IPAddress(255, 255, 255, 0);
     WiFi.softAPConfig(apIp, apGateway, apSubnet);
+    noter("apconfig");
 
     /* Canal 1 : meilleure compatibilité avec les clients 2,4 GHz */
     WiFi.softAP(apSsidRetenu.c_str(), apPassRetenu.c_str(), 1);
+    noter("softap");
 
     /* Attendre que l'AP soit prêt avant de continuer */
     delay(100);
+    noter("delay");
+    String j;
+    for (int i = 0; i < ne; i++) {
+        char l[64];
+        snprintf(l, sizeof l, "%s %lu ms (audio %lu.%lu ms) ", etapes[i].nom,
+                 (unsigned long)(etapes[i].us / 1000), (unsigned long)(etapes[i].audio / 1000),
+                 (unsigned long)((etapes[i].audio % 1000) / 100));
+        j += l;
+    }
+    NIDMI_WEB_LOG("[radio] rallumage : %s", j.c_str());
 }
 
 /* ── COUPER LA RADIO, EN MARCHE ────────────────────────────────────────────

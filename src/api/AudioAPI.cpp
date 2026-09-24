@@ -10,6 +10,7 @@
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../mapping/CompoStore.h"
+#include "../config/EcrituresDifferees.h"
 #include "../audio/SampleStore.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
@@ -69,7 +70,7 @@ void setupAudioAPI(AsyncWebServer& server) {
                 String((uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t)) + ",";
         // Garde-fou du chargement au boot : combien de démarrages consécutifs
         // sans que l'interface ait pu être servie, et si le chargement est coupé.
-        json += "\"boot_attempts\":"     + String(m.bootEssais) + ",";
+        json += "\"plantages_consecutifs\":" + String(m.bootEssais) + ",";
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
         json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
         json += "\"niveau\":"            + String(m.niveau) + ",";
@@ -529,7 +530,11 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
             request->_tempObject = nullptr;   // la carte le garde : le serveur ne le liberera pas
-            Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n);
+            if (!Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n)) {
+                request->send(503, "application/json",
+                    "{\"status\":\"error\",\"message\":\"file des ecritures differees pleine : reessayer\"}");
+                return;
+            }
             request->send(200, "application/json",
                 String("{\"status\":\"ok\",\"octets\":") + String((unsigned)n)
                 + ",\"message\":\"rendue tout de suite, ecrite en flash au premier silence\"}");
@@ -1046,6 +1051,8 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
         // La composition gardee pour l'app (§156) : recue, rendue, ecrite au silence.
         json += ",\"compo\":" + Compo::etatJson();
+        // Ce qui attend le silence pour s'ecrire en flash (§157).
+        json += ",\"ecritures_differees\":" + Differe::etatJson();
 
         uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
         MappingEngine::statsReprises(enCours, maxVu, refus, capacite);

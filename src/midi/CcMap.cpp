@@ -1,4 +1,5 @@
 #include "CcMap.h"
+#include "../config/EcrituresDifferees.h"
 
 #include <Preferences.h>
 
@@ -17,12 +18,10 @@ int           s_nb = 0;
 char  s_cibleArmee[16] = {0};
 float s_minArme = 0.0f, s_maxArme = 1.0f;
 
+// Au premier silence (§157) : apprendre un CC en jouant ne doit pas couter le son.
 void ecrireNvs(const String& t) {
-    Preferences p;
-    if (!p.begin(NVS_ESPACE, false)) return;
-    if (t.length()) p.putString(NVS_CLE, t);
-    else            p.remove(NVS_CLE);
-    p.end();
+    if (t.length()) Differe::nvsChaine(NVS_ESPACE, NVS_CLE, t);
+    else            Differe::nvsRetirer(NVS_ESPACE, NVS_CLE);
 }
 
 // Etale 0..127 dans [min, max]. 127 (et non 128) pour que la butee haute du

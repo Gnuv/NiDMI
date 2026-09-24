@@ -16,6 +16,7 @@
 #include <new>
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
+#include "../config/EcrituresDifferees.h"
 #include <Preferences.h>
 
 namespace AudioEngine {
@@ -45,6 +46,10 @@ volatile uint32_t nBlocs = 0, nRetards = 0;
 // chevauchee. Ils sont dans nRetards (ils ont eu lieu) ET ici (rien ne s'est
 // entendu) : le voyant ne compte que la difference.
 volatile uint32_t ecrituresFlash = 0, nRetardsEcritures = 0;
+// Le pire aller-retour d'un bloc (rendu + remise au DMA), en µs, depuis la
+// derniere lecture : ce qu'un geste coute a l'audio, bien avant le seuil de
+// retard (20 ms) — en silence comme en jeu.
+volatile uint32_t pireBlocUs = 0;
 
 // Une note en attente, déposée par MidiTask ou par un rappel RTP.
 struct Evenement { uint8_t note; uint8_t velo; };   // velo 0 = extinction
@@ -343,6 +348,7 @@ void boucleAudio(void*) {
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
 
     const uint32_t t0 = millis();
+    const uint32_t u0 = micros();
     const uint32_t e0 = ecrituresFlash;
     const uint32_t c0 = ESP.getCycleCount();
     if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
@@ -386,6 +392,8 @@ void boucleAudio(void*) {
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
+    const uint32_t du = micros() - u0;
+    if (du > pireBlocUs) pireBlocUs = du;
     if (millis() - t0 > 20) {
       nRetards++;
       // Ce bloc a-t-il chevauche une ecriture volontaire ? (commencee avant lui,
@@ -410,11 +418,23 @@ void boucleAudio(void*) {
 namespace {
 constexpr const char* NVS_ESPACE = "nidmi-audio";
 constexpr const char* NVS_CLE    = "moteur";
-constexpr const char* NVS_CLE_ESSAIS = "bootess";
+// L'ancien compteur du garde-fou, en NVS, retire au §157 : sa cle s'efface au
+// premier demarrage, pour ne pas laisser d'orpheline dans le reservoir.
+constexpr const char* NVS_CLE_ESSAIS_RETIREE = "bootess";
 
-// Garde-fou du chargement au boot. Le compteur vit en NVS pour survivre à une
-// coupure de courant — c'est tout l'intérêt : une config qui affame la carte se
-// désarme d'elle-même au bout de TENTATIVES_MAX cycles d'alimentation.
+/* LE GARDE-FOU DU BOOT COMPTE LES PLANTAGES (MESURES §157). Il comptait les
+ * demarrages sans interface servie, en NVS : un instrument autonome qu'on
+ * allume et eteint sans jamais ouvrir l'app coupait son son au 3e allumage —
+ * et chaque demarrage ecrivait deux fois la flash, dont une pendant le son.
+ * Il compte maintenant les PLANTAGES CONSECUTIFS (panique, chien de garde)
+ * apres une restauration : un allumage, un redemarrage voulu, un OTA les
+ * remettent a zero. En memoire RTC — elle survit a un plantage, pas a une
+ * coupure de courant, qui n'est pas une boucle de plantage : plus aucune
+ * ecriture en flash. (Une config qui affame la carte sans la planter sert la
+ * page de secours, qui compte comme preuve de vie depuis le §138.) */
+RTC_NOINIT_ATTR uint32_t rtcMagie;
+RTC_NOINIT_ATTR uint8_t  rtcPlantages;
+constexpr uint32_t MAGIE_RTC = 0x4E694433;   // « NiD3 »
 // Réserve de bloc contigu à laisser au serveur après l'allocation de Plaits.
 // Mesuré (MESURES.md §11, §16, §19) : la carte sert sa page en 0,05 s avec
 // 16 372 o de plus gros bloc, et n'y arrive JAMAIS à 7 668. On garde 12 000.
@@ -429,21 +449,17 @@ static inline uint32_t seuilBasculeChaud() {
 }
 Bascule derniereBasc = Bascule::Appliquee;
 
-uint8_t  essaisAuBoot      = 0;
+uint8_t  essaisAuBoot      = 0;        // plantages consecutifs comptes a ce demarrage
 bool     restaurationCoupee = false;
-bool     configValidee      = false;   // l'interface a été servie
-volatile bool aValider      = false;   // drapeau posé par la route "/"
 
 void memoriser(const String& valeur) {
-  Preferences p;
-  if (!p.begin(NVS_ESPACE, false)) return;
-  p.putString(NVS_CLE, valeur);
+  // Le choix vaut tout de suite ; il s'ecrit en flash au premier silence (§157).
+  Differe::nvsChaine(NVS_ESPACE, NVS_CLE, valeur);
   // Un choix humain explicite réarme le garde-fou : c'est le seul chemin de
   // sortie quand la restauration a été coupée (la carte sert alors son UI, donc
   // l'utilisateur peut choisir autre chose — ou le même moteur, en connaissance
   // de cause).
-  p.putUChar(NVS_CLE_ESSAIS, 0);
-  p.end();
+  rtcPlantages = 0;
   essaisAuBoot = 0;
   restaurationCoupee = false;
 }
@@ -492,18 +508,17 @@ bool isStarted() { return demarre; }
 // ── Restauration au boot, et son garde-fou ─────────────────────────────────
 // Voir l'en-tête pour le pourquoi. Ici, le comment :
 //
-//   1. lire le choix mémorisé — s'il n'y a rien à charger, on ne compte pas
-//      de tentative et on ne touche à rien ;
-//   2. si le compteur a atteint TENTATIVES_MAX, couper : la carte démarre nue.
+//   1. un démarrage qui ne suit pas un plantage remet le compteur (RTC) à zéro ;
+//   2. lire le choix mémorisé — s'il n'y a rien à charger, on s'arrête là ;
+//   3. si le compteur a atteint TENTATIVES_MAX, couper : la carte démarre nue.
 //      C'est la protection de l'OTA que l'initialisation paresseuse assurait
 //      avant, transposée au nouvel ordre ;
-//   3. sinon incrémenter EN NVS (donc avant le risque, pour survivre à une
-//      coupure), puis démarrer l'audio et restaurer.
+//   4. sinon compter cette tentative (avant le risque), puis démarrer l'audio
+//      et restaurer.
 //
-// L'écriture NVS de l'étape 3 est sans danger pour le son : la tâche audio
-// n'existe pas encore. Celle de validerConfigBoot(), si — d'où son report dans
-// entretienBoot(), et le coût connu (MESURES.md §13 : 1,8 % de blocs en retard
-// le temps de l'écriture, une fois par boot).
+// Plus aucune écriture en flash : le compteur vivait en NVS, et sa remise à
+// zéro coûtait 1,8 % de blocs en retard le temps de l'écriture, une fois par
+// boot (MESURES.md §13) — pendant le son. Il vit en RTC depuis le §157.
 void restaurerAuBoot() {
   /* DEMARRAGE A VIDE, DEMANDE POUR CE SEUL DEMARRAGE. Le drapeau est consomme
    * ici : le suivant restaurera le son. La NVS n'est pas lue, donc pas touchee —
@@ -512,12 +527,20 @@ void restaurerAuBoot() {
     Serial.println("[audio] boot : demarrage A VIDE demande — le son reviendra au suivant");
     return;
   }
+  // Le compteur : un demarrage qui ne suit pas un plantage le remet a zero.
+  const esp_reset_reason_t raison = esp_reset_reason();
+  const bool apresPlantage = raison == ESP_RST_PANIC || raison == ESP_RST_INT_WDT
+                          || raison == ESP_RST_TASK_WDT || raison == ESP_RST_WDT;
+  if (rtcMagie != MAGIE_RTC) { rtcMagie = MAGIE_RTC; rtcPlantages = 0; }
+  if (!apresPlantage) rtcPlantages = 0;
+  essaisAuBoot = rtcPlantages;
+
   String choix;
   {
     Preferences p;
-    if (!p.begin(NVS_ESPACE, true)) return;
+    if (!p.begin(NVS_ESPACE, false)) return;   // ecriture : effacer l'ancienne cle, une fois
     choix = p.getString(NVS_CLE, "");
-    essaisAuBoot = p.getUChar(NVS_CLE_ESSAIS, 0);
+    if (p.isKey(NVS_CLE_ESSAIS_RETIREE)) p.remove(NVS_CLE_ESSAIS_RETIREE);   // avant le son
     p.end();
   }
   if (!choix.length() || choix == "-1") {
@@ -525,27 +548,19 @@ void restaurerAuBoot() {
     return;
   }
 
-  if (essaisAuBoot >= TENTATIVES_MAX) {
+  if (rtcPlantages >= TENTATIVES_MAX) {
     restaurationCoupee = true;
-    Serial.printf("[audio] boot : restauration COUPEE — %u demarrages sans interface servie.\n"
+    Serial.printf("[audio] boot : restauration COUPEE — %u plantages de suite apres restauration.\n"
                   "        La carte demarre nue (choix conserve : %s).\n"
                   "        Choisir un process dans l'UI rearme le chargement.\n",
-                  (unsigned)essaisAuBoot, choix.c_str());
+                  (unsigned)rtcPlantages, choix.c_str());
     return;
   }
 
-  {
-    Preferences p;
-    if (p.begin(NVS_ESPACE, false)) {
-      p.putUChar(NVS_CLE_ESSAIS, (uint8_t)(essaisAuBoot + 1));
-      p.end();
-    }
-  }
-  // La copie RAM doit refléter ce qui vient d'être écrit : c'est elle que lit
-  // validerConfigBoot() pour savoir s'il y a un compteur à effacer, et
-  // metriques() pour l'exposer. La laisser à sa valeur d'avant l'incrément,
-  // c'est un compteur qui ne redescend jamais et un /api/audio/status qui ment.
-  essaisAuBoot++;
+  // Cette tentative compte AVANT le risque ; si la carte ne plante pas, le
+  // prochain demarrage (qui ne suivra pas un plantage) la remettra a zero.
+  // essaisAuBoot garde, lui, les plantages qui ont PRECEDE ce demarrage.
+  rtcPlantages++;
 
   Serial.printf("[audio] boot : chargement de %s (tentative %u/%u), tas %lu o, plus gros bloc %lu o\n",
                 choix.c_str(), (unsigned)essaisAuBoot, (unsigned)TENTATIVES_MAX,
@@ -595,21 +610,11 @@ bool arreter() {
 }
 
 void validerConfigBoot() {
-  if (configValidee || restaurationCoupee || essaisAuBoot == 0) return;
-  aValider = true;              // rien de plus : on est dans async_tcp
-}
-
-void entretienBoot() {
-  if (!aValider) return;
-  aValider = false;
-  if (configValidee) return;
-  configValidee = true;
-  Preferences p;
-  if (!p.begin(NVS_ESPACE, false)) return;
-  p.putUChar(NVS_CLE_ESSAIS, 0);
-  p.end();
+  // Memoire RTC : rien a ecrire en flash, donc appelable d'async_tcp. Une
+  // restauration coupee attend un choix humain (memoriser), pas une page.
+  if (restaurationCoupee) return;
+  rtcPlantages = 0;
   essaisAuBoot = 0;
-  Serial.println("[audio] interface servie — config du boot validee, compteur remis a zero");
 }
 
 bool ensureStarted() {
@@ -942,6 +947,12 @@ void setVolume(float v) {
   gVolume = v;
 }
 float volume() { return gVolume; }
+
+uint32_t pireBlocEtRaz() {
+  const uint32_t p = pireBlocUs;
+  pireBlocUs = 0;
+  return p;
+}
 
 bool silencePourLaFlash() {
   return silenceDepuisMs() >= SILENCE_POUR_LA_FLASH_MS;
