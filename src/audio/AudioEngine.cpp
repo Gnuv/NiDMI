@@ -76,6 +76,8 @@ volatile uint32_t    cyclesEch     = 0;
 volatile bool        plaitsTrigger = false;
 volatile bool    gSilence      = true;    // MUET au demarrage : rien ne sort tant que PLAY n'a pas ouvert
 volatile uint16_t niveauCrete  = 0;      // crete du DERNIER bloc reellement envoye
+volatile uint32_t dernierSonMs = 0;      // debut du dernier bloc AUDIBLE envoye (> SEUIL_AUDIBLE)
+constexpr uint16_t SEUIL_AUDIBLE = 32;   // ≈ −60 dBFS : en dessous, un bloc est du silence
 volatile uint8_t  derniereNote  = 255;   // 255 = aucune ; temoin du MIDI reellement joue
 
 // Taille du scratch stmlib. Plaits remet l'allocateur a zero avant CHAQUE
@@ -373,6 +375,7 @@ void boucleAudio(void*) {
         if (a > crete) crete = a;
       }
       niveauCrete = crete;
+      if (crete > SEUIL_AUDIBLE) dernierSonMs = t0;
     }
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
@@ -928,6 +931,17 @@ void setVolume(float v) {
   gVolume = v;
 }
 float volume() { return gVolume; }
+
+uint32_t silenceDepuisMs() {
+  if (!demarre) return UINT32_MAX;          // pas de son a proteger
+  // Le dernier son D'ABORD, l'heure ensuite : lus dans l'autre ordre, un bloc
+  // audible date entre les deux lectures ferait deborder la soustraction — et
+  // un son en cours passerait pour un long silence. Dans cet ordre, son <=
+  // maintenant : la difference non signee est juste, retour de millis() compris.
+  const uint32_t son = dernierSonMs;
+  const uint32_t maintenant = millis();
+  return maintenant - son;
+}
 
 Metriques metriques() {
   Metriques m{};

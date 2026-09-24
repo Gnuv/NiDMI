@@ -57,7 +57,8 @@ void nidmi_requestEssaiWifi(unsigned long dureeMs);
 /**
  * @brief La bascule « cable prioritaire » — voir NiDMI.cpp. Demander de
  * l'activer ou de la retirer (appliquee par nidmi_loop dans la seconde,
- * memorisee en NVS 3 s apres le dernier changement).
+ * memorisee en NVS au premier silence de la sortie audio, 3 s au moins apres
+ * le dernier changement — « LE WIFI : TROIS REGLES »).
  */
 void nidmi_demanderCablePrioritaire(bool actif);
 

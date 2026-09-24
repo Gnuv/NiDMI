@@ -108,7 +108,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
         nidmi_demanderCablePrioritaire(etat == "on");
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"prioritaire\":") + (etat == "on" ? "true" : "false") +
-            ",\"message\":\"applique dans la seconde, memorise 3 s apres\"}");
+            ",\"message\":\"applique dans la seconde, memorise au premier silence (3 s au moins)\"}");
     });
 
     /* INSTRUMENT AUTONOME (MESURES §155) : le WiFi coupe, cable branche ou
@@ -132,7 +132,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
         nidmi_demanderAutonome(etat == "on");
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"autonome\":") + (etat == "on" ? "true" : "false") +
-            ",\"message\":\"applique dans la seconde, memorise 3 s apres\"}");
+            ",\"message\":\"applique dans la seconde, memorise au premier silence (3 s au moins)\"}");
     });
 
     /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand

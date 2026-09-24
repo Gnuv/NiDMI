@@ -222,6 +222,14 @@ Params params();
 void  setVolume(float v);       // borne a [0,1]
 float volume();
 
+/* DEPUIS COMBIEN DE TEMPS LA SORTIE EST MUETTE (MESURES §155), en ms :
+ * depuis le dernier bloc dont la crete depassait ≈ −60 dBFS. UINT32_MAX quand
+ * le moteur ne tourne pas. Leger — un millis() et une soustraction : se lit a
+ * chaque tour de boucle. Sert a ne faire, pendant le spectacle, ce qui arrete
+ * les coeurs (une ecriture en flash qui efface une page : 43 ms) que la ou
+ * rien ne s'entend. */
+uint32_t silenceDepuisMs();
+
 // Métrologie — répond à la question §12.7 de CONVERGENCE_NIDMI.md : combien de
 // tas reste-t-il réellement une fois WiFi + serveur async + app embarquée en
 // place ? Le plus gros bloc contigu compte autant que le total : Plaits demande

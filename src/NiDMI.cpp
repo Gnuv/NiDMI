@@ -189,6 +189,15 @@ enum : uint8_t {
 static volatile uint8_t s_sante = 0;
 static unsigned long s_santeProchain = 0, s_decrochagesJusqua = 0, s_reprisesJusqua = 0;
 static uint32_t s_sousAlimAvant = 0, s_refusAvant = 0;
+/* Les retards audio causes par une memorisation d'option faite EN SILENCE
+ * (MESURES §155) : reels — le compteur du moteur les garde —, mais rien ne
+ * s'est entendu, donc ils ne rallument pas le voyant. Seule une ecriture LENTE
+ * (un effacement : >= 20 ms, le seuil de retard du moteur) peut en causer ;
+ * wifiBoucle() lui attribue ceux du quart de seconde qui suit, et d'ici la le
+ * voyant attend. Un retard apres une ecriture rapide a une autre cause : il
+ * rallume le voyant comme n'importe quel autre. */
+static uint32_t s_retardsInaudibles = 0;
+static bool     s_ecritureAVerifier = false;
 
 extern "C" uint8_t nidmi_sante() { return s_sante; }
 extern "C" void nidmi_santeTexte(uint8_t f, char* out, unsigned n) {
@@ -213,8 +222,11 @@ static void verifierSante() {
     const AudioEngine::Metriques m = AudioEngine::metriques();
     uint16_t enCours = 0, maxVu = 0, capacite = 0; uint32_t refus = 0;
     MappingEngine::statsReprises(enCours, maxVu, refus, capacite);
-    if (m.sousAlimentations > s_sousAlimAvant) s_decrochagesJusqua = maintenant + 60000;
-    s_sousAlimAvant = m.sousAlimentations;
+    if (!s_ecritureAVerifier) {
+        const uint32_t audibles = m.sousAlimentations - s_retardsInaudibles;
+        if (audibles > s_sousAlimAvant) s_decrochagesJusqua = maintenant + 60000;
+        s_sousAlimAvant = audibles;
+    }
     if (refus > s_refusAvant) s_reprisesJusqua = maintenant + 60000;
     s_refusAvant = refus;
 
@@ -319,9 +331,8 @@ struct PolitiqueWifi {
     bool sysInconnuDit = false;
     // Ce que coute la memorisation d'une option (MESURES §155) : une ecriture
     // NVS qui efface une page arrete l'autre coeur le temps de l'effacement.
-    uint32_t ecrituresNvs = 0, ecritureNvsPireUs = 0, ecritureNvsDerniereUs = 0;
-    uint32_t ecrituresSuiviesDeRetard = 0, sousAlimAvant = 0;
-    bool retardAVerifier = false;
+    uint32_t ecrituresNvs = 0, ecrituresLentes = 0, ecritureNvsPireUs = 0, ecritureNvsDerniereUs = 0;
+    uint32_t retardsDesEcritures = 0, sousAlimAvant = 0;
 };
 static PolitiqueWifi g_politique;
 static volatile int8_t g_demandeAutonome = -1;   // -1 rien ; 0 retirer ; 1 activer
@@ -330,6 +341,8 @@ static volatile bool g_relanceDemandeScript = false;
 static volatile bool g_sysInconnu = false;
 static char g_sysInconnuNom[16];                 // le premier, pour le dire
 static const unsigned long OPTION_MEMORISEE_APRES_MS = 3000;
+static const uint32_t SILENCE_AVANT_MEMORISATION_MS = 500;
+static const uint32_t ECRITURE_LENTE_US = 20000;      // le seuil de retard du moteur audio
 static const unsigned long RELANCE_SCRIPT_TOUS_MS = 10000;
 
 extern "C" void nidmi_demanderCablePrioritaire(bool actif){
@@ -350,6 +363,7 @@ String nidmi_cablePrioritaireJson(){
     const BasculeCable b = g_bascule;
     const PolitiqueWifi pol = g_politique;
     const unsigned long now = millis();
+    const uint32_t muette = AudioEngine::silenceDepuisMs();   // UINT32_MAX : pas de son
     const char* etat = pol.force         ? "force"
                      : pol.autonomeTient ? "autonome"
                      : b.tientLeWifi     ? "cable"
@@ -372,7 +386,10 @@ String nidmi_cablePrioritaireJson(){
     j += ",\"nvs\":{\"ecritures\":" + String(pol.ecrituresNvs)
        + ",\"pire_us\":" + String(pol.ecritureNvsPireUs)
        + ",\"derniere_us\":" + String(pol.ecritureNvsDerniereUs)
-       + ",\"suivies_d_un_retard_audio\":" + String(pol.ecrituresSuiviesDeRetard) + "}";
+       + ",\"lentes\":" + String(pol.ecrituresLentes)
+       + ",\"retards_audio_causes\":" + String(pol.retardsDesEcritures)
+       + ",\"en_attente\":" + ((pol.prioAEcrire || pol.autonomeAEcrire) ? "true" : "false")
+       + ",\"sortie_muette_ms\":" + (muette == UINT32_MAX ? String("null") : String(muette)) + "}";
     j += ",\"confirmation_ms\":" + String(CABLE_CONFIRMATION_MS);
     j += ",\"silence_ms\":" + String(CABLE_SILENCE_MS) + "}";
     return j;
@@ -479,8 +496,14 @@ static void basculeCable(unsigned long now){
  *      sur un firmware sans lien reseau USB : on s'enfermerait dehors.
  *   3. CABLE PRIORITAIRE — la bascule ci-dessus.
  * Le demarrage allume TOUJOURS la radio (§142) : la regle coupe en marche.
- * Les deux options se memorisent 3 s apres leur dernier changement : un bouton
- * qui bascule vite n'use pas la flash. Un tour toutes les 250 ms. */
+ * Les deux options valent tout de suite. Elles se MEMORISENT 3 s apres leur
+ * dernier changement — un bouton qui bascule vite n'use pas la flash — et
+ * seulement quand la sortie audio est muette depuis 0,5 s : l'ecriture qui
+ * efface une page NVS (une sur ~120) arrete les deux coeurs 43 a 45 ms, plus
+ * que la marge du DMA (30 ms), et chacune a coute un bloc audio en retard
+ * (MESURES §155). Un son qui ne s'arrete jamais retarde donc la memorisation,
+ * jamais l'option ; coupee avant, la carte redemarre sur l'ancienne valeur.
+ * Un tour toutes les 250 ms. */
 
 extern "C" void nidmi_demanderAutonome(bool actif){
     g_demandeAutonome = actif ? 1 : 0;
@@ -590,26 +613,32 @@ static void wifiBoucle(){
         NIDMI_WEB_LOG("[NiDMI] s(\"%s\") : la carte n'a pas cette fonction — elle connait "
                       VOCABULAIRE_SYS_COMMANDES, g_sysInconnuNom);
     }
-    // Un bloc audio en retard dans le quart de seconde qui suit une ecriture ?
-    if (p.retardAVerifier) {
-        p.retardAVerifier = false;
-        if (AudioEngine::metriques().sousAlimentations > p.sousAlimAvant) p.ecrituresSuiviesDeRetard++;
+    // Un bloc audio en retard dans le quart de seconde qui suit une ecriture
+    // LENTE ? Elle l'a cause, et elle a eu lieu en silence : rien ne s'est entendu.
+    if (s_ecritureAVerifier) {
+        s_ecritureAVerifier = false;
+        const uint32_t sa = AudioEngine::metriques().sousAlimentations;
+        if (sa > p.sousAlimAvant) {
+            p.retardsDesEcritures += sa - p.sousAlimAvant;
+            s_retardsInaudibles += sa - p.sousAlimAvant;
+        }
     }
-    if ((p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS) ||
-        (p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS)) {
+    const bool prioMure = p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS;
+    const bool autoMure = p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS;
+    if ((prioMure || autoMure) && AudioEngine::silenceDepuisMs() >= SILENCE_AVANT_MEMORISATION_MS) {
         Preferences prefs;
         prefs.begin("nidmi", false);
         p.sousAlimAvant = AudioEngine::metriques().sousAlimentations;
         const uint32_t t0 = micros();
         bool ecrit = false;
-        if (p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS) {
+        if (prioMure) {
             p.prioAEcrire = false;
             if (prefs.getBool("cable_prio", true) != b.prioritaire) {
                 prefs.putBool("cable_prio", b.prioritaire);
                 ecrit = true;
             }
         }
-        if (p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS) {
+        if (autoMure) {
             p.autonomeAEcrire = false;
             if (prefs.getBool("standalone", false) != p.autonome) {
                 prefs.putBool("standalone", p.autonome);
@@ -622,7 +651,10 @@ static void wifiBoucle(){
             p.ecrituresNvs++;
             p.ecritureNvsDerniereUs = dt;
             if (dt > p.ecritureNvsPireUs) p.ecritureNvsPireUs = dt;
-            p.retardAVerifier = true;
+            if (dt >= ECRITURE_LENTE_US) {
+                p.ecrituresLentes++;
+                s_ecritureAVerifier = true;
+            }
         }
     }
 
