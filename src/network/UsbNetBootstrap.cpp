@@ -16,6 +16,9 @@ nidmi_core::UsbNetService g_usbNet;
 
 bool g_started = false;
 
+constexpr const char* IP_DU_LIEN     = "192.168.7.1";
+constexpr const char* MASQUE_DU_LIEN = "255.255.255.0";
+
 }  // namespace
 
 namespace nidmi_usbnet {
@@ -37,8 +40,8 @@ bool begin() {
   cfg.interfaceName = "NiDMI USB Network";
   // Sous-reseau distinct de l'AP WiFi (192.168.4.x) pour que les deux liens
   // puissent etre actifs en meme temps.
-  cfg.ip = "192.168.7.1";
-  cfg.netmask = "255.255.255.0";
+  cfg.ip = IP_DU_LIEN;
+  cfg.netmask = MASQUE_DU_LIEN;
   cfg.dhcpServer = true;
   // Ni routeur ni DNS dans le bail : brancher l'instrument ne doit jamais
   // detourner la route par defaut de la machine hote.
@@ -90,6 +93,16 @@ bool reseauActif() {
 
 String ip() {
   return g_usbNet.localIp().toString();
+}
+
+bool parLeCable(const IPAddress& locale, const IPAddress& distante) {
+  if (!g_started) return false;
+  const uint32_t moi = g_usbNet.localIp();
+  IPAddress masque;
+  if (!moi || !masque.fromString(MASQUE_DU_LIEN)) return false;
+  const uint32_t m = masque;
+  return (uint32_t)locale == moi && (uint32_t)distante != moi &&
+         ((uint32_t)distante & m) == (moi & m);
 }
 
 String broadcastAddress() {
@@ -166,6 +179,9 @@ bool reseauActif() {
 }
 String ip() {
   return String("0.0.0.0");
+}
+bool parLeCable(const IPAddress&, const IPAddress&) {
+  return false;
 }
 String broadcastAddress() {
   return String();

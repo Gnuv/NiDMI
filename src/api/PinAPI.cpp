@@ -568,41 +568,6 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
 
-        /* Echappement JSON COMPLET.
-         *
-         * L'ancien ne traitait que « \ » et « " ». Un script de mapping tient
-         * desormais sur plusieurs lignes — les pipelines sont separes par « ; »
-         * et on les ecrit l'un sous l'autre — et un saut de ligne BRUT dans une
-         * chaine JSON est invalide. La config partait telle quelle en NVS, puis
-         * /api/pins/list la recrachait : JSON.parse echouait cote app et TOUTE
-         * la zone d'inventaire I/O restait vide. Une ligne de trop dans un
-         * script, et plus aucune broche ne s'affichait.
-         *
-         * On echappe donc aussi les caracteres de controle. */
-        auto jsonChaine = [](const String& v) -> String {
-            String out;
-            out.reserve(v.length() + 8);
-            for (unsigned i = 0; i < v.length(); i++) {
-                const char c = v[i];
-                switch (c) {
-                    case '\\': out += "\\\\"; break;
-                    case '"':  out += "\\\""; break;
-                    case '\n': out += "\\n";  break;
-                    case '\r': out += "\\r";  break;
-                    case '\t': out += "\\t";  break;
-                    case '\b': out += "\\b";  break;
-                    case '\f': out += "\\f";  break;
-                    default:
-                        if ((unsigned char)c < 0x20) {
-                            char u[8];
-                            snprintf(u, sizeof u, "\\u%04x", (unsigned)(unsigned char)c);
-                            out += u;
-                        } else out += c;
-                }
-            }
-            return out;
-        };
-
         /* Construire le JSON à partir des paramètres */
         String json = "{";
         json += "\"pinLabel\":\"" + pinLabel + "\",";
@@ -626,7 +591,7 @@ void setupPinAPI(AsyncWebServer& server) {
             else if(nombre)
                 json += ",\"" + String(name) + "\":" + val;
             else
-                json += ",\"" + String(name) + "\":\"" + jsonChaine(val) + "\"";
+                json += ",\"" + String(name) + "\":\"" + nidmi_json_chaine(val) + "\"";
         };
         auto addParam = [&](const char* name) { addParamEx(name, false); };
         

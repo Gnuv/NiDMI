@@ -83,6 +83,15 @@ bool reseauActif();
 /** Adresse de l'ESP32 sur le lien, "0.0.0.0" si indisponible. */
 String ip();
 
+/** Cette connexion arrive-t-elle PAR LE CABLE ? Ce qui ne se dit qu'a celui qui
+ *  tient la carte — le mot de passe WiFi enregistre (MESURES §159) : le point
+ *  d'acces de la carte a un mot de passe public, a portee de quiconque.
+ *  Adresse locale = celle du lien ET adresse distante dans son sous-reseau :
+ *  lwIP accepte un paquet adresse a 192.168.7.1 arrive par le WiFi (hote
+ *  faible), mais sa reponse repart par le cable — pas de poignee de main
+ *  TCP possible depuis la radio. Faux sans le variant. */
+bool parLeCable(const IPAddress& locale, const IPAddress& distante);
+
 /** Adresse de diffusion du lien, pour l'OSC. Vide si indisponible. */
 String broadcastAddress();
 

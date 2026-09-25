@@ -187,12 +187,12 @@ void setupNetworkAPI(AsyncWebServer& server) {
             "{\"status\":\"error\",\"message\":\"etat=on (forcer), etat=off (rendre la main), etat=essai\"}");
     });
 
-    /* LES IDENTIFIANTS DU RESEAU (MESURES §158). Le mot de passe n'est jamais
-     * relu par l'app : son champ est vide a chaque affichage. Or la route
-     * exigeait `pass` et l'ecrivait meme vide — « Connecter » sans retaper
-     * effacait donc le mot de passe enregistre, et la carte ne rejoignait plus
-     * le reseau (vecu le 24/09 : has_pass faux).
-     *   pass absent ou vide -> on GARDE le mot de passe enregistre ;
+    /* LES IDENTIFIANTS DU RESEAU (MESURES §158). Par le WiFi, l'app ne relit
+     * pas le mot de passe (§159) : son champ y est vide. Or la route exigeait
+     * `pass` et l'ecrivait meme vide — « Connecter » sans retaper effacait donc
+     * le mot de passe enregistre, et la carte ne rejoignait plus le reseau
+     * (vecu le 24/09 : has_pass faux).
+     *   pass absent, vide, ou identique -> on GARDE le mot de passe enregistre ;
      *   open=1              -> reseau OUVERT, declare, jamais par defaut ;
      *   nouveau reseau sans mot de passe ni open=1 -> refuse ;
      *   rien a changer      -> aucune ecriture, aucun redemarrage.
@@ -216,7 +216,8 @@ void setupNetworkAPI(AsyncWebServer& server) {
         Preferences preferences;
         preferences.begin("nidmi", false);
         const String ssidAvant = preferences.getString("sta_ssid", "");
-        const bool avaitPass = preferences.getString("sta_pass", "").length() > 0;
+        const String passAvant = preferences.getString("sta_pass", "");
+        const bool avaitPass = passAvant.length() > 0;
         if (ssid != ssidAvant && !pass.length() && !ouvert) {
             preferences.end();
             request->send(400, "application/json",
@@ -224,7 +225,9 @@ void setupNetworkAPI(AsyncWebServer& server) {
                 "(ou open=1 pour un reseau ouvert)\"}");
             return;
         }
-        const bool changePass = pass.length() || (ouvert && avaitPass);
+        // Le champ montre le mot de passe enregistre (par le cable, §159) :
+        // « Connecter » le renvoie tel quel, ce n'est pas un changement.
+        const bool changePass = (pass.length() && pass != passAvant) || (ouvert && avaitPass);
         if (ssid == ssidAvant && !changePass && !ipFixe) {
             preferences.end();
             request->send(200, "application/json",
@@ -250,7 +253,11 @@ void setupNetworkAPI(AsyncWebServer& server) {
             + (changePass ? (ouvert ? "ouvert" : "remplace") : "garde") + "\"}");
     });
 
-    // API - Lecture des identifiants STA stockés en NVS
+    /* LES IDENTIFIANTS STA ENREGISTRES. Le mot de passe (`pass`) n'est rendu
+     * qu'a une connexion arrivee PAR LE CABLE (MESURES §159) : le point d'acces
+     * de la carte a un mot de passe public, et quiconque a portee lirait sinon
+     * celui du reseau qu'elle rejoint. Par le WiFi : `has_pass` seulement, et
+     * pas de cle `pass` — son absence dit a l'app pourquoi le champ est vide. */
     server.on("/api/sta/status", HTTP_GET, [](AsyncWebServerRequest *request){
         try {
             Preferences preferences;
@@ -262,9 +269,12 @@ void setupNetworkAPI(AsyncWebServer& server) {
             String sn   = preferences.getString("sta_sn",  "");
             preferences.end();
             
+            const bool cable = nidmi_usbnet::parLeCable(request->client()->localIP(),
+                                                        request->client()->remoteIP());
             String json = "{";
-            json += "\"ssid\":\"" + ssid + "\",";
+            json += "\"ssid\":\"" + nidmi_json_chaine(ssid) + "\",";
             json += "\"has_pass\":" + String(pass.length()>0 ? "true" : "false") + ",";
+            if (cable) json += "\"pass\":\"" + nidmi_json_chaine(pass) + "\",";
             json += "\"ip\":\"" + ip + "\",";
             json += "\"gw\":\"" + gw + "\",";
             json += "\"sn\":\"" + sn + "\"";

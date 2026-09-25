@@ -39,3 +39,34 @@ inline AsyncWebServerResponse* nidmi_reponse_tampon(AsyncWebServerRequest* reque
         return k;
     });
 }
+
+/* ── UNE CHAINE DANS DU JSON, ECHAPPEE EN ENTIER ─────────────────────────
+ * Pas seulement « \ » et « " » : un script de mapping tient sur plusieurs
+ * lignes, et un saut de ligne BRUT dans une chaine JSON est invalide — la
+ * config partait telle quelle en NVS, /api/pins/list la recrachait, JSON.parse
+ * echouait cote app et TOUTE la zone d'inventaire I/O restait vide. Un mot de
+ * passe WiFi, lui, peut contenir n'importe quel caractere imprimable. D'ou les
+ * caracteres de controle aussi. */
+inline String nidmi_json_chaine(const String& v) {
+    String out;
+    out.reserve(v.length() + 8);
+    for (unsigned i = 0; i < v.length(); i++) {
+        const char c = v[i];
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"':  out += "\\\""; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char u[8];
+                    snprintf(u, sizeof u, "\\u%04x", (unsigned)(unsigned char)c);
+                    out += u;
+                } else out += c;
+        }
+    }
+    return out;
+}
