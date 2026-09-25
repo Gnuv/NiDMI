@@ -18,6 +18,10 @@
 #include "SampleStore.h"
 #include "../config/EcrituresDifferees.h"
 #include <Preferences.h>
+#include <driver/i2s_std.h>
+#include <esp_attr.h>
+#include <esp_freertos_hooks.h>
+#include <esp_timer.h>
 
 namespace AudioEngine {
 namespace {
@@ -50,6 +54,61 @@ volatile uint32_t ecrituresFlash = 0, nRetardsEcritures = 0;
 // derniere lecture : ce qu'un geste coute a l'audio, bien avant le seuil de
 // retard (20 ms) — en silence comme en jeu.
 volatile uint32_t pireBlocUs = 0;
+// … et la part de ce pire bloc passee a le RENDRE (calcul, echantillons lus en
+// PSRAM) ; le reste, c'est i2s.write() qui attend qu'un tampon DMA se libere.
+// Un decrochage dans le rendu et un decrochage dans l'attente du DMA n'ont pas
+// la meme cause (MESURES §161).
+volatile uint32_t pireBlocRenduUs = 0;
+
+/* LES DEUX SONDES DU DECROCHAGE (MESURES §161). Quand un bloc attend le DMA,
+ * deux causes : le DMA a cesse d'envoyer (plus de fin de tampon), ou le coeur
+ * de l'audio a cesse de recevoir ses interruptions (plus de tic non plus).
+ * La fin de tampon vient de l'interruption du DMA (IRAM, CONFIG_I2S_ISR_
+ * IRAM_SAFE) ; le tic, du crochet d'horloge du coeur 1. Chacune note son plus
+ * grand ecart depuis le dernier releve. Tout en RAM interne. */
+}  // namespace
+}  // namespace AudioEngine
+extern const char* volatile g_sectionEnCours;   // NiDMI.cpp : l'appel de la boucle en cours
+namespace AudioEngine {
+namespace {
+DRAM_ATTR volatile uint32_t sondeDernierEof = 0, sondePireEof = 0, sondeNbEof = 0;
+DRAM_ATTR volatile uint32_t sondeDernierTic = 0, sondePireTic = 0;
+
+bool IRAM_ATTR sondeFinDeTampon(i2s_chan_handle_t, i2s_event_data_t*, void*) {
+  const uint32_t t = (uint32_t)esp_timer_get_time();
+  if (sondeDernierEof) { const uint32_t e = t - sondeDernierEof; if (e > sondePireEof) sondePireEof = e; }
+  sondeDernierEof = t;
+  sondeNbEof = sondeNbEof + 1;
+  return false;
+}
+
+/* LA TROISIEME SONDE : l'ordonnanceur du coeur 1 est-il SUSPENDU ? Une tache
+ * reveillee y reste alors « prete » sans etre elue, et la tache en cours
+ * continue seule — ce que l'autopsie a montre (audio « R » pendant 350 ms,
+ * loopTask seule en marche). Le tic est appele meme ordonnanceur suspendu :
+ * il note la plus longue suspension, et l'appel de la boucle en cours quand
+ * elle a commence (un pointeur copie, jamais lu ici). */
+DRAM_ATTR volatile uint32_t sondeSuspDebut = 0, sondePireSusp = 0;
+DRAM_ATTR const char* volatile sondeSuspSection = nullptr;
+DRAM_ATTR const char* volatile sondePireSuspSection = nullptr;
+DRAM_ATTR volatile TaskHandle_t sondePireSuspTache = nullptr;
+
+void IRAM_ATTR sondeTic() {
+  const uint32_t t = (uint32_t)esp_timer_get_time();
+  if (sondeDernierTic) { const uint32_t e = t - sondeDernierTic; if (e > sondePireTic) sondePireTic = e; }
+  sondeDernierTic = t;
+  if (xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED) {
+    if (!sondeSuspDebut) { sondeSuspDebut = t; sondeSuspSection = g_sectionEnCours; }
+  } else if (sondeSuspDebut) {
+    const uint32_t d = t - sondeSuspDebut;
+    if (d > sondePireSusp) {
+      sondePireSusp = d;
+      sondePireSuspSection = sondeSuspSection;
+      sondePireSuspTache = xTaskGetCurrentTaskHandle();
+    }
+    sondeSuspDebut = 0;
+  }
+}
 
 // Une note en attente, déposée par MidiTask ou par un rappel RTP.
 struct Evenement { uint8_t note; uint8_t velo; };   // velo 0 = extinction
@@ -389,11 +448,12 @@ void boucleAudio(void*) {
       niveauCrete = crete;
       if (crete > SEUIL_AUDIBLE) dernierSonMs = t0;
     }
+    const uint32_t ur = micros();
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
     const uint32_t du = micros() - u0;
-    if (du > pireBlocUs) pireBlocUs = du;
+    if (du > pireBlocUs) { pireBlocUs = du; pireBlocRenduUs = ur - u0; }
     if (millis() - t0 > 20) {
       nRetards++;
       // Ce bloc a-t-il chevauche une ecriture volontaire ? (commencee avant lui,
@@ -617,6 +677,36 @@ void validerConfigBoot() {
   essaisAuBoot = 0;
 }
 
+/* LA GARDE D'ELECTION (MESURES §161). Sur le coeur 1, le tic de FreeRTOS ne
+ * relance l'election que pour partager le temps entre taches de MEME priorite,
+ * ou si un changement est reste en attente (xTaskIncrementTickOtherCores,
+ * ESP-IDF 5.5) — jamais parce qu'une tache PLUS prioritaire est prete. Mesure :
+ * reveillee sans que le coeur 1 soit prevenu, l'audio est restee « prete »
+ * jusqu'a 500 ms pendant que loopTask (priorite 1) tournait seule — le DMA
+ * rejouait ses anciens tampons. La garde se reveille toutes les 2 ms au-dessus
+ * de loopTask : chaque reveil fait refaire l'election, et l'audio prete est
+ * elue en 2 ms au plus, loin des 30 ms d'avance du DMA. Elle ne fait rien
+ * d'autre que noter son propre retard. */
+namespace {
+constexpr UBaseType_t GARDE_PRIORITE = 5;       // > loopTask (1), < async_tcp (10), < audio (11)
+constexpr uint32_t    GARDE_PERIODE_MS = 2;
+volatile uint32_t gardePireRetardUs = 0;
+TaskHandle_t garde = nullptr;
+
+void gardeElection(void*) {
+  TickType_t dernier = xTaskGetTickCount();
+  uint32_t attendu = (uint32_t)esp_timer_get_time() + GARDE_PERIODE_MS * 1000;
+  for (;;) {
+    vTaskDelayUntil(&dernier, pdMS_TO_TICKS(GARDE_PERIODE_MS));
+    const uint32_t t = (uint32_t)esp_timer_get_time();
+    const int32_t retard = (int32_t)(t - attendu);
+    if (retard > 0 && (uint32_t)retard > gardePireRetardUs) gardePireRetardUs = (uint32_t)retard;
+    attendu += GARDE_PERIODE_MS * 1000;
+    if ((int32_t)(t - attendu) > 0) attendu = t + GARDE_PERIODE_MS * 1000;   // pas de dette
+  }
+}
+}  // namespace
+
 bool ensureStarted() {
   if (demarre) return true;
 
@@ -669,6 +759,16 @@ bool ensureStarted() {
     return false;
   }
   srReel = i2s.txSampleRate();
+  // Les sondes du decrochage : poser le rappel exige un canal a l'arret.
+  if (i2s_chan_handle_t tx = i2s.txChan()) {
+    i2s_event_callbacks_t rappels = {};
+    rappels.on_sent = sondeFinDeTampon;
+    i2s_channel_disable(tx);
+    i2s_channel_register_event_callback(tx, &rappels, nullptr);
+    i2s_channel_enable(tx);
+  }
+  static bool ticPose = false;
+  if (!ticPose) ticPose = esp_register_freertos_tick_hook_for_cpu(sondeTic, 1) == ESP_OK;
   if (!srReel) srReel = SAMPLE_RATE;
 
   // Couper l'économie d'énergie WiFi. MESURÉ sur cette carte, avant/après :
@@ -688,6 +788,11 @@ bool ensureStarted() {
     i2s.end(); vQueueDelete(evenements); evenements = nullptr;
     return false;
   }
+  // La garde d'election, sur le meme coeur (voir plus haut). Une seule, pour
+  // toute la vie de la carte : elle ne depend pas de la tache audio.
+  if (!garde && xTaskCreatePinnedToCore(gardeElection, "garde", 1280, nullptr,
+                                        GARDE_PRIORITE, &garde, 1) != pdPASS)
+    Serial.println("[audio] garde d'election impossible");
 
   heapApres = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   demarre = true;
@@ -948,8 +1053,27 @@ void setVolume(float v) {
 }
 float volume() { return gVolume; }
 
-uint32_t pireBlocEtRaz() {
+void sondeSuspensionEtRaz(uint32_t& pireUs, const char*& section, TaskHandle_t& tache) {
+  pireUs = sondePireSusp;          sondePireSusp = 0;
+  section = sondePireSuspSection;  sondePireSuspSection = nullptr;
+  tache = sondePireSuspTache;      sondePireSuspTache = nullptr;
+}
+
+uint32_t gardeRetardEtRaz() {
+  const uint32_t r = gardePireRetardUs;
+  gardePireRetardUs = 0;
+  return r;
+}
+
+void sondesEtRaz(uint32_t& pireEcartEofUs, uint32_t& finsDeTampon, uint32_t& pireEcartTicUs) {
+  pireEcartEofUs = sondePireEof;  sondePireEof = 0;
+  finsDeTampon   = sondeNbEof;    sondeNbEof = 0;
+  pireEcartTicUs = sondePireTic;  sondePireTic = 0;
+}
+
+uint32_t pireBlocEtRaz(uint32_t* renduUs) {
   const uint32_t p = pireBlocUs;
+  if (renduUs) *renduUs = pireBlocRenduUs;
   pireBlocUs = 0;
   return p;
 }

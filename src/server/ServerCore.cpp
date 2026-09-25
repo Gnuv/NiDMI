@@ -4,6 +4,8 @@
 #include "../audio/AudioEngine.h"
 #include "WebDebugConsole.h"
 #include <ESPmDNS.h>
+#include <mdns.h>
+#include <esp_netif.h>
 #include <Preferences.h>
 // setupWebAPI est déclaré plus bas et défini dans WebAPI.cpp
 
@@ -106,11 +108,37 @@ void ServerCore::demarrerRadioWifi() {
  *
  * Jamais appelee au demarrage : seulement sur commande, par nidmi_loop(), et
  * seulement quand un lien USB peut prendre le relais. */
+/* Le mDNS sur les deux interfaces WiFi, oui ou non. Appele depuis loopTask, la
+ * seule tache qui detruit ces interfaces : leurs poignees sont sures ici. */
+void ServerCore::mdnsInterfacesWifi(bool actives) {
+    const mdns_event_actions_t a = actives
+        ? (mdns_event_actions_t)(MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4)
+        : (mdns_event_actions_t)(MDNS_EVENT_DISABLE_IP4 | MDNS_EVENT_DISABLE_IP6);
+    for (const char* cle : { "WIFI_STA_DEF", "WIFI_AP_DEF" }) {
+        esp_netif_t* n = esp_netif_get_handle_from_ifkey(cle);
+        if (n && (!actives || esp_netif_is_netif_up(n))) mdns_netif_action(n, a);
+    }
+}
+
+bool ServerCore::coupureSure() {
+    if (!radioAllumee) return true;
+    const unsigned long now = millis();
+    coupureDemandeeA = now;
+    // Pas preparee, ou un evenement reseau depuis : (re)desactiver, et attendre.
+    if (!coupurePrepareeA || (long)(dernierEvenementReseauA - coupurePrepareeA) >= 0) {
+        mdnsInterfacesWifi(false);
+        coupurePrepareeA = now ? now : 1;
+        return false;
+    }
+    return now - coupurePrepareeA >= 1500;
+}
+
 void ServerCore::couperRadioWifi() {
     if (!radioAllumee) return;
     LectureRadio transition(portMAX_DELAY);   // voir « LE VERROU RADIO »
     radioAllumee = false;                     // avant : un lecteur qui attend lira « coupee »
     WiFi.mode(WIFI_OFF);
+    coupurePrepareeA = 0;
 }
 
 void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostname, bool apOnlyMode) {
@@ -119,6 +147,9 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
      * et de l'obtention d'IP. Log Serial uniquement — pas d'accès WebSocket depuis la tâche
      * event WiFi, pour éviter les races avec la tâche serveur (AsyncWebSocket). */
     WiFi.onEvent([](arduino_event_id_t event, arduino_event_info_t info){
+        if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED || event == ARDUINO_EVENT_WIFI_STA_GOT_IP ||
+            event == ARDUINO_EVENT_WIFI_AP_START || event == ARDUINO_EVENT_WIFI_STA_START)
+            serverCore.noterEvenementReseau();   // une coupure preparee recommence
         if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
             // L'adresse de l'EVENEMENT, pas WiFi.localIP() : pas de lecture
             // d'interface depuis cette tache (voir « LE VERROU RADIO »).
@@ -261,18 +292,25 @@ void ServerCore::setStaticStaIp(IPAddress ip, IPAddress gateway, IPAddress subne
     staSn = subnet;
 }
 
+void nidmi_chrono(const char* nom, uint32_t t0);   // NiDMI.cpp : le chrono de la boucle
+uint32_t nidmi_section(const char* nom);
+
 void ServerCore::update() {
-    // Mise à jour du WebSocket
+    // Une coupure preparee puis delaissee (plus demandee depuis 3 s) : le mDNS
+    // revient sur les interfaces WiFi, qui restent allumees.
+    if (coupurePrepareeA && radioAllumee && millis() - coupureDemandeeA > 3000) {
+        coupurePrepareeA = 0;
+        mdnsInterfacesWifi(true);
+    }
+    uint32_t tc = nidmi_section("ws.cleanup");
     ws.cleanupClients();
-    
-    // Mise à jour RTP-MIDI
+    nidmi_chrono("ws.cleanup", tc); tc = nidmi_section("rtpmidi");
     rtpMidiInstance.update();
-    
-    // Mise à jour Bluetooth
+    nidmi_chrono("rtpmidi", tc); tc = nidmi_section("bluetooth");
     bluetoothInstance.update();
-    
-    // Mise à jour USB MIDI
+    nidmi_chrono("bluetooth", tc); tc = nidmi_section("usbmidi");
     usbMidiInstance.update();
+    nidmi_chrono("usbmidi", tc);
 }
 
 void ServerCore::reconfigureMdns(const char* hostname) {

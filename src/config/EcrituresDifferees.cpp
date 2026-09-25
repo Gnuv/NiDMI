@@ -1,4 +1,5 @@
 #include "EcrituresDifferees.h"
+#include <atomic>
 #include "../audio/AudioEngine.h"
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -68,6 +69,8 @@ bool monter() {
   return LittleFS.begin(true, BASE, 10, PARTITION);
 }
 
+std::atomic<uint32_t> g_generationFichiers{0};
+
 // A cote, puis renomme : une coupure au milieu laisse l'ancien intact.
 bool ecrireFichier(const char* chemin, const char* data, size_t n) {
   if (!monter()) return false;
@@ -76,12 +79,14 @@ bool ecrireFichier(const char* chemin, const char* data, size_t n) {
   if (!f) return false;
   const size_t e = f.write((const uint8_t*)data, n);
   f.close();
+  g_generationFichiers++;
   if (e != n) { LittleFS.remove(tmp); return false; }
   return LittleFS.rename(tmp, chemin);
 }
 
 bool effacerFichier(const char* chemin) {
   if (!monter()) return false;
+  g_generationFichiers++;
   return !LittleFS.exists(chemin) || LittleFS.remove(chemin);
 }
 
@@ -322,6 +327,9 @@ void toutEcrireMaintenant() {
   for (int i = 0; i < MAX_FICHIERS; i++) traiterFichier(i, now, true);
   for (int i = 0; i < MAX_NVS; i++)      traiterNvs(i, now, true);
 }
+
+void noterFichiersModifies() { g_generationFichiers++; }
+uint32_t generationFichiers() { return g_generationFichiers.load(); }
 
 bool enAttente() {
   for (auto& f : fichiers) if (f.actif) return true;

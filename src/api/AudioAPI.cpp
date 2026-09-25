@@ -2,6 +2,9 @@
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
 #include "APICommon.h"
+#include <esp_intr_alloc.h>
+#include <esp_core_dump.h>
+#include <stdio.h>
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
@@ -835,6 +838,80 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         }
         free(st);
         j += "]}";
+        request->send(200, "application/json", j);
+    });
+
+    /* QUI PARTAGE LES INTERRUPTIONS (MESURES §161) : la table d'allocation —
+     * coeur, niveau, source — telle qu'ESP-IDF la tient. L'interruption du DMA
+     * de l'I2S y est : sur quel coeur, et avec qui. */
+    server.on("/api/diag/interruptions", HTTP_GET, [](AsyncWebServerRequest *request){
+        char* texte = nullptr;
+        size_t n = 0;
+        FILE* f = open_memstream(&texte, &n);
+        if (!f) { request->send(503, "text/plain", "memoire"); return; }
+        esp_intr_dump(f);
+        fclose(f);
+        request->send(200, "text/plain", texte ? texte : "");
+        free(texte);
+    });
+
+    /* L'AUTOPSIE DES BLOCS LENTS, A LA DEMANDE (MESURES §161) : les
+     * photographies des taches, qui disent QUI tenait chaque coeur et dans
+     * quel etat etait l'audio. Eteinte par defaut (une photo coute ~3 ms,
+     * interruptions coupees, sur le coeur de l'audio). etat=on|off ; en RAM. */
+    server.on("/api/diag/autopsie", HTTP_ANY, [](AsyncWebServerRequest *request){
+        extern void nidmi_autopsie(bool);
+        extern bool nidmi_autopsieActive();
+        if (request->hasParam("etat", true) || request->hasParam("etat")) {
+            const String e = request->hasParam("etat", true) ? request->getParam("etat", true)->value()
+                                                             : request->getParam("etat")->value();
+            nidmi_autopsie(e == "on");
+        }
+        request->send(200, "application/json",
+            String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false") + "}");
+    });
+
+    /* LE DERNIER PLANTAGE, LU PAR LA CARTE (MESURES §161). Une carte sans liaison
+     * serie ne montre jamais sa trace de panique ; ESP-IDF en garde pourtant
+     * l'image dans la partition « coredump ». Resume : la tache, l'adresse de
+     * la faute, sa cause, la pile d'appels — a retrouver dans l'ELF de l'image
+     * qui a plante (`sha` = son empreinte). 404 : aucune image. */
+    server.on("/api/diag/plantage", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (esp_core_dump_image_check() != ESP_OK) {
+            request->send(404, "application/json", "{\"plantage\":null}");
+            return;
+        }
+        auto* s = (esp_core_dump_summary_t*)heap_caps_malloc(sizeof(esp_core_dump_summary_t),
+                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s) { request->send(503, "application/json", "{\"erreur\":\"memoire\"}"); return; }
+        const esp_err_t e = esp_core_dump_get_summary(s);
+        if (e != ESP_OK) {
+            heap_caps_free(s);
+            request->send(500, "application/json",
+                String("{\"erreur\":\"") + esp_err_to_name(e) + "\"}");
+            return;
+        }
+        char h[12];
+        auto hex = [&h](uint32_t x) { snprintf(h, sizeof h, "\"%08lx\"", (unsigned long)x); return String(h); };
+        String j = "{\"tache\":\"" + nidmi_json_chaine(String(s->exc_task)) + "\"";
+        j += ",\"pc\":" + hex(s->exc_pc);
+        j += ",\"cause\":" + String((unsigned long)s->ex_info.exc_cause);
+        j += ",\"adresse\":" + hex(s->ex_info.exc_vaddr);
+        j += ",\"pile_corrompue\":" + String(s->exc_bt_info.corrupted ? "true" : "false");
+        j += ",\"pile\":[";
+        for (uint32_t i = 0; i < s->exc_bt_info.depth && i < 16; i++) {
+            if (i) j += ',';
+            j += hex(s->exc_bt_info.bt[i]);
+        }
+        j += "],\"epc\":[";
+        for (int i = 0; i < EPCx_REGISTER_COUNT; i++) {
+            if (i) j += ',';
+            j += hex(s->ex_info.epcx[i]);
+        }
+        char sha[17];
+        memcpy(sha, s->app_elf_sha256, 16); sha[16] = 0;
+        j += "],\"sha\":\"" + nidmi_json_chaine(String(sha)) + "\"}";
+        heap_caps_free(s);
         request->send(200, "application/json", j);
     });
 

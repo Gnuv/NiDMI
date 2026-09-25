@@ -36,6 +36,10 @@ private:
     String apSsidRetenu, apPassRetenu;
     bool   apOnlyRetenu = false;
     bool   radioAllumee = false;
+    // La coupure preparee (voir coupureSure()).
+    volatile unsigned long dernierEvenementReseauA = 0;
+    unsigned long coupurePrepareeA = 0, coupureDemandeeA = 0;
+    void mdnsInterfacesWifi(bool actives);
     
 public:
     ServerCore();
@@ -54,6 +58,21 @@ public:
     void demarrerRadioWifi();
     void couperRadioWifi();
     bool radioWifiAllumee() const { return radioAllumee; }
+
+    /* ── COUPER SANS FAIRE PLANTER LE mDNS (MESURES §161) ─────────────────
+     * Le mDNS traite les evenements reseau PLUS TARD, dans sa tache : coupee
+     * entre-temps, la radio detruit l'interface qu'une action « activer »
+     * attend encore — _mdns_enable_pcb puis esp_netif_is_netif_up(NULL),
+     * LoadProhibited, la carte redemarre (vu en rallumant/coupant toutes les
+     * 10 s). Avant de couper : desactiver le mDNS sur les interfaces WiFi
+     * (ces demandes passent APRES les activations en attente), puis attendre
+     * 1,5 s sans nouvel evenement reseau. Vrai quand on peut couper — ou que
+     * la radio l'est deja. A appeler a chaque tour tant qu'on veut couper :
+     * une preparation delaissee rend le mDNS aux interfaces (update()). */
+    bool coupureSure();
+    /** Un evenement qui fait AGIR le mDNS (connexion, adresse, AP) vient
+     *  d'arriver : la preparation d'une coupure recommence. */
+    void noterEvenementReseau() { dernierEvenementReseauA = millis(); }
 
     /* ── LE VERROU RADIO ──────────────────────────────────────────────────
      * WiFi.mode(WIFI_OFF) detruit les interfaces AP et STA (wifiLowLevelDeinit),

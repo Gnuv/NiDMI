@@ -18,6 +18,7 @@
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "config/EcrituresDifferees.h"
+#include "diag/SurveillantFlash.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -472,6 +473,7 @@ static void basculeCable(unsigned long now){
         return;
     }
     if (now - b.vivantDepuis < CABLE_CONFIRMATION_MS || b.tramesFenetre < CABLE_TRAMES_MIN) return;
+    if (!serverCore.coupureSure()) return;     // le mDNS d'abord (§161)
     serverCore.couperRadioWifi();
     b.tientLeWifi = true;
     b.depuis = now;
@@ -551,6 +553,164 @@ static void publierEtatsSys(){
     if (a != autonome) { autonome = a; FluxRegistry::update("sys.standalone", a); }
     if (p != prio)     { prio = p;     FluxRegistry::update("sys.cablefirst", p); }
 }
+
+/* ── L'AUTOPSIE D'UN BLOC LENT (MESURES §161) ────────────────────────────
+ * Le pire bloc dit QUAND l'audio a attendu ; pas QUI tenait son coeur. Les
+ * compteurs de FreeRTOS le savent (temps de chaque tache, interruptions
+ * comprises : comptees a la tache interrompue). Moyennes sur quelques
+ * secondes, ils noyaient un bloc de 248 ms parmi des fenetres propres. Le
+ * surveillant les PHOTOGRAPHIE donc a chaque tour (un quart de seconde) :
+ * au bloc lent, l'ecart entre les deux dernieres photos nomme ce qui a
+ * tourne, coeur par coeur, pendant CE quart de seconde-la. Photos en PSRAM :
+ * pas un octet de RAM interne. */
+namespace {
+/* LE CHRONO DE LA BOUCLE. L'autopsie dit QUELLE tache tenait le coeur ; quand
+ * c'est loopTask, ceci dit OU : chaque appel de nidmi_loop() est chronometre,
+ * et le plus long du quart de seconde accompagne le bloc lent. */
+const char* g_sectionNom = "-";
+uint32_t    g_sectionUs  = 0;
+}  // namespace
+
+/* L'appel en cours de la boucle — lu par le tic du coeur 1 (AudioEngine,
+ * sonde de l'ordonnanceur) : ou une suspension a commence. */
+const char* volatile g_sectionEnCours = "-";
+
+uint32_t nidmi_section(const char* nom) {
+    g_sectionEnCours = nom;
+    return micros();
+}
+
+void nidmi_autopsie(bool active);   // plus bas, apres l'anneau des photos
+bool nidmi_autopsieActive();
+
+void nidmi_chrono(const char* nom, uint32_t t0) {
+    const uint32_t d = micros() - t0;
+    if (d > g_sectionUs) { g_sectionUs = d; g_sectionNom = nom; }
+}
+
+namespace {
+constexpr UBaseType_t AUTOPSIE_TACHES = 32;
+/* HUIT QUARTS DE SECONDE. Un bloc lent de 422 ms en couvre deux ou trois : ce
+ * qui l'a cause peut dater du tour d'avant, deja remis a zero quand le bloc,
+ * enfin fini, se signale. D'ou un anneau : photos des taches, et releves du
+ * tour (flash, appel le plus long, sondes), agreges sur la duree du bloc. */
+constexpr uint8_t TOURS = 8;
+struct Photo { TaskStatus_t t[AUTOPSIE_TACHES]; UBaseType_t n; uint32_t total; };
+Photo*  g_photos = nullptr;          // TOURS photos, en PSRAM
+uint8_t g_photoDerniere = 0;         // indice de la plus recente
+uint8_t g_photosPrises = 0;
+
+/* A LA DEMANDE. Une photo tient le verrou du noyau ~3 ms, interruptions
+ * coupees, sur le coeur de l'audio : sans danger (le DMA a 30 ms d'avance),
+ * mais permanent. Eteinte par defaut ; /api/diag/autopsie l'allume le temps
+ * d'une mesure (en RAM : un redemarrage l'eteint). */
+bool g_autopsie = false;
+
+void photographierTaches() {
+    if (!g_autopsie) return;
+    if (!g_photos) {
+        g_photos = (Photo*)heap_caps_calloc(TOURS, sizeof(Photo), MALLOC_CAP_SPIRAM);
+        if (!g_photos) return;
+    }
+    g_photoDerniere = (g_photoDerniere + 1) % TOURS;
+    Photo& ph = g_photos[g_photoDerniere];
+    ph.n = uxTaskGetSystemState(ph.t, AUTOPSIE_TACHES, &ph.total);
+    if (g_photosPrises < TOURS) g_photosPrises++;
+}
+
+/* Qui a tourne, coeur par coeur, sur les `tours` derniers quarts de seconde. */
+String quiTenaitLesCoeurs(uint8_t tours) {
+    if (!g_photos || g_photosPrises < 2) return String("autopsie indisponible");
+    if (tours >= g_photosPrises) tours = g_photosPrises - 1;
+    if (tours < 1) tours = 1;
+    const Photo& d = g_photos[g_photoDerniere];
+    const Photo& a = g_photos[(g_photoDerniere + TOURS - tours) % TOURS];
+    struct Rang { const char* nom = nullptr; uint32_t us = 0; };
+    constexpr int RANGS = 4;
+    Rang rangs[3][RANGS];                    // coeur 0, coeur 1, sans coeur ; quatre premiers
+    for (UBaseType_t i = 0; i < d.n; i++) {
+        const TaskStatus_t& t = d.t[i];
+        const TaskStatus_t* avant = nullptr;
+        for (UBaseType_t j = 0; j < a.n && !avant; j++)
+            if (a.t[j].xHandle == t.xHandle) avant = &a.t[j];
+        if (!avant) continue;                // nee entre les deux photos
+        const uint32_t us = t.ulRunTimeCounter - avant->ulRunTimeCounter;
+        const int k = (t.xCoreID == 0 || t.xCoreID == 1) ? (int)t.xCoreID : 2;
+        // Insertion dans un classement de RANGS places.
+        for (int r = 0; r < RANGS; r++) {
+            if (us > rangs[k][r].us) {
+                for (int q = RANGS - 1; q > r; q--) rangs[k][q] = rangs[k][q - 1];
+                rangs[k][r] = { t.pcTaskName, us };
+                break;
+            }
+        }
+    }
+    /* L'HERITAGE DE PRIORITE. Une tache qui tient un verrou attendu par une
+     * tache plus prioritaire en prend la priorite : si c'est loopTask, plus
+     * rien sous elle ne passe — l'audio compris, pret mais jamais elu. Toute
+     * tache vue au-dessus de sa priorite de base sur ces tours est nommee. */
+    const char* eleveNom = nullptr;
+    unsigned eleveBase = 0, eleveCourante = 0;
+    for (uint8_t j = 0; j <= tours; j++) {
+        const Photo& ph = g_photos[(g_photoDerniere + TOURS - j) % TOURS];
+        for (UBaseType_t i = 0; i < ph.n; i++) {
+            const TaskStatus_t& t = ph.t[i];
+            if (t.uxCurrentPriority > t.uxBasePriority && t.uxCurrentPriority > eleveCourante) {
+                eleveNom = t.pcTaskName;
+                eleveBase = (unsigned)t.uxBasePriority;
+                eleveCourante = (unsigned)t.uxCurrentPriority;
+            }
+        }
+    }
+    /* ET L'AUDIO, DANS QUEL ETAT ? Pret sans etre elu, bloque (sur la file du
+     * DMA, ou ailleurs), suspendu (une attente sans fin se range la aussi) :
+     * chaque photo du bloc lent le dit. R=pret E=en cours B=bloque S=suspendu. */
+    char etatsAudio[TOURS + 2] = "";
+    uint8_t ne = 0;
+    UBaseType_t prioAudioMin = 99;
+    for (int j = tours; j >= 0 && ne < TOURS; j--) {
+        const Photo& ph = g_photos[(g_photoDerniere + TOURS - j) % TOURS];
+        for (UBaseType_t i = 0; i < ph.n; i++) {
+            if (strcmp(ph.t[i].pcTaskName, "audio") != 0) continue;
+            if (ph.t[i].uxCurrentPriority < prioAudioMin) prioAudioMin = ph.t[i].uxCurrentPriority;
+            const eTaskState e = ph.t[i].eCurrentState;
+            etatsAudio[ne++] = e == eRunning ? 'E' : e == eReady ? 'R' : e == eBlocked ? 'B'
+                             : e == eSuspended ? 'S' : '?';
+            break;
+        }
+    }
+    etatsAudio[ne] = 0;
+    char l[240];
+    auto ms = [](uint32_t us) { return (unsigned long)((us + 500) / 1000); };
+    char eleve[56] = "";
+    if (eleveNom) snprintf(eleve, sizeof eleve, " | ELEVEE %s %u->%u", eleveNom, eleveBase, eleveCourante);
+    const size_t le = strlen(eleve);
+    snprintf(eleve + le, sizeof eleve - le, " | audio %s prio %u", etatsAudio, (unsigned)prioAudioMin);
+    auto nom = [&rangs](int k, int r) { return rangs[k][r].nom ? rangs[k][r].nom : "-"; };
+    snprintf(l, sizeof l, "qui, sur %lu ms : c1 %s %lu, %s %lu, %s %lu, %s %lu | c0 %s %lu, %s %lu%s",
+             ms(d.total - a.total),
+             nom(1, 0), ms(rangs[1][0].us), nom(1, 1), ms(rangs[1][1].us),
+             nom(1, 2), ms(rangs[1][2].us), nom(1, 3), ms(rangs[1][3].us),
+             nom(0, 0), ms(rangs[0][0].us), nom(0, 1), ms(rangs[0][1].us),
+             eleve);
+    return String(l);
+}
+
+}  // namespace
+
+void nidmi_autopsie(bool active) { g_autopsie = active; if (!active) g_photosPrises = 0; }
+bool nidmi_autopsieActive() { return g_autopsie; }
+
+namespace {
+/* Les releves d'un tour, dans le meme anneau que les photos. */
+struct Tour {
+    uint32_t ops = 0, flashUs = 0, flashPireUs = 0, attenteUs = 0;
+    TaskHandle_t flashTache = nullptr, attenteTache = nullptr;
+    const char* section = "-";
+    uint32_t sectionUs = 0, ecartEof = 0, nbEof = 0, ecartTic = 0;
+};
+Tour* g_tours = nullptr;             // TOURS releves, en PSRAM
+}  // namespace
 
 static void wifiBoucle(){
     PolitiqueWifi& p = g_politique;
@@ -643,19 +803,79 @@ static void wifiBoucle(){
 
     /* LE SURVEILLANT DE L'AUDIO. Un bloc dure 2,5 ms et son aller-retour
      * normal ~4,7 ms ; au-dela de 8 ms, quelque chose l'a retenu — on le dit,
-     * avec ce qui se passait : c'est la seule facon de relier un decrochage a
-     * sa cause. Rare par construction (rien a dire en regime normal). */
+     * avec ce qui se passait, et QUI tournait (l'autopsie, plus haut) : c'est
+     * la seule facon de relier un decrochage a sa cause. Rare par
+     * construction (rien a dire en regime normal). */
     {
-        const uint32_t pire = AudioEngine::pireBlocEtRaz();
+        uint32_t rendu = 0;
+        const uint32_t pire = AudioEngine::pireBlocEtRaz(&rendu);
+        const SurveillantFlash::Releve fl = SurveillantFlash::releverEtRaz();
+        uint32_t ecartEof = 0, nbEof = 0, ecartTic = 0;
+        AudioEngine::sondesEtRaz(ecartEof, nbEof, ecartTic);
+        const uint32_t tp = nidmi_section("photo");
+        if (g_autopsie) photographierTaches();
+        else g_photoDerniere = (g_photoDerniere + 1) % TOURS;   // l'anneau des releves avance
+        nidmi_chrono("photo", tp);
+        g_sectionEnCours = "wifiBoucle";
+        if (!g_tours) g_tours = (Tour*)heap_caps_calloc(TOURS, sizeof(Tour), MALLOC_CAP_SPIRAM);
+        if (g_tours) {
+            Tour& t = g_tours[g_photoDerniere];      // meme indice que la photo du tour
+            t.ops = fl.operations; t.flashUs = fl.totalUs; t.flashPireUs = fl.pireUs;
+            t.flashTache = fl.pireTache; t.section = g_sectionNom; t.sectionUs = g_sectionUs;
+            t.attenteUs = fl.pireAttenteUs; t.attenteTache = fl.pireAttenteTache;
+            t.ecartEof = ecartEof; t.nbEof = nbEof; t.ecartTic = ecartTic;
+        }
         if (pire > 8000) {
-            NIDMI_WEB_LOG("[audio] bloc lent : %lu.%lu ms (radio %d, sta %d, cable %d, %lus depuis un rallumage)",
+            /* Les tours que ce bloc a couverts, plus celui ou il a commence. */
+            uint8_t k = (uint8_t)(pire / 250000 + 2);
+            if (k > TOURS - 1) k = TOURS - 1;
+            Tour s;
+            if (g_tours) {
+                for (uint8_t j = 0; j < k; j++) {
+                    const Tour& u = g_tours[(g_photoDerniere + TOURS - j) % TOURS];
+                    s.ops += u.ops; s.flashUs += u.flashUs; s.nbEof += u.nbEof;
+                    if (u.flashPireUs > s.flashPireUs) { s.flashPireUs = u.flashPireUs; s.flashTache = u.flashTache; }
+                    if (u.attenteUs > s.attenteUs) { s.attenteUs = u.attenteUs; s.attenteTache = u.attenteTache; }
+                    if (u.sectionUs > s.sectionUs) { s.sectionUs = u.sectionUs; s.section = u.section; }
+                    if (u.ecartEof > s.ecartEof) s.ecartEof = u.ecartEof;
+                    if (u.ecartTic > s.ecartTic) s.ecartTic = u.ecartTic;
+                }
+            }
+            NIDMI_WEB_LOG("[audio] bloc lent : %lu.%lu ms, dont rendu %lu.%lu (radio %d, sta %d, cable %d, %lus depuis un rallumage)",
                           (unsigned long)(pire / 1000), (unsigned long)((pire % 1000) / 100),
+                          (unsigned long)(rendu / 1000), (unsigned long)((rendu % 1000) / 100),
                           serverCore.radioWifiAllumee() ? 1 : 0,
                           // radio coupee, l'interface STA est detruite : ne pas la lire
                           serverCore.radioWifiAllumee() ? (int)WiFi.status() : -1,
                           nidmi_usbnet::reseauActif() ? 1 : 0,
                           g_rallumageA ? (unsigned long)((now - g_rallumageA) / 1000) : 0UL);
+            if (g_autopsie) NIDMI_WEB_LOG("[audio] %s", quiTenaitLesCoeurs(k).c_str());
+            NIDMI_WEB_LOG("[audio] sur %u tours : boucle %s %lu.%lu ms ; %lu fins de tampon, ecart max %lu.%lu ms ; tic coeur 1 ecart max %lu.%lu ms",
+                          (unsigned)k, s.section,
+                          (unsigned long)(s.sectionUs / 1000), (unsigned long)((s.sectionUs % 1000) / 100),
+                          (unsigned long)s.nbEof,
+                          (unsigned long)(s.ecartEof / 1000), (unsigned long)((s.ecartEof % 1000) / 100),
+                          (unsigned long)(s.ecartTic / 1000), (unsigned long)((s.ecartTic % 1000) / 100));
+            {
+                uint32_t suspUs = 0; const char* suspSection = nullptr; TaskHandle_t suspTache = nullptr;
+                AudioEngine::sondeSuspensionEtRaz(suspUs, suspSection, suspTache);
+                const uint32_t retardGarde = AudioEngine::gardeRetardEtRaz();
+                NIDMI_WEB_LOG("[audio] ordonnanceur coeur 1 : suspendu au plus %lu.%lu ms, commence dans %s (%s) ; garde d'election en retard de %lu.%lu ms au plus",
+                              (unsigned long)(suspUs / 1000), (unsigned long)((suspUs % 1000) / 100),
+                              suspSection ? suspSection : "-",
+                              suspTache ? pcTaskGetName(suspTache) : "-",
+                              (unsigned long)(retardGarde / 1000), (unsigned long)((retardGarde % 1000) / 100));
+            }
+            NIDMI_WEB_LOG("[audio] flash : %lu op, %lu.%lu ms en tout, pire %lu.%lu ms (%s) ; attente du coeur voisin : pire %lu.%lu ms (%s)",
+                          (unsigned long)s.ops,
+                          (unsigned long)(s.flashUs / 1000), (unsigned long)((s.flashUs % 1000) / 100),
+                          (unsigned long)(s.flashPireUs / 1000), (unsigned long)((s.flashPireUs % 1000) / 100),
+                          s.flashTache ? pcTaskGetName(s.flashTache) : "-",
+                          (unsigned long)(s.attenteUs / 1000), (unsigned long)((s.attenteUs % 1000) / 100),
+                          s.attenteTache ? pcTaskGetName(s.attenteTache) : "-");
         }
+        g_sectionUs = 0;
+        g_sectionNom = "-";
     }
     const bool essai = g_essai.enCours || g_essaiDemande;
     // Une remise en marche qui a manque de memoire se retente — si la radio
@@ -685,7 +905,7 @@ static void wifiBoucle(){
             b.vivantDepuis = 0;
             p.autonomeTient = true;
         }
-        if (!p.autonomeTient && serverCore.radioWifiAllumee() && !essai) {
+        if (!p.autonomeTient && serverCore.radioWifiAllumee() && !essai && serverCore.coupureSure()) {
             serverCore.couperRadioWifi();
             p.autonomeTient = true;
             NIDMI_WEB_LOG("[NiDMI] instrument autonome : WiFi coupe");
@@ -762,6 +982,10 @@ void nidmi_begin() {
     // Ne pas laisser la pile WiFi relire/écrire une config STA/AP dans la NVS système
     // (notre SSID AP et STA viennent du namespace Preferences "nidmi").
     WiFi.persistent(false);
+
+    // Un crochet autour de chaque operation en flash : le surveillant de
+    // l'audio dira, avec chaque bloc lent, ce que la flash faisait (§161).
+    SurveillantFlash::installer();
 
     // Détecter et afficher le MCU
     PinMapper::detectMcu();
@@ -1025,8 +1249,11 @@ void nidmi_loop() {
         AudioEngine::restaurerAuBoot();
     }
 
+    uint32_t tc = nidmi_section("cues");
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
+    nidmi_chrono("cues", tc); tc = nidmi_section("differe");
     Differe::boucle();              // ce qui attend le silence pour s'écrire en flash
+    nidmi_chrono("differe", tc);
 
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
@@ -1040,7 +1267,7 @@ void nidmi_loop() {
     }
 
     /* ── LE CABLE OU LE WIFI ────────────────────────────────────────────── */
-    if (g_essaiDemande && !g_essai.enCours && millis() - g_essaiDemandeA >= 300) {
+    if (g_essaiDemande && !g_essai.enCours && millis() - g_essaiDemandeA >= 300 && serverCore.coupureSure()) {
         g_essaiDemande = false;
         g_essai = EssaiWifi();
         g_essai.dureeMs   = g_essaiDureeDemandee;
@@ -1074,7 +1301,9 @@ void nidmi_loop() {
         g_essai.tasApres  = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
         g_essai.mesureApres = true;
     }
+    tc = nidmi_section("wifiBoucle");
     wifiBoucle();
+    nidmi_chrono("wifiBoucle", tc);
     if (g_relanceDemande) {
         g_relanceDemande = false;
         nidmi_usbnet::relancer();
@@ -1085,6 +1314,7 @@ void nidmi_loop() {
     // d'espacer les tentatives via un backoff (10 s -> 60 s) remis à zéro une fois connecté.
     // GARDEE PAR LA RADIO : connectSta() appelle WiFi.begin(), qui RALLUMERAIT un
     // WiFi coupe sur commande — la coupure serait un mensonge, et la mesure fausse.
+    tc = nidmi_section("sta");
     if (g_staSsid.length() > 0 && serverCore.radioWifiAllumee()) {
         wl_status_t staStatus = WiFi.status();
         unsigned long now = millis();
@@ -1116,16 +1346,21 @@ void nidmi_loop() {
         }
     }
 
-    serverCore.update();
+    nidmi_chrono("sta", tc);
+    serverCore.update();            // chronometre appel par appel (ServerCore.cpp)
 
     // Lien USB : épingle la tâche usbd au cœur de l'interruption (sans quoi
     // l'émission se fige, MESURES §147), suit le montage pour le netif, et
     // porte l'activation mDNS. N'annonce PAS l'état du lien : il appartient
     // au pilote NCM.
+    tc = nidmi_section("usbnet");
     nidmi_usbnet::update();
+    nidmi_chrono("usbnet", tc);
 
     // La sante de la carte : calculee une fois par seconde, annoncee si elle change.
+    tc = nidmi_section("sante");
     verifierSante();
+    nidmi_chrono("sante", tc);
 
     // Recharger pins si demandé (débounce 500 ms pour grouper les sauvegardes séquentielles)
     if (g_requestReloadPins && (millis() - g_reloadRequestTime >= 500)) {
@@ -1133,14 +1368,20 @@ void nidmi_loop() {
         g_componentManager.reloadConfigs();
     }
     
+    tc = nidmi_section("composants");
     processComponents();
+    nidmi_chrono("composants", tc);
     /* Le rattrapage de la console web : une ligne par tour, hors du rappel
      * WebSocket (voir WebDebugConsole.cpp). */
     /* LA SEULE FENETRE ou l'on ecrit sur la WebSocket : loopTask, la meme tache
      * que ws.cleanupClients() de serverCore.update(). Tout le reste du firmware
      * POUSSE dans la file. Voir ServerCore.h. */
+    tc = nidmi_section("ws");
     nidmi_ws_drainer();
+    nidmi_chrono("ws", tc); tc = nidmi_section("journal");
     nidmi_web_debug_pump();
+    nidmi_chrono("journal", tc);
+    g_sectionEnCours = "hors boucle";
 }
 
 // Instance globale

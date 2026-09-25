@@ -1,5 +1,6 @@
 #include "ScriptStore.h"
 #include "../config/EcrituresDifferees.h"
+#include "../audio/AudioEngine.h"
 #include <LittleFS.h>
 
 namespace ScriptStore {
@@ -85,28 +86,58 @@ String listerJson() {
   return out;
 }
 
-void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
-           size_t& octetsUtilises, size_t& octetsTotal) {
-  fichiers = scripts = octetsContenu = octetsUtilises = octetsTotal = 0;
-  if (!monter()) return;
-  octetsTotal    = LittleFS.totalBytes();
-  octetsUtilises = LittleFS.usedBytes();
+/* L'OCCUPATION DE MAPFS, GARDEE — PAS MESUREE A CHAQUE LECTURE (MESURES §161).
+ * usedBytes() parcourt toute l'arborescence, et chaque fichier s'ouvre pour
+ * sa taille : ~1 900 lectures en flash. Chacune coupe le cache et gare
+ * l'autre coeur ; Reglages les refaisait toutes les 8 s, et pendant un
+ * rallumage de la radio l'audio y a perdu jusqu'a 100 ms. Ces chiffres ne
+ * changent qu'avec les fichiers : mesures une fois, puis refaits apres une
+ * ecriture — au silence, comme l'ecriture elle-meme. En jeu, la derniere
+ * mesure. */
+namespace {
+struct Mesure { size_t fichiers = 0, scripts = 0, contenu = 0, utilises = 0, total = 0; };
+Mesure   g_mesure;
+uint32_t g_mesureGeneration = 0;
+bool     g_mesureFaite = false;
+
+void mesurer(Mesure& m) {
+  m = Mesure();
+  m.total    = LittleFS.totalBytes();
+  m.utilises = LittleFS.usedBytes();
   /* Deux niveaux suffisent : la racine porte les echantillons et les cues,
    * /scripts porte les .nms. Pas de recursion generale — il n'y a pas d'autre
    * niveau, et en inventer un serait du code qu'aucun cas n'exerce. */
   File racine = LittleFS.open("/");
   if (!racine || !racine.isDirectory()) return;
   for (File f = racine.openNextFile(); f; f = racine.openNextFile()) {
-    if (!f.isDirectory()) { fichiers++; octetsContenu += f.size(); continue; }
+    if (!f.isDirectory()) { m.fichiers++; m.contenu += f.size(); continue; }
     File d = LittleFS.open(f.path());
     if (!d || !d.isDirectory()) continue;
     const bool estScripts = (String(f.path()) == DOSSIER);
     for (File g = d.openNextFile(); g; g = d.openNextFile()) {
       if (g.isDirectory()) continue;
-      fichiers++; octetsContenu += g.size();
-      if (estScripts) scripts++;
+      m.fichiers++; m.contenu += g.size();
+      if (estScripts) m.scripts++;
     }
   }
+}
+}  // namespace
+
+void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
+           size_t& octetsUtilises, size_t& octetsTotal) {
+  fichiers = scripts = octetsContenu = octetsUtilises = octetsTotal = 0;
+  if (!monter()) return;
+  const uint32_t g = Differe::generationFichiers();
+  if (!g_mesureFaite || (g != g_mesureGeneration && AudioEngine::silencePourLaFlash())) {
+    mesurer(g_mesure);
+    g_mesureGeneration = g;
+    g_mesureFaite = true;
+  }
+  fichiers       = g_mesure.fichiers;
+  scripts        = g_mesure.scripts;
+  octetsContenu  = g_mesure.contenu;
+  octetsUtilises = g_mesure.utilises;
+  octetsTotal    = g_mesure.total;
 }
 
 bool existe(const char* nom) {

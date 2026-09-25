@@ -54,6 +54,12 @@ void nvsRetirer(const char* espace, const char* cle);
 void boucle();                 // nidmi_loop : ecrit ce qui attend, au silence
 void toutEcrireMaintenant();   // avant un redemarrage voulu
 bool enAttente();
+
+/** Les fichiers de mapfs ont change — ecrits ou supprimes, ici ou par un
+ *  televersement. Ce qu'on mesurait de leur occupation est a refaire (et se
+ *  refait au silence : ScriptStore::infos, MESURES §161). */
+void noterFichiersModifies();
+uint32_t generationFichiers();
 String etatJson();
 
 }  // namespace Differe

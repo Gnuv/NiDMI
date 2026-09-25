@@ -1,4 +1,5 @@
 #include "SampleStore.h"
+#include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 
@@ -92,12 +93,16 @@ bool ecrireMorceau(const uint8_t* d, size_t n) {
 bool ecrireFin() {
   if (!_enCours) return false;
   _enCours.close();
+  Differe::noterFichiersModifies();
   return true;
 }
-void ecrireAbandon() { if (_enCours) _enCours.close(); }
+void ecrireAbandon() {
+  if (_enCours) { _enCours.close(); Differe::noterFichiersModifies(); }
+}
 
 bool supprimer(const char* nom) {
   if (!monter()) return false;
+  Differe::noterFichiersModifies();
   return LittleFS.remove(_chemin(nom));
 }
 

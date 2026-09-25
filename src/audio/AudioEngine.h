@@ -25,6 +25,8 @@
  *    hors de la tâche audio.
  */
 #pragma once
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <Arduino.h>   // String, pour les messages d'erreur du sampler
 #include <stdint.h>
 #include <stddef.h>
@@ -236,8 +238,27 @@ bool silencePourLaFlash();
 
 /* Le pire aller-retour d'un bloc audio depuis le dernier appel, en µs (et
  * remise a zero). Un bloc dure 2,5 ms ; le DMA en garde 30 d'avance. Sert a
- * mesurer ce qu'un geste coute a l'audio sans attendre qu'il decroche. */
-uint32_t pireBlocEtRaz();
+ * mesurer ce qu'un geste coute a l'audio sans attendre qu'il decroche.
+ * `renduUs` : la part de ce bloc passee a le rendre — le reste est l'attente
+ * du DMA dans i2s.write(). */
+uint32_t pireBlocEtRaz(uint32_t* renduUs = nullptr);
+
+/* Les deux sondes du decrochage, depuis le dernier appel (et remise a zero) :
+ * le plus grand ecart entre deux fins de tampon DMA, leur nombre, et le plus
+ * grand ecart entre deux tics du coeur 1. Tics reguliers mais fins de tampon
+ * absentes : le DMA s'est arrete. Les deux absents : le coeur 1 ne recevait
+ * plus ses interruptions (MESURES §161). */
+void sondesEtRaz(uint32_t& pireEcartEofUs, uint32_t& finsDeTampon, uint32_t& pireEcartTicUs);
+
+/* La plus longue suspension de l'ordonnanceur du coeur 1 depuis le dernier
+ * appel (et remise a zero), l'appel de la boucle en cours quand elle a
+ * commence, et la tache en cours quand elle a fini. */
+void sondeSuspensionEtRaz(uint32_t& pireUs, const char*& section, TaskHandle_t& tache);
+
+/* Le pire retard de la garde d'election depuis le dernier appel (et remise a
+ * zero), en µs. En retard elle aussi pendant un decrochage : c'est tout le
+ * coeur 1 qui n'elisait plus ; a l'heure : c'est le reveil de l'audio. */
+uint32_t gardeRetardEtRaz();
 
 /* L'ecrivain ANNONCE son ecriture — faite en silence, par la regle ci-dessus.
  * Les blocs rendus en retard pendant qu'elle a lieu sont comptes deux fois :
