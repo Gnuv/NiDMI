@@ -19,6 +19,7 @@
 #include "mapping/CompoStore.h"
 #include "config/EcrituresDifferees.h"
 #include "diag/SurveillantFlash.h"
+#include "diag/JournalAvant.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -809,6 +810,12 @@ static void wifiBoucle(){
     {
         uint32_t rendu = 0;
         const uint32_t pire = AudioEngine::pireBlocEtRaz(&rendu);
+        {
+            // Les compteurs du son, en memoire RTC : un redemarrage ne les efface plus (§162).
+            uint32_t blocs, retards, retardsEcritures;
+            AudioEngine::compteursSon(blocs, retards, retardsEcritures);
+            JournalAvant::compteurs(blocs, retards, retardsEcritures);
+        }
         const SurveillantFlash::Releve fl = SurveillantFlash::releverEtRaz();
         uint32_t ecartEof = 0, nbEof = 0, ecartTic = 0;
         AudioEngine::sondesEtRaz(ecartEof, nbEof, ecartTic);
@@ -974,6 +981,9 @@ void nidmi_begin() {
      * sinon le premier marquer() de ce demarrage l'ecraserait. */
     ComponentManager::capturerPhasePrecedente();
     capturerDemandeur();
+    // Ce que la vie precedente a garde en memoire RTC — son resume dit qui a
+    // demande le redemarrage : apres capturerDemandeur() (§162).
+    JournalAvant::capturer();
     Serial.begin(115200);
     delay(50);
 

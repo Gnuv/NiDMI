@@ -1121,18 +1121,28 @@ Metriques metriques() {
   m.niveau            = niveauCrete;
   m.derniereNote      = derniereNote;
   m.causeReset        = (int)esp_reset_reason();
-  switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  m.causeResetTexte = "poweron";   break;
-    case ESP_RST_SW:       m.causeResetTexte = "logiciel";  break;
-    case ESP_RST_PANIC:    m.causeResetTexte = "PANIQUE";   break;
-    case ESP_RST_INT_WDT:  m.causeResetTexte = "wdt_int";   break;
-    case ESP_RST_TASK_WDT: m.causeResetTexte = "WDT_TACHE"; break;
-    case ESP_RST_WDT:      m.causeResetTexte = "wdt_autre"; break;
-    case ESP_RST_BROWNOUT: m.causeResetTexte = "BROWNOUT";  break;
-    case ESP_RST_DEEPSLEEP: m.causeResetTexte = "deepsleep"; break;
-    default:               m.causeResetTexte = "inconnu";   break;
-  }
+  m.causeResetTexte   = causeResetTexte();
   return m;
+}
+
+const char* causeResetTexte() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_SW:        return "logiciel";
+    case ESP_RST_PANIC:     return "PANIQUE";
+    case ESP_RST_INT_WDT:   return "wdt_int";
+    case ESP_RST_TASK_WDT:  return "WDT_TACHE";
+    case ESP_RST_WDT:       return "wdt_autre";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    default:                return "inconnu";
+  }
+}
+
+void compteursSon(uint32_t& blocs, uint32_t& retards, uint32_t& retardsEcritures) {
+  blocs = nBlocs;
+  retards = nRetards;
+  retardsEcritures = nRetardsEcritures;
 }
 
 }  // namespace AudioEngine

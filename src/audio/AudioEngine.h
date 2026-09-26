@@ -299,4 +299,11 @@ struct Metriques {
 };
 Metriques metriques();
 
+/* Pourquoi ce demarrage — le texte de /api/audio/status « reset_reason ». */
+const char* causeResetTexte();
+
+/* Les trois compteurs du son, et rien d'autre : metriques() parcourt le tas.
+ * Pour le journal qui survit au redemarrage, a chaque quart de seconde (§162). */
+void compteursSon(uint32_t& blocs, uint32_t& retards, uint32_t& retardsEcritures);
+
 }  // namespace AudioEngine

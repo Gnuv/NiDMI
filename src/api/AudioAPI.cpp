@@ -15,6 +15,7 @@
 #include "../mapping/CompoStore.h"
 #include "../config/EcrituresDifferees.h"
 #include "../audio/SampleStore.h"
+#include "../diag/JournalAvant.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
 #include <nvs.h>
@@ -63,6 +64,16 @@ void setupAudioAPI(AsyncWebServer& server) {
             par.replace("\\", "\\\\"); par.replace("\"", "\\\"");
             json += "\"redemarrage_demande_par\":\"" + par + "\",";
             json += "\"demarre_a_vide\":" + String(nidmi_demarreAVide() ? "true" : "false") + ",";
+        }
+        /* LA VIE PRECEDENTE, en deux chiffres (§162) : combien de temps elle a
+         * dure, combien de decrochages on y a entendus. Le detail : /api/diag/avant.
+         * null apres une mise sous tension : rien n'a ete garde. */
+        if (JournalAvant::disponible()) {
+            const JournalAvant::Resume r = JournalAvant::resume();
+            json += "\"avant\":{\"duree_ms\":" + String(r.dureeMs) + ",\"underruns\":" + String(r.entendus())
+                  + ",\"lignes_audio\":" + String(JournalAvant::nbLignesAudio()) + "},";
+        } else {
+            json += "\"avant\":null,";
         }
         /* Marges de PILE, en octets. Celle de la tache MIDI est relevee par
          * elle-meme ; celle-ci est mesuree ici meme, donc c'est celle du
@@ -912,6 +923,38 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         memcpy(sha, s->app_elf_sha256, 16); sha[16] = 0;
         j += "],\"sha\":\"" + nidmi_json_chaine(String(sha)) + "\"}";
         heap_caps_free(s);
+        request->send(200, "application/json", j);
+    });
+
+    /* LA VIE PRECEDENTE (MESURES §162). Ce que la carte a garde en memoire RTC
+     * avant ce demarrage : sa duree, ses compteurs du son, les dernieres lignes
+     * du surveillant de l'audio et les dernieres lignes tout court, dans leur
+     * ordre d'arrivee (`t` : ms depuis SON demarrage). Un redemarrage demande,
+     * une panique, un chien de garde la gardent ; pas une coupure de courant :
+     * `disponible` faux. */
+    server.on("/api/diag/avant", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (!JournalAvant::disponible()) {
+            request->send(200, "application/json", "{\"disponible\":false}");
+            return;
+        }
+        const JournalAvant::Resume r = JournalAvant::resume();
+        String j;
+        j.reserve(512 + 230 * JournalAvant::nbLignes());
+        j = "{\"disponible\":true";
+        j += ",\"duree_ms\":" + String(r.dureeMs);
+        j += ",\"blocs\":" + String(r.blocs);
+        j += ",\"underruns\":" + String(r.retards);
+        j += ",\"underruns_ecritures\":" + String(r.retardsEcritures);
+        j += ",\"fin\":\"" + String(AudioEngine::causeResetTexte()) + "\"";
+        j += ",\"demandee_par\":\"" + nidmi_json_chaine(String(nidmi_redemarrageDemandePar())) + "\"";
+        j += ",\"lignes\":[";
+        for (uint8_t i = 0; i < JournalAvant::nbLignes(); i++) {
+            uint32_t t; const char* texte;
+            if (!JournalAvant::ligne(i, t, texte)) break;
+            if (i) j += ',';
+            j += "{\"t\":" + String(t) + ",\"texte\":\"" + nidmi_json_chaine(String(texte)) + "\"}";
+        }
+        j += "]}";
         request->send(200, "application/json", j);
     });
 

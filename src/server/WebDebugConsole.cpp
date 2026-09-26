@@ -1,5 +1,6 @@
 #include "WebDebugConsole.h"
 #include "ServerCore.h"
+#include "../diag/JournalAvant.h"
 #include <cstdarg>
 #include <cstdio>
 
@@ -99,13 +100,20 @@ void nidmi_web_debug_pump() {
     AsyncWebSocketClient* c = g_ws->client(g_flushClient);
     if (!c || c->status() != WS_CONNECTED) { g_flushClient = 0; return; }
     if (!c->canSend()) return;                 // file pleine : on repassera
-    if (g_flushIndex >= g_size) {
+    /* D'abord la vie precedente (§162) : ce qu'un redemarrage a efface de
+     * l'historique, la memoire RTC l'a garde. */
+    const uint16_t avant = JournalAvant::nbLignesRejeu();
+    if (g_flushIndex >= avant + g_size) {
         c->text("DEBUG_CONSOLE_STATE:1");      // l'accuse ferme le rattrapage
         g_flushClient = 0;
         return;
     }
-    LigneRing* r = ring();
-    if (r) send_debug_log(c, r[(g_start + g_flushIndex) % kRingLines]);
+    if (g_flushIndex < avant) {
+        send_debug_log(c, JournalAvant::ligneRejeu((uint8_t)g_flushIndex));
+    } else {
+        LigneRing* r = ring();
+        if (r) send_debug_log(c, r[(g_start + g_flushIndex - avant) % kRingLines]);
+    }
     ++g_flushIndex;
 }
 
@@ -126,6 +134,7 @@ void nidmi_web_debug_append_line(const char* line) {
         return;
     }
     ring_push(line);                       // TOUJOURS : c'est l'historique
+    JournalAvant::noter(line);             // et ce qui survivra a un redemarrage (§162)
     if (!g_subscribe || !g_ws) {
         return;
     }
