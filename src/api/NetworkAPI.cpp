@@ -6,6 +6,7 @@
 #include "../network/UsbNetBootstrap.h"
 String nidmi_essaiWifiJson();          // NiDMI.cpp
 String nidmi_cablePrioritaireJson();   // NiDMI.cpp
+String nidmi_lienMortJson();           // NiDMI.cpp : le lien du cable mort, photographie (§163)
 #include <Preferences.h>
 #include <WiFi.h>
 
@@ -93,7 +94,8 @@ void setupNetworkAPI(AsyncWebServer& server) {
         j += serverCore.radioWifiAllumee() ? "true" : "false";
         j += ",\"usb\":" + nidmi_usbnet::etatJson();
         j += ",\"essai_wifi\":" + nidmi_essaiWifiJson();
-        j += ",\"cable\":" + nidmi_cablePrioritaireJson() + "}";
+        j += ",\"cable\":" + nidmi_cablePrioritaireJson();
+        j += ",\"lien_mort\":" + nidmi_lienMortJson() + "}";
         request->send(200, "application/json", j);
     });
 

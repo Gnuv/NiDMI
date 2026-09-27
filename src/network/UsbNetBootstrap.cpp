@@ -91,6 +91,14 @@ bool reseauActif() {
   return g_usbNet.reseauActif();
 }
 
+String resumeLien() {
+  return g_usbNet.resumeLien();
+}
+
+String resumePilote() {
+  return g_usbNet.resumePilote();
+}
+
 String ip() {
   return g_usbNet.localIp().toString();
 }
@@ -176,6 +184,12 @@ bool relancer() {
 }
 bool reseauActif() {
   return false;
+}
+String resumeLien() {
+  return String();
+}
+String resumePilote() {
+  return String();
 }
 String ip() {
   return String("0.0.0.0");

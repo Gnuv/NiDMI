@@ -830,6 +830,9 @@ compile_sketch() {
         BUILD_PROPS=()
         if [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
             BUILD_PROPS+=("${S3_USB_PROPS[@]}")
+            # Le core dump n'est plus ecrit : il n'aboutissait jamais, et la
+            # panique se releve en memoire RTC (src/diag/JournalAvant.cpp, §163).
+            BUILD_PROPS+=(--build-property "compiler.c.elf.extra_flags=-Wl,--wrap=esp_core_dump_write")
         fi
         if [ ${#EXTRA_FLAGS_ARRAY[@]} -gt 0 ]; then
             BUILD_PROPS+=(--build-property "compiler.cpp.extra_flags=${EXTRA_FLAGS_ARRAY[*]}")
@@ -952,6 +955,9 @@ build_binary() {
         BUILD_PROPS=()
         if [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
             BUILD_PROPS+=("${S3_USB_PROPS[@]}")
+            # Le core dump n'est plus ecrit : il n'aboutissait jamais, et la
+            # panique se releve en memoire RTC (src/diag/JournalAvant.cpp, §163).
+            BUILD_PROPS+=(--build-property "compiler.c.elf.extra_flags=-Wl,--wrap=esp_core_dump_write")
         fi
         if [ ${#EXTRA_FLAGS_ARRAY[@]} -gt 0 ]; then
             BUILD_PROPS+=(--build-property "compiler.cpp.extra_flags=${EXTRA_FLAGS_ARRAY[*]}")

@@ -168,9 +168,19 @@ void reconcilier() {
     }
 }
 
-// Coeur 0, priorite 19 : sous les capteurs (20), au rang du MIDI, au-dessus de
-// la pile reseau (18) — MESURES §149. Elle dort sur la file ; reveillee toutes
-// les 20 ms seulement quand une reconciliation attend l'hote.
+// COEUR 1, CELUI DE L'INTERRUPTION USB (MESURES §163). Elle tournait sur le
+// coeur 0 (§149) : ses ecritures dans TinyUSB (dcd_edpt_xfer) prennent un
+// verrou qui ne masque l'interruption que sur LEUR coeur, et le gestionnaire
+// d'interruption, lui, touche aux memes registres sans verrou (le masque des
+// FIFO d'emission, la FIFO du point MIDI). Le 26/09, avec un CC continu (un
+// potentiometre) et le reseau du cable charge (l'app ouverte) : le reseau du
+// cable mourait en quelques minutes — l'emission ne repartait plus —, ou
+// l'interruption USB bouclait sans fin sur le coeur 1 jusqu'au chien de garde
+// (pile relevee : handle_ep_irq). Meme regle qu'au §147 : tout ce qui ecrit
+// dans le controleur USB, sur le coeur de son interruption. Priorite 19 : au
+// rang du MIDI, au-dessus de l'audio (11) — elle ne fait que deposer quatre
+// octets, et dort sur la file ; reveillee toutes les 20 ms seulement quand une
+// reconciliation attend l'hote.
 void pompe(void*) {
     uint32_t p;
     for (;;) {
@@ -313,8 +323,9 @@ bool UsbMidiManager::begin() {
         if (stockage != nullptr) {
             s_capacite = n;
             s_file = xQueueCreateStatic(n, sizeof(uint32_t), stockage, &s_fileStruct);
+            // Coeur 1 : celui de l'interruption USB (voir « pompe », MESURES §163).
             xTaskCreateStaticPinnedToCore(pompe, "usbmidi_tx", sizeof(s_pilePompe), nullptr, 19, s_pilePompe,
-                                          &s_tcbPompe, 0);
+                                          &s_tcbPompe, 1);
         } else {
             NIDMI_WEB_LOG("[USB-MIDI] ERREUR : pas de memoire pour la file de sortie");
         }

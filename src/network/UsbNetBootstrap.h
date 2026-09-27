@@ -80,6 +80,12 @@ bool relancer();
  *  le variant. */
 bool reseauActif();
 
+/** Le lien en deux lignes (MESURES §163) : compteurs et file d'evenements de
+ *  TinyUSB ; chemin de donnees du pilote NCM. Pour la photo du lien mort.
+ *  Vides sans le variant. */
+String resumeLien();
+String resumePilote();
+
 /** Adresse de l'ESP32 sur le lien, "0.0.0.0" si indisponible. */
 String ip();
 

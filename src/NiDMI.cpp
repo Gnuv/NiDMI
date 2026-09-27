@@ -422,26 +422,85 @@ static void basculeRallumerRadio(unsigned long now){
 
 // La regle « cable prioritaire » elle-meme — appelee par wifiBoucle() quand ni
 // le forcage ni l'autonomie ne decident (voir « LE WIFI : TROIS REGLES »).
-static void basculeCable(unsigned long now){
-    BasculeCable& b = g_bascule;
+/* ── LE LIEN MORT (MESURES §163) ─────────────────────────────────────────
+ * Le 26/09, le reseau du cable est mort dans les deux sens pendant que la
+ * carte jouait et que son MIDI USB passait : plus une trame, le Mac croyant
+ * le lien actif. Sans WiFi joignable, la carte n'etait plus a portee que du
+ * debranchement — qui efface tout, journal d'avant compris.
+ *
+ * Ce surveillant tourne QUEL QUE SOIT le WiFi (la bascule ne tourne pas en
+ * instrument autonome, ni radio forcee) : il tient la preuve de vie — les
+ * trames recues, les emissions expirees — et sonde l'hote qui se tait (un
+ * Mac vivant repond toujours a l'ARP, §148). Deux sondes sans reponse, alors
+ * que l'hote utilise le reseau du cable : le lien est mort. Il le dit une fois
+ * par episode — deux lignes dans la console, donc dans le journal d'avant — et
+ * garde l'etat complet du lien pour /api/reseau/liens. */
+static const unsigned long LIEN_MORT_MS = 20000;   // sondes a 10 et 15 s, sans reponse
+struct LienCable {
+    unsigned long mortA = 0;          // 0 : vivant ; sinon, la mort constatee
+    uint32_t morts = 0;
+    char* photo = nullptr;            // /api/reseau/liens au moment de la mort, en PSRAM
+};
+static LienCable g_lien;
 
+static void surveillerLienCable(unsigned long now){
+    BasculeCable& b = g_bascule;
     // La preuve de vie : des trames recues, des emissions qui n'expirent pas.
     uint32_t rx = 0, txExp = 0;
     nidmi_usbnet::compteurs(rx, txExp);
     if (rx != b.rx)       { b.tramesFenetre += rx - b.rx; b.rx = rx; b.dernierRx = now; }
     if (txExp != b.txExp) { b.txExp = txExp; b.derniereExpiree = now; }
+
+    const bool branche = nidmi_usbnet::linkUp() && !nidmi_usbnet::suspendu();
+    const bool utilise = branche && nidmi_usbnet::reseauActif();
+    if (utilise && b.dernierRx != 0 && now - b.dernierRx >= CABLE_SONDE_APRES_MS &&
+        now - b.derniereSonde >= CABLE_SONDE_TOUS_MS) {
+        b.derniereSonde = now;
+        if (nidmi_usbnet::sonder()) b.sondes++;
+    }
+
+    const bool mort = utilise && nidmi_usbnet::hoteConnu() && b.dernierRx != 0 &&
+                      now - b.dernierRx >= LIEN_MORT_MS;
+    if (!mort) { g_lien.mortA = 0; return; }
+    if (g_lien.mortA) return;                      // deja dit pour cet episode
+    g_lien.mortA = now ? now : 1;
+    g_lien.morts++;
+    NIDMI_WEB_LOG("[usbnet] lien mort : %s", nidmi_usbnet::resumeLien().c_str());
+    NIDMI_WEB_LOG("[usbnet] pilote : %s", nidmi_usbnet::resumePilote().c_str());
+    const String etat = nidmi_usbnet::etatJson();
+    char* photo = (char*)heap_caps_malloc(etat.length() + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (photo) {
+        memcpy(photo, etat.c_str(), etat.length() + 1);
+        char* ancienne = g_lien.photo;
+        g_lien.photo = photo;
+        if (ancienne) heap_caps_free(ancienne);
+    }
+#ifdef NIDMI_ESSAI_RELANCE_AUTO
+    // ESSAI SEULEMENT : relancer pour retrouver la carte, et lire la photo.
+    nidmi_usbnet::relancer();
+#endif
+}
+
+/* Pour /api/reseau/liens : la derniere mort du lien, et l'etat photographie. */
+String nidmi_lienMortJson(){
+    if (!g_lien.morts) return String("null");
+    String j = "{\"morts\":" + String(g_lien.morts);
+    j += ",\"en_cours\":";
+    j += g_lien.mortA ? "true" : "false";
+    j += ",\"photo\":";
+    j += g_lien.photo ? g_lien.photo : "null";
+    j += "}";
+    return j;
+}
+
+static void basculeCable(unsigned long now){
+    BasculeCable& b = g_bascule;
+
+    // Les compteurs et la sonde : surveillerLienCable(), juste avant.
     const bool enVeille   = nidmi_usbnet::suspendu();
     const bool branche    = nidmi_usbnet::linkUp() && !enVeille;
     const bool silencieux = b.dernierRx == 0 || now - b.dernierRx >= CABLE_SILENCE_MS;
     const bool enEchec    = b.derniereExpiree != 0 && now - b.derniereExpiree < 5000;
-
-    // Sonder l'hote qui se tait — seulement si la bascule a quelque chose a
-    // decider : reglage actif, ou radio tenue coupee.
-    if (branche && (b.prioritaire || b.tientLeWifi) && b.dernierRx != 0 &&
-        now - b.dernierRx >= CABLE_SONDE_APRES_MS && now - b.derniereSonde >= CABLE_SONDE_TOUS_MS) {
-        b.derniereSonde = now;
-        if (nidmi_usbnet::sonder()) b.sondes++;
-    }
 
     if (b.tientLeWifi) {
         const char* cause = !b.prioritaire ? "reglage"
@@ -884,6 +943,7 @@ static void wifiBoucle(){
         g_sectionUs = 0;
         g_sectionNom = "-";
     }
+    surveillerLienCable(now);
     const bool essai = g_essai.enCours || g_essaiDemande;
     // Une remise en marche qui a manque de memoire se retente — si la radio
     // est encore voulue : l'instrument autonome l'annule.
@@ -1392,6 +1452,16 @@ void nidmi_loop() {
     nidmi_web_debug_pump();
     nidmi_chrono("journal", tc);
     g_sectionEnCours = "hors boucle";
+
+    /* LA BOUCLE REND LA MAIN A CHAQUE TOUR (MESURES §163). Sur le coeur 1,
+     * une tache devenue prete n'est pas toujours elue (§161) : l'audio y
+     * restait « prete » pendant que loopTask (priorite 1) tournait seule. La
+     * garde d'election devait forcer ce choix toutes les 2 ms — mais elle se
+     * reveille par le meme chemin : mesure le 27/09, garde en retard de
+     * 190 ms, bloc audio de 255 ms, quatre decrochages en 23 minutes. Ceder
+     * la main ici fait choisir l'ordonnanceur a chaque tour : la plus haute
+     * tache prete passe, sinon la boucle reprend aussitot. */
+    taskYIELD();
 }
 
 // Instance globale

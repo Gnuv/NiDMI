@@ -3,7 +3,6 @@
 #include "../Globals.h"
 #include "APICommon.h"
 #include <esp_intr_alloc.h>
-#include <esp_core_dump.h>
 #include <stdio.h>
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
@@ -65,13 +64,17 @@ void setupAudioAPI(AsyncWebServer& server) {
             json += "\"redemarrage_demande_par\":\"" + par + "\",";
             json += "\"demarre_a_vide\":" + String(nidmi_demarreAVide() ? "true" : "false") + ",";
         }
-        /* LA VIE PRECEDENTE, en deux chiffres (§162) : combien de temps elle a
-         * dure, combien de decrochages on y a entendus. Le detail : /api/diag/avant.
+        /* LA VIE PRECEDENTE, en quelques chiffres (§162-163) : combien de temps
+         * elle a dure, combien de decrochages on y a entendus, combien de lignes
+         * de rapport (bloc lent, lien mort), et si une panique l'a terminee. Le
+         * detail : /api/diag/avant.
          * null apres une mise sous tension : rien n'a ete garde. */
         if (JournalAvant::disponible()) {
             const JournalAvant::Resume r = JournalAvant::resume();
+            JournalAvant::PaniqueAvant pq;
             json += "\"avant\":{\"duree_ms\":" + String(r.dureeMs) + ",\"underruns\":" + String(r.entendus())
-                  + ",\"lignes_audio\":" + String(JournalAvant::nbLignesAudio()) + "},";
+                  + ",\"lignes_rapport\":" + String(JournalAvant::nbLignesRapport())
+                  + ",\"panique\":" + (JournalAvant::panique(pq) ? "true" : "false") + "},";
         } else {
             json += "\"avant\":null,";
         }
@@ -882,54 +885,11 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
             String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false") + "}");
     });
 
-    /* LE DERNIER PLANTAGE, LU PAR LA CARTE (MESURES §161). Une carte sans liaison
-     * serie ne montre jamais sa trace de panique ; ESP-IDF en garde pourtant
-     * l'image dans la partition « coredump ». Resume : la tache, l'adresse de
-     * la faute, sa cause, la pile d'appels — a retrouver dans l'ELF de l'image
-     * qui a plante (`sha` = son empreinte). 404 : aucune image. */
-    server.on("/api/diag/plantage", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (esp_core_dump_image_check() != ESP_OK) {
-            request->send(404, "application/json", "{\"plantage\":null}");
-            return;
-        }
-        auto* s = (esp_core_dump_summary_t*)heap_caps_malloc(sizeof(esp_core_dump_summary_t),
-                                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!s) { request->send(503, "application/json", "{\"erreur\":\"memoire\"}"); return; }
-        const esp_err_t e = esp_core_dump_get_summary(s);
-        if (e != ESP_OK) {
-            heap_caps_free(s);
-            request->send(500, "application/json",
-                String("{\"erreur\":\"") + esp_err_to_name(e) + "\"}");
-            return;
-        }
-        char h[12];
-        auto hex = [&h](uint32_t x) { snprintf(h, sizeof h, "\"%08lx\"", (unsigned long)x); return String(h); };
-        String j = "{\"tache\":\"" + nidmi_json_chaine(String(s->exc_task)) + "\"";
-        j += ",\"pc\":" + hex(s->exc_pc);
-        j += ",\"cause\":" + String((unsigned long)s->ex_info.exc_cause);
-        j += ",\"adresse\":" + hex(s->ex_info.exc_vaddr);
-        j += ",\"pile_corrompue\":" + String(s->exc_bt_info.corrupted ? "true" : "false");
-        j += ",\"pile\":[";
-        for (uint32_t i = 0; i < s->exc_bt_info.depth && i < 16; i++) {
-            if (i) j += ',';
-            j += hex(s->exc_bt_info.bt[i]);
-        }
-        j += "],\"epc\":[";
-        for (int i = 0; i < EPCx_REGISTER_COUNT; i++) {
-            if (i) j += ',';
-            j += hex(s->ex_info.epcx[i]);
-        }
-        char sha[17];
-        memcpy(sha, s->app_elf_sha256, 16); sha[16] = 0;
-        j += "],\"sha\":\"" + nidmi_json_chaine(String(sha)) + "\"}";
-        heap_caps_free(s);
-        request->send(200, "application/json", j);
-    });
-
-    /* LA VIE PRECEDENTE (MESURES §162). Ce que la carte a garde en memoire RTC
-     * avant ce demarrage : sa duree, ses compteurs du son, les dernieres lignes
-     * du surveillant de l'audio et les dernieres lignes tout court, dans leur
-     * ordre d'arrivee (`t` : ms depuis SON demarrage). Un redemarrage demande,
+    /* LA VIE PRECEDENTE (MESURES §162-163). Ce que la carte a garde en memoire
+     * RTC avant ce demarrage : sa duree, ses compteurs du son, les dernieres
+     * lignes des surveillants (audio, lien du cable) et les dernieres lignes
+     * tout court, dans leur ordre d'arrivee (`t` : ms depuis SON demarrage),
+     * et la panique qui l'a terminee s'il y en a eu une. Un redemarrage demande,
      * une panique, un chien de garde la gardent ; pas une coupure de courant :
      * `disponible` faux. */
     server.on("/api/diag/avant", HTTP_GET, [](AsyncWebServerRequest *request){
@@ -947,6 +907,44 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         j += ",\"underruns_ecritures\":" + String(r.retardsEcritures);
         j += ",\"fin\":\"" + String(AudioEngine::causeResetTexte()) + "\"";
         j += ",\"demandee_par\":\"" + nidmi_json_chaine(String(nidmi_redemarrageDemandePar())) + "\"";
+        /* La panique qui l'a terminee (§163) : de quoi relire l'ELF de l'image
+         * (addr2line sur les piles, la raison a son adresse si elle n'etait pas
+         * en RAM). null si la vie s'est finie autrement. */
+        JournalAvant::PaniqueAvant pq;
+        if (JournalAvant::panique(pq)) {
+            char h[12];
+            auto hex = [&h](uint32_t x) { snprintf(h, sizeof h, "\"%08lx\"", (unsigned long)x); return String(h); };
+            j += ",\"panique\":{\"coeur\":" + String(pq.coeur);
+            j += ",\"raison\":\"" + nidmi_json_chaine(String(pq.raison)) + "\"";
+            j += ",\"raison_adr\":" + hex(pq.raisonAdr);
+            j += ",\"adresse\":" + hex(pq.adresse);
+            j += ",\"pc\":" + hex(pq.pc);
+            j += ",\"exccause\":" + String(pq.exccause);
+            j += ",\"excvaddr\":" + hex(pq.excvaddr);
+            j += ",\"piles\":[";
+            for (uint8_t c = 0; c < 2; c++) {
+                if (c) j += ',';
+                j += '[';
+                for (uint8_t i = 0; i < pq.profondeur[c]; i++) { if (i) j += ','; j += hex(pq.pile[c][i]); }
+                j += ']';
+            }
+            j += "]";
+            // Les paniques survenues pendant son traitement : ce qui l'a interrompu.
+            if (pq.imbriquees) {
+                j += ",\"imbriquees\":{\"nb\":" + String(pq.imbriquees);
+                j += ",\"coeur\":" + String(pq.imbriqueeCoeur);
+                j += ",\"raison_adr\":" + hex(pq.imbriqueeRaisonAdr);
+                j += ",\"pc\":" + hex(pq.imbriqueePc);
+                j += ",\"pile\":[";
+                for (uint8_t i = 0; i < pq.imbriqueeProfondeur; i++) { if (i) j += ','; j += hex(pq.imbriqueePile[i]); }
+                j += "]}";
+            } else {
+                j += ",\"imbriquees\":null";
+            }
+            j += "}";
+        } else {
+            j += ",\"panique\":null";
+        }
         j += ",\"lignes\":[";
         for (uint8_t i = 0; i < JournalAvant::nbLignes(); i++) {
             uint32_t t; const char* texte;
@@ -957,6 +955,17 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         j += "]}";
         request->send(200, "application/json", j);
     });
+
+#ifdef NIDMI_ESSAI_PANIQUE
+    /* ESSAI SEULEMENT (-DNIDMI_ESSAI_PANIQUE, jamais dans une image livree) :
+     * bloque ce coeur interruptions masquees — le chien de garde des
+     * interruptions tire comme le 26/09 — pour eprouver le releve de
+     * panique du journal d'avant (MESURES §163). */
+    server.on("/api/diag/panique-essai", HTTP_POST, [](AsyncWebServerRequest *request){
+        portDISABLE_INTERRUPTS();
+        for (;;) {}
+    });
+#endif
 
     /* ── BANC : UNE RAFALE MIDI SUR L'USB ─────────────────────────────────
      * Un accord de `notes` notes (128 au plus) par canal, sur `canaux` canaux
