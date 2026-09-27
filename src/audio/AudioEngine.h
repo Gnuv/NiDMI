@@ -195,13 +195,23 @@ bool samplerActif();
  * soit 62 % a huit. Deux pistes instrument avec deux sons en meme temps sont
  * donc possibles — elles ne l'etaient pas, le lecteur etant monophonique et le
  * magasin ne tenant qu'un echantillon. */
+/* `bloc` : l'identifiant du bloc de la composition qui l'a lance, 0 = aucun —
+ * c'est par lui que fixerGainBloc() retrouve la voix pendant qu'elle joue.
+ * `velo` : la part de la velocite (1 sur cue) ; la voix sonne a velo x gain. */
 bool declencherEchantillon(const char* nom, bool boucle = false,
-                           float gain = 1.0f, float demiTons = 0.0f);
+                           float gain = 1.0f, float demiTons = 0.0f,
+                           uint32_t bloc = 0, float velo = 1.0f);
+/* LE VOLUME D'UN BLOC PENDANT QU'IL JOUE (MESURES §165) : toutes ses voix y
+ * glissent en ~10 ms, et le clavier le prend si le bloc est le sien. Rend le
+ * nombre de voix touchees — 0 : le bloc ne joue pas, ce n'est pas une erreur. */
+uint8_t fixerGainBloc(uint32_t bloc, float gain);
+/* Le bloc que le clavier joue en mode MIDI, et son volume. */
+void fixerClavier(uint32_t bloc, float gain);
 void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
 void arreterEchantillon();                       // toutes les voix
 /* QUI DECLENCHE. `true` (defaut) : la cue, a la hauteur du fichier — l'original.
  * `false` : le clavier, transpose par la note. Les deux marchent ; c'est le bloc
- * qui tranche, par son parametre `oncue`. */
+ * qui tranche, par son interrupteur Cue/MIDI (`oncue` dans la cue). */
 void fixerDeclenchementSurCue(bool surCue);
 bool declenchementSurCue();
 const char* samplerNom();

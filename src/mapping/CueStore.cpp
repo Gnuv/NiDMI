@@ -198,8 +198,10 @@ void _appliquer(const Cue& c) {
      * POSITION fait la correspondance — exactement comme la chaine de scripts
      * d'une cue. « sample=a.wav,b.wav ; loop=1,0 » lance a.wav en boucle et
      * b.wav en coup unique. Une liste `loop` plus courte que `sample` complete
-     * avec sa derniere valeur : ecrire « loop=0 » une fois vaut pour tous. */
-    String noms, boucles, gains;
+     * avec sa derniere valeur : ecrire « loop=0 » une fois vaut pour tous.
+     * `bloc=` porte l'identifiant du bloc de chaque son (MESURES §165), sans
+     * completion : c'est par lui que le volume retrouve une voix qui joue. */
+    String noms, boucles, gains, blocs;
     bool surCue = true;      // defaut : le comportement d'origine de trig-wav
     int debut = 0;
     while (debut < (int)c.params.length()) {
@@ -212,6 +214,7 @@ void _appliquer(const Cue& c) {
         if      (cle == "sample") { noms = kv.substring(eq + 1); noms.trim(); }
         else if (cle == "loop")   { boucles = kv.substring(eq + 1); boucles.trim(); }
         else if (cle == "gain")   { gains   = kv.substring(eq + 1); gains.trim(); }
+        else if (cle == "bloc")   { blocs   = kv.substring(eq + 1); blocs.trim(); }
         else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
         else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
       }
@@ -236,7 +239,7 @@ void _appliquer(const Cue& c) {
       if (!AudioEngine::setSampler(premier.c_str(), raison, /*persister=*/false))
         Serial.printf("[cues] lecteur non arme : %s\n", raison.c_str());
 
-      int dn = 0, db = 0, dg = 0, rang = 0;
+      int dn = 0, db = 0, dg = 0, dk = 0, rang = 0;
       bool  derniereBoucle = false;
       float dernierGain    = 1.0f;
       while (dn < (int)noms.length()) {
@@ -261,10 +264,24 @@ void _appliquer(const Cue& c) {
           dg = fg + 1;
         }
 
+        /* LE BLOC DE MEME RANG : l'etiquette de la voix, par laquelle le volume
+         * la retrouve pendant qu'elle joue (MESURES §165). Pas de completion :
+         * un bloc par son, ou aucun (0). */
+        uint32_t bloc = 0;
+        if (dk < (int)blocs.length()) {
+          int fk = blocs.indexOf(',', dk); if (fk < 0) fk = blocs.length();
+          bloc = (uint32_t)blocs.substring(dk, fk).toInt();
+          dk = fk + 1;
+        }
+        /* Le clavier joue le PREMIER son (setSampler ci-dessus) : il prend
+         * aussi son bloc et son volume. */
+        if (rang == 0) AudioEngine::fixerClavier(bloc, dernierGain);
+
         /* EN MODE CLAVIER on ne declenche pas : arriver sur la cue ARME et
          * attend la premiere touche — sinon le bloc partirait tout seul. */
         if (nom.length() && surCue) {
-          if (!AudioEngine::declencherEchantillon(nom.c_str(), derniereBoucle, dernierGain))
+          if (!AudioEngine::declencherEchantillon(nom.c_str(), derniereBoucle, dernierGain,
+                                                  0.0f, bloc))
             Serial.printf("[cues] echantillon « %s » absent de mapfs\n", nom.c_str());
         }
         dn = fn + 1; rang++;

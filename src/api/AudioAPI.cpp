@@ -333,9 +333,20 @@ void setupAudioAPI(AsyncWebServer& server) {
                          && request->getParam("loop", true)->value() != "0";
         const bool surCue = !request->hasParam("oncue", true)
                          || request->getParam("oncue", true)->value() != "0";
+        /* LE BLOC ET SON VOLUME (MESURES §165). L'apercu partait a plein, quel
+         * que soit le potentiometre, et sans etiquette : le volume ne pouvait
+         * ni le doser ni le retrouver ensuite. Absents, c'est l'ancien
+         * comportement — plein, sans bloc. */
+        const uint32_t bloc = request->hasParam("bloc", true)
+                            ? (uint32_t)request->getParam("bloc", true)->value().toInt() : 0;
+        const float gain = request->hasParam("gain", true)
+                         ? request->getParam("gain", true)->value().toFloat() : 1.0f;
         AudioEngine::fixerDeclenchementSurCue(surCue);
+        /* L'apercu vient de designer ce son comme celui du clavier (POST
+         * /api/audio/sampler) : le clavier prend aussi son bloc et son volume. */
+        AudioEngine::fixerClavier(bloc, gain);
         bool lance = false;
-        if (surCue) lance = AudioEngine::declencherEchantillon(nom.c_str(), boucle);
+        if (surCue) lance = AudioEngine::declencherEchantillon(nom.c_str(), boucle, gain, 0.0f, bloc);
         else        AudioEngine::arreterEchantillonNomme(nom.c_str());  // au clavier de jouer
         if (surCue && !lance) {
             request->send(404, "application/json",
@@ -347,6 +358,41 @@ void setupAudioAPI(AsyncWebServer& server) {
             String("{\"status\":\"ok\",\"name\":\"") + nom
             + "\",\"loop\":" + (boucle ? "true" : "false")
             + ",\"oncue\":" + (surCue ? "true" : "false") + "}");
+    });
+
+    /* LE VOLUME D'UN BLOC QUI JOUE (MESURES §165) — le chemin VIVANT du
+     * potentiometre Volume et des faders. Le gain d'une voix etait fixe a son
+     * declenchement : tourner Volume ne s'entendait qu'a la cue suivante.
+     * `bloc=106,215&gain=0.500,1.000` : meme position, et la meme completion
+     * que la cue (un seul gain vaut pour tous les blocs). La voix glisse vers
+     * son nouveau gain en ~10 ms. Rien ne s'ecrit en flash : la liste de cues,
+     * que l'app tient a jour par ailleurs, redira ce gain a la prochaine
+     * arrivee sur la cue. Rend le nombre de voix touchees — 0 n'est pas une
+     * erreur, le bloc ne joue pas.
+     * AVANT "/api/audio/sampler" : ce gestionnaire-la prend aussi tout ce qui
+     * commence par son chemin suivi de « / ». */
+    server.on("/api/audio/sampler/gain", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("bloc", true) || !request->hasParam("gain", true)) {
+            request->send(400, "application/json",
+                "{\"status\":\"error\",\"message\":\"bloc et gain requis\"}");
+            return;
+        }
+        const String blocs = request->getParam("bloc", true)->value();
+        const String gains = request->getParam("gain", true)->value();
+        int db = 0, dg = 0, voix = 0;
+        float g = 1.0f;
+        while (db < (int)blocs.length()) {
+            int fb = blocs.indexOf(',', db); if (fb < 0) fb = blocs.length();
+            if (dg < (int)gains.length()) {
+                int fg = gains.indexOf(',', dg); if (fg < 0) fg = gains.length();
+                g = gains.substring(dg, fg).toFloat();
+                dg = fg + 1;
+            }
+            voix += AudioEngine::fixerGainBloc((uint32_t)blocs.substring(db, fb).toInt(), g);
+            db = fb + 1;
+        }
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"voix\":" + String(voix) + "}");
     });
 
     /* Suppression d'un échantillon. Si c'est celui qui est chargé, on arrête

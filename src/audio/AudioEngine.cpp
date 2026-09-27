@@ -248,10 +248,17 @@ struct VoixEch {
   uint8_t  iEch   = 0;        // index dans SampleStore
   double   pos    = 0.0;
   double   pas    = 1.0;
-  float    gain   = 0.0f;
+  float    gain   = 0.0f;     // gain COURANT, qui glisse vers `cible`
+  float    cible  = 0.0f;     // velo x gain du bloc (MESURES §165)
+  float    velo   = 1.0f;     // part de la velocite : 1 sur cue
+  uint32_t bloc   = 0;        // bloc de la composition qui l'a lancee, 0 = aucun
   bool     boucle = false;
   uint32_t age    = 0;        // ordre de declenchement, pour le vol de voix
 };
+/* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
+ * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
+ * quelques dizaines, c'est sous l'oreille pour un geste de potentiometre. */
+constexpr float LISSAGE_GAIN = 1.0f / 480.0f;
 VoixEch  voixEch[VOIX_MAX];
 uint32_t voixHorloge = 0;
 
@@ -273,6 +280,11 @@ static inline bool _uneVoixSonne() {
 volatile bool  sampleSurCue = true;
 /* Quel echantillon le clavier joue : celui que la derniere cue a designe. */
 char echantillonClavier[48] = {0};
+/* ET A QUEL VOLUME (MESURES §165) : celui du bloc qui l'a designe, par son
+ * identifiant. Une note jouait a sa seule velocite — le volume du bloc n'y
+ * entrait ni a l'arrivee sur la cue ni ensuite. */
+volatile uint32_t blocClavier = 0;
+volatile float    gainClavier = 1.0f;
 
 void rendreSample() {
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
@@ -293,6 +305,12 @@ void rendreSample() {
         if (!vo.boucle) { vo.actif = false; continue; }
         vo.pos -= double(n - 1);
       }
+      /* Le gain rejoint sa cible — `fixerGainBloc` la deplace pendant que la
+       * voix joue. Arrive a moins de 1e-4, on pose la cible : pas de traine
+       * sans fin vers zero, donc pas de nombres denormaux dans la boucle. */
+      const float ecart = vo.cible - vo.gain;
+      if (ecart != 0.0f)
+        vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
       const size_t k = (size_t)vo.pos;
       const float  f = float(vo.pos - double(k));
       const bool  st = SampleStore::stereo(vo.iEch);
@@ -347,7 +365,8 @@ void appliquer(const Evenement& e) {
      * note : jouer un accord donne un accord, ce que la version monophonique
      * ne pouvait pas. */
     declencherEchantillon(echantillonClavier, /*boucle=*/false,
-                          float(e.velo) / 127.0f, float(e.note) - 60.0f);
+                          gainClavier, float(e.note) - 60.0f,
+                          blocClavier, float(e.velo) / 127.0f);
     return;
   }
   if (e.velo != 0) derniereNote = e.note;   // temoin : la note REELLEMENT jouee
@@ -912,21 +931,59 @@ static VoixEch* _voixLibre() {
 }
 
 /* Declenche UN echantillon, nomme. `demiTons` = 0 signifie « a la hauteur du
- * fichier » — le cas de trig-wav sur cue ; le clavier passe un ecart. */
-bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiTons) {
+ * fichier » — le cas de trig-wav sur cue ; le clavier passe un ecart. `gain`
+ * negatif = non precise, donc plein. */
+bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiTons,
+                           uint32_t bloc, float velo) {
   if (moteurCourant != -2) return false;
   const int i = SampleStore::indexDe(nom);
   if (i < 0) return false;
   VoixEch* vo = _voixLibre();
+  /* ETEINTE PENDANT QU'ON LA REECRIT. La tache audio, plus prioritaire, peut
+   * lire la voix entre deux ecritures — celles d'une cue ou d'un apercu
+   * viennent d'une autre tache. Une voix volee a moitie reecrite lirait le
+   * nouvel echantillon a l'ANCIENNE position, au-dela de sa fin. La barriere
+   * interdit au compilateur de supprimer ou de deplacer l'extinction. */
+  vo->actif  = false;
+  __sync_synchronize();
   vo->iEch   = (uint8_t)i;
   vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
              * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
   vo->pos    = 0.0;
-  vo->gain   = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
+  vo->velo   = (velo < 0.f) ? 0.0f : ((velo > 1.f) ? 1.0f : velo);
+  vo->cible  = vo->velo * ((gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain));
+  vo->gain   = vo->cible;              // l'attaque part a son niveau : pas de fondu
+  vo->bloc   = bloc;
   vo->boucle = boucle;
   vo->age    = ++voixHorloge;
+  __sync_synchronize();
   vo->actif  = true;
   return true;
+}
+
+/* LE VOLUME D'UN BLOC PENDANT QU'IL JOUE (MESURES §165). Le gain d'une voix
+ * etait fixe a son declenchement : tourner Volume, ou un fader, ne s'entendait
+ * qu'a la cue suivante. On deplace la CIBLE de chaque voix du bloc — la voix y
+ * glisse dans rendreSample() — et le gain que le clavier donnera aux notes
+ * suivantes, si le bloc est le sien. Un seul flottant par voix : l'ecriture est
+ * atomique, la tache audio lit l'ancienne valeur ou la nouvelle. */
+uint8_t fixerGainBloc(uint32_t bloc, float gain) {
+  if (!bloc) return 0;                     // 0 = voix sans bloc : on n'y touche pas
+  const float g = (gain < 0.f) ? 0.0f : ((gain > 1.f) ? 1.0f : gain);
+  uint8_t n = 0;
+  for (uint8_t v = 0; v < VOIX_MAX; v++) {
+    VoixEch& vo = voixEch[v];
+    if (vo.actif && vo.bloc == bloc) { vo.cible = vo.velo * g; n++; }
+  }
+  if (bloc == blocClavier) gainClavier = g;
+  return n;
+}
+
+/* Le bloc que le CLAVIER joue, et son volume : le premier son d'une cue, ou
+ * celui d'un apercu. */
+void fixerClavier(uint32_t bloc, float gain) {
+  blocClavier = bloc;
+  gainClavier = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
 }
 
 /* Arrete UNE voix par son echantillon — quitter une cue coupe ce qu'elle avait
