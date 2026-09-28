@@ -259,6 +259,16 @@ struct VoixEch {
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
  * quelques dizaines, c'est sous l'oreille pour un geste de potentiometre. */
 constexpr float LISSAGE_GAIN = 1.0f / 480.0f;
+/* LE PLAFOND D'UNE VOIX : +12 dB, celui des faders de l'app (VOL_GAIN_MAX,
+ * 3,981). On bornait a 1 : un fader pousse au-dessus de 0 dB ne changeait rien
+ * sur la carte (MESURES §166). Au-dela de 1, la somme peut saturer — comme
+ * dans toute table de mixage numerique ; c'est le choix de qui pousse le
+ * fader. `!(g >= 0)` attrape aussi NaN (« gain=nan » dans une requete). */
+constexpr float GAIN_VOIX_MAX = 3.981f;
+static inline float _borneGain(float g) {
+  if (!(g >= 0.0f)) return 0.0f;
+  return (g > GAIN_VOIX_MAX) ? GAIN_VOIX_MAX : g;
+}
 VoixEch  voixEch[VOIX_MAX];
 uint32_t voixHorloge = 0;
 
@@ -950,8 +960,8 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
              * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
   vo->pos    = 0.0;
-  vo->velo   = (velo < 0.f) ? 0.0f : ((velo > 1.f) ? 1.0f : velo);
-  vo->cible  = vo->velo * ((gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain));
+  vo->velo   = !(velo >= 0.f) ? 0.0f : ((velo > 1.f) ? 1.0f : velo);
+  vo->cible  = vo->velo * ((gain < 0.f) ? 1.0f : _borneGain(gain));
   vo->gain   = vo->cible;              // l'attaque part a son niveau : pas de fondu
   vo->bloc   = bloc;
   vo->boucle = boucle;
@@ -969,7 +979,7 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
  * atomique, la tache audio lit l'ancienne valeur ou la nouvelle. */
 uint8_t fixerGainBloc(uint32_t bloc, float gain) {
   if (!bloc) return 0;                     // 0 = voix sans bloc : on n'y touche pas
-  const float g = (gain < 0.f) ? 0.0f : ((gain > 1.f) ? 1.0f : gain);
+  const float g = _borneGain(gain);
   uint8_t n = 0;
   for (uint8_t v = 0; v < VOIX_MAX; v++) {
     VoixEch& vo = voixEch[v];
@@ -983,7 +993,7 @@ uint8_t fixerGainBloc(uint32_t bloc, float gain) {
  * celui d'un apercu. */
 void fixerClavier(uint32_t bloc, float gain) {
   blocClavier = bloc;
-  gainClavier = (gain < 0.f) ? 1.0f : ((gain > 1.f) ? 1.0f : gain);
+  gainClavier = (gain < 0.f) ? 1.0f : _borneGain(gain);
 }
 
 /* Arrete UNE voix par son echantillon — quitter une cue coupe ce qu'elle avait
