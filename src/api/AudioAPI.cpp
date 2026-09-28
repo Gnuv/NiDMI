@@ -1300,6 +1300,9 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"relaches\":"  + String((unsigned long)mu.relaches);
         json += ",\"max\":"       + String((unsigned)mu.fileMax);
         json += ",\"capacite\":"  + String((unsigned)mu.capacite) + "}";
+        /* Le RTP sortant, depose puis emis par la boucle (§175) : ce que sa
+         * file pleine a jete. */
+        json += ",\"rtp_sortant\":{\"jetes\":" + String((unsigned long)MidiRouter::rtpJetes()) + "}";
 
         /* La borne par broche, pour que le client n'ait pas a la recopier :
          * elle est deja publiee par /api/pins/caps, et deux copies d'un meme

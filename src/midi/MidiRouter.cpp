@@ -15,6 +15,59 @@
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
 
+/* ── LE RTP-MIDI SORTANT PASSE PAR LA BOUCLE (MESURES §175) ────────────────
+ * La bibliotheque AppleMIDI n'est pas faite pour deux taches : un envoi
+ * EMPILE dans son tampon (outMidiBuffer), que la boucle vide en servant la
+ * session (available(), dans update()) — et quand le tampon est presque
+ * plein, l'envoi part d'UDP depuis la tache qui ecrit, sur le meme objet
+ * WiFiUDP que la boucle. Or les scripts et les broches emettent depuis
+ * MidiTask (coeur 0), la boucle lit sur le coeur 1 : deux taches dans le meme
+ * tampon, des qu'une session est ouverte. On DEPOSE donc (file PSRAM de 256,
+ * jamais bloquante), et la boucle emet juste avant de servir la session
+ * (emettreRtp) : une seule tache touche AppleMIDI. Sans session, rien n'entre
+ * — la bibliotheque n'aurait rien envoye (beginTransmission). Le RTP est de
+ * l'UDP : une perte par nature ; la file pleine se compte. */
+namespace {
+enum : uint8_t { RtpNoteOn, RtpNoteOff, RtpCc, RtpPgm, RtpBend, RtpTouch, RtpPoly,
+                 RtpHorloge, RtpStart, RtpStop, RtpContinue };
+struct EnvoiRtp { uint8_t genre, canal, a, b; int16_t bend; };
+constexpr UBaseType_t kEnvoisRtpMax = 256;
+StaticQueue_t g_fileRtpTcb;
+QueueHandle_t g_fileRtp = nullptr;
+std::atomic<uint32_t> g_rtpJetes{0};
+
+void deposerRtp(uint8_t genre, uint8_t canal = 0, uint8_t a = 0, uint8_t b = 0, int16_t bend = 0) {
+    if (!g_fileRtp || !serverCore.rtpMidi().isConnected()) return;
+    const EnvoiRtp e{genre, canal, a, b, bend};
+    if (xQueueSend(g_fileRtp, &e, 0) != pdTRUE) g_rtpJetes.fetch_add(1, std::memory_order_relaxed);
+}
+}  // namespace
+
+/* loopTask SEULEMENT, juste avant de servir la session (ServerCore::update). */
+void MidiRouter::emettreRtp() {
+    if (!g_fileRtp) return;
+    EnvoiRtp e;
+    auto& rtp = serverCore.rtpMidi();
+    for (int k = 0; k < 64 && xQueueReceive(g_fileRtp, &e, 0) == pdTRUE; k++) {
+        switch (e.genre) {
+            case RtpNoteOn:   rtp.sendNoteOn(e.canal, e.a, e.b);         break;
+            case RtpNoteOff:  rtp.sendNoteOff(e.canal, e.a, e.b);        break;
+            case RtpCc:       rtp.sendControlChange(e.canal, e.a, e.b);  break;
+            case RtpPgm:      rtp.sendProgramChange(e.canal, e.a);       break;
+            case RtpBend:     rtp.sendPitchBend(e.canal, e.bend);        break;
+            case RtpTouch:    rtp.sendAftertouch(e.canal, e.a);          break;
+            case RtpPoly:     rtp.sendKeyPressure(e.canal, e.a, e.b);    break;
+            case RtpHorloge:  rtp.sendClock();                           break;
+            case RtpStart:    rtp.sendStart();                           break;
+            case RtpStop:     rtp.sendStop();                            break;
+            case RtpContinue: rtp.sendContinue();                        break;
+            default: break;
+        }
+    }
+}
+
+uint32_t MidiRouter::rtpJetes() { return g_rtpJetes.load(std::memory_order_relaxed); }
+
 /* Voir « LE MIDI COMPTE AUSSI POUR LE SILENCE » (MidiRouter.h). 0 au
  * demarrage : un long silence, rien n'est passe. */
 namespace {
@@ -34,6 +87,12 @@ MidiRouter::MidiRouter()
 MidiRouter::~MidiRouter() {}
 
 void MidiRouter::begin() {
+    if (!g_fileRtp) {
+        /* La file du RTP sortant, en PSRAM : seules des taches y touchent. */
+        uint8_t* stock = (uint8_t*)heap_caps_malloc(kEnvoisRtpMax * sizeof(EnvoiRtp),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (stock) g_fileRtp = xQueueCreateStatic(kEnvoisRtpMax, sizeof(EnvoiRtp), stock, &g_fileRtpTcb);
+    }
     // Initialiser USB MIDI si supporté et activé
     if (usbMidiEnabled && serverCore.usbMidi().isSupported()) {
         serverCore.usbMidi().begin();
@@ -44,7 +103,7 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendNoteOn(ch, note, velocity);
+        deposerRtp(RtpNoteOn, ch, note, velocity);
     }
     if (bluetoothEnabled) {
         serverCore.bluetooth().sendNoteOn(ch, note, velocity);
@@ -74,7 +133,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendNoteOff(ch, note, velocity);
+        deposerRtp(RtpNoteOff, ch, note, velocity);
     }
     if (bluetoothEnabled) {
         serverCore.bluetooth().sendNoteOff(ch, note, velocity);
@@ -98,7 +157,7 @@ void MidiRouter::sendControlChange(uint8_t channel, uint8_t control, uint8_t val
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendControlChange(ch, control, value);
+        deposerRtp(RtpCc, ch, control, value);
     }
     if (bluetoothEnabled) {
         serverCore.bluetooth().sendControlChange(ch, control, value);
@@ -117,7 +176,7 @@ void MidiRouter::sendProgramChange(uint8_t channel, uint8_t program) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendProgramChange(ch, program);
+        deposerRtp(RtpPgm, ch, program);
     }
     if (bluetoothEnabled) {
         serverCore.bluetooth().sendProgramChange(ch, program);
@@ -131,7 +190,7 @@ void MidiRouter::sendPitchBend(uint8_t channel, int bend) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendPitchBend(ch, bend);
+        deposerRtp(RtpBend, ch, 0, 0, (int16_t)bend);
     }
     if (bluetoothEnabled) {
         serverCore.bluetooth().sendPitchBend(ch, bend);
@@ -145,7 +204,7 @@ void MidiRouter::sendAftertouch(uint8_t channel, uint8_t pressure) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendAftertouch(ch, pressure);
+        deposerRtp(RtpTouch, ch, pressure);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendAftertouch, on peut l'ignorer ou l'implémenter plus tard
@@ -159,7 +218,7 @@ void MidiRouter::sendKeyPressure(uint8_t channel, uint8_t note, uint8_t pressure
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendKeyPressure(ch, note, pressure);
+        deposerRtp(RtpPoly, ch, note, pressure);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendKeyPressure, on peut l'ignorer ou l'implémenter plus tard
@@ -180,7 +239,7 @@ void MidiRouter::sendKeyPressure(uint8_t channel, uint8_t note, uint8_t pressure
 
 void MidiRouter::sendClock() {
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendClock();
+        deposerRtp(RtpHorloge);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendClock, on peut l'ignorer ou l'implémenter plus tard
@@ -192,7 +251,7 @@ void MidiRouter::sendClock() {
 
 void MidiRouter::sendStart() {
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendStart();
+        deposerRtp(RtpStart);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendStart, on peut l'ignorer ou l'implémenter plus tard
@@ -204,7 +263,7 @@ void MidiRouter::sendStart() {
 
 void MidiRouter::sendStop() {
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendStop();
+        deposerRtp(RtpStop);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendStop, on peut l'ignorer ou l'implémenter plus tard
@@ -216,7 +275,7 @@ void MidiRouter::sendStop() {
 
 void MidiRouter::sendContinue() {
     if (rtpEnabled) {
-        serverCore.rtpMidi().sendContinue();
+        deposerRtp(RtpContinue);
     }
     if (bluetoothEnabled) {
         // BluetoothManager n'a pas sendContinue, on peut l'ignorer ou l'implémenter plus tard

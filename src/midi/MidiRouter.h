@@ -104,6 +104,13 @@ public:
 
     void begin() override;
 
+    /* Le RTP-MIDI SORTANT (MESURES §175) : les envois sont deposes, et la
+     * boucle les emet juste avant de servir la session — une seule tache
+     * touche AppleMIDI. loopTask seulement. `rtpJetes` : ce que la file
+     * pleine a jete (256 places ; une boucle arretee des secondes). */
+    void emettreRtp();
+    static uint32_t rtpJetes();
+
     void sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) override;
     void sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) override;
     void sendControlChange(uint8_t channel, uint8_t control, uint8_t value) override;

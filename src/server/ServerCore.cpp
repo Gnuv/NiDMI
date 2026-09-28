@@ -3,6 +3,7 @@
 #include <freertos/semphr.h>
 #include "ServerCore.h"
 #include "../Globals.h"
+#include "../midi/MidiRouter.h"      // emettreRtp : le RTP sortant, emis par la boucle (§175)
 #include "../audio/AudioEngine.h"
 #include "WebDebugConsole.h"
 #include <ESPmDNS.h>
@@ -308,6 +309,7 @@ void ServerCore::update() {
      * bibliotheque depuis cette tache, pendant qu'async_tcp la modifiait de la
      * sienne (voir « LES ONGLETS », ServerCore.h, MESURES §171). */
     uint32_t tc = nidmi_section("rtpmidi");
+    g_midiRouter.emettreRtp();      // les envois deposes par les autres taches (§175)
     rtpMidiInstance.update();
     nidmi_chrono("rtpmidi", tc); tc = nidmi_section("bluetooth");
     bluetoothInstance.update();
