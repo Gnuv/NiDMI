@@ -1266,13 +1266,16 @@ void nidmi_begin() {
     
     // Initialiser RTP-MIDI
     serverCore.rtpMidi().begin(serverName.c_str());
-    /* Chaque entree note son passage pour la LED d'activite de l'app (§167) :
-     * un OU, rien de plus sur ce chemin. */
+    /* LE POINT D'ENTREE UNIQUE, pour le RTP aussi (MESURES §172). Ses notes
+     * n'allaient qu'aux composants (les LEDs) : ni scripts ni son — une note
+     * jouee par le reseau n'etait pas la meme que par le cable. Comme l'USB,
+     * elles passent par noteEntrante, qui applique la chaine puis joue et
+     * allume. Chaque entree note son passage pour la LED de l'app (§167). */
     serverCore.rtpMidi().setMidiInputHooks(
         [](uint8_t ch, uint8_t note, uint8_t vel) { Activite::noter(Activite::MIDI_RTP);
-                                                    g_componentManager.handleMidiNoteOn(ch, note, vel); },
+                                                    g_midiRouter.noteEntrante(ch, note, vel, vel == 0); },
         [](uint8_t ch, uint8_t note, uint8_t vel) { Activite::noter(Activite::MIDI_RTP);
-                                                    g_componentManager.handleMidiNoteOff(ch, note, vel); },
+                                                    g_midiRouter.noteEntrante(ch, note, vel, true); },
         [](uint8_t ch, uint8_t cc,   uint8_t val) { Activite::noter(Activite::MIDI_RTP);
                                                     g_midiRouter.ccEntrant(ch, cc, val); }
     );
@@ -1309,6 +1312,20 @@ void nidmi_begin() {
     Serial.print("  Bluetooth: "); Serial.println(serverCore.bluetooth().isInitialized() ? "Initialized" : "Failed");
     Serial.printf("Touch Enabled: %s\n", touchEnabled ? "true" : "false");
     Serial.println();
+
+    /* ── LA BOUCLE PASSE DEVANT LE SERVEUR WEB (MESURES §172) ──────────────
+     * loopTask etait a la priorite 1, sous le serveur web (async_tcp, 10) qui
+     * l'affamait : une page rechargee la bloquait 0,5 s, un panneau ouvert
+     * 79 ms. Elle porte pourtant ce qui doit tomber a l'heure et que rien
+     * d'autre ne porte : les minuteries des cues (le sequenceur de la carte),
+     * le RTP-MIDI et l'OSC entrants, les ecritures au silence, la WebSocket.
+     * Au-dessus du web, sous l'audio (11) : la boucle a 10, le web descend a 9
+     * — rien d'autre n'occupe ces rangs sur le coeur 1. Elle dort 1 ms par
+     * tour (§170) : le web garde tout le reste du coeur. C'est l'ordre du
+     * projet — audio, puis le jeu, puis l'interface. */
+    vTaskPrioritySet(nullptr, 10);
+    if (TaskHandle_t web = xTaskGetHandle("async_tcp")) vTaskPrioritySet(web, 9);
+    else NIDMI_WEB_LOG("[NiDMI] tache async_tcp introuvable : le serveur web garde sa priorite");
 }
 
 /* ── L'INTERVALLE ENTRE DEUX TOURS DE LA BOUCLE (MESURES §170) ─────────────

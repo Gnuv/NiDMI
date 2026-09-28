@@ -36,6 +36,11 @@
 #include <NiDMI.h>
 
 void setup() {
+    /* UN TAMPON D'EMISSION (MESURES §172) : sans lui, toute trace de plus de
+     * 128 octets (la FIFO de l'UART) bloquait la tache qui ecrivait, a
+     * 115 200 bauds — ~4 ms par changement de cue, dans la boucle. 1 Ko :
+     * l'ecriture rend la main, l'UART vide en tache de fond. Avant begin(). */
+    Serial.setTxBufferSize(1024);
     Serial.begin(115200);
     delay(100);
     

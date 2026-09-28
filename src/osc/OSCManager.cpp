@@ -280,102 +280,65 @@ bool OSCManager::sendOSCMessage(OSCMessage& msg) {
     return success;
 }
 
+/* Tout ce qui est arrive, au plus 8 paquets par tour : il n'en lisait qu'un.
+ * Et SANS TRACE (MESURES §172) : chaque paquet ecrivait ~300 octets sur le
+ * port serie — un vidage hexadecimal, l'adresse trois fois, la valeur — soit
+ * ~25 ms a 115 200 bauds, dont ~15 a attendre la FIFO de l'UART, dans la tache
+ * qui lisait. Un potentiometre OSC suffisait a figer la boucle. Seules les
+ * erreurs se disent encore. */
 void OSCManager::update() {
     if (!isEnabled() || !initialized) {
         return;
     }
-
-    // Vérifier s'il y a des paquets entrants
-    int packetSize = udp.parsePacket();
-    if (packetSize > 0) {
+    for (int paquets = 0; paquets < 8; paquets++) {
+        const int packetSize = udp.parsePacket();
+        if (packetSize <= 0) return;
         Activite::noter(Activite::OSC);
-        Serial.printf("[OSC] Paquet reçu: %d bytes\n", packetSize);
-        
-        // Lire le paquet entrant
+
         uint8_t buffer[256];
-        int len = udp.read(buffer, sizeof(buffer) - 1);
-        if (len > 0) {
-            buffer[len] = 0; // Null terminate
-            
-            // Debug: afficher les premiers bytes du buffer
-            Serial.printf("[OSC] Buffer brut (premiers 32 bytes): ");
-            for (int i = 0; i < len && i < 32; i++) {
-                Serial.printf("%02X ", buffer[i]);
-            }
-            Serial.println();
-            
-            // Debug: essayer de lire comme string (pour voir l'adresse)
-            Serial.printf("[OSC] Buffer comme string: '%s'\n", (char*)buffer);
-            
-            // Parser le message OSC
-            OSCMessage msg;
-            msg.fill(buffer, len);
-            
-            if (!msg.hasError()) {
-                // Essayer différentes méthodes pour obtenir l'adresse
-                const char* addr_ptr = msg.getAddress();
-                Serial.printf("[OSC] getAddress() retourne: '%s'\n", addr_ptr ? addr_ptr : "(null)");
-                
-                // Extraire l'adresse dans un buffer
-                char addressBuffer[64];
-                addressBuffer[0] = '\0';
-                msg.getAddress(addressBuffer, sizeof(addressBuffer));
-                Serial.printf("[OSC] getAddress(buffer) remplit: '%s'\n", addressBuffer);
-                
-                String address = String(addr_ptr ? addr_ptr : addressBuffer);
-                Serial.printf("[OSC] Message reçu: '%s'\n", address.c_str());
-                
-                // Appeler le callback si défini (avec ou sans valeur)
-                if (messageCallback) {
-                    float value = -1.0f; // -1 = sentinelle pour "pas de valeur" (tous les canaux)
-                    String arg_string = "";
-                    
-                    if (msg.size() > 0) {
-                        if (msg.isFloat(0)) {
-                            // Message avec valeur float
-                            value = msg.getFloat(0);
-                            Serial.printf("[OSC] Appel callback avec valeur float: %f\n", value);
-                        } else if (msg.isString(0)) {
-                            // Message avec argument string
-                            char strBuffer[64];
-                            msg.getString(0, strBuffer, sizeof(strBuffer));
-                            arg_string = String(strBuffer);
-                            Serial.printf("[OSC] Appel callback avec argument string: '%s'\n", arg_string.c_str());
-                        } else if (msg.isInt(0)) {
-                            // Message avec valeur(s) int
-                            // Format MIDI (3 int) : data1, data2, channel
-                            // Format simple (1 int) : value
-                            if (msg.size() >= 3 && msg.isInt(0) && msg.isInt(1) && msg.isInt(2)) {
-                                // Format MIDI : construire "param,channel" depuis data1 et channel
-                                int32_t data1 = msg.getInt(0);  // note/CC
-                                int32_t data2 = msg.getInt(1);  // velocity/value
-                                int32_t channel = msg.getInt(2); // canal MIDI
-                                value = (float)data2; // Utiliser data2 comme valeur principale
-                                arg_string = String((int)data1) + "," + String((int)channel);
-                                Serial.printf("[OSC] Format MIDI: data1=%d, data2=%d, channel=%d\n", 
-                                            (int)data1, (int)data2, (int)channel);
-                            } else {
-                                // Format simple (1 int)
-                                value = (float)msg.getInt(0);
-                                Serial.printf("[OSC] Appel callback avec valeur int: %d\n", (int)value);
-                            }
-                        } else {
-                            Serial.printf("[OSC] Appel callback avec argument de type inconnu, size=%d\n", msg.size());
-                        }
-                    } else {
-                        Serial.printf("[OSC] Appel callback sans argument (commande), size=%d\n", msg.size());
-                    }
-                    
-                    messageCallback(address, value, arg_string);
-                } else {
-                    Serial.printf("[OSC] ERREUR: callback non défini!\n");
-                }
-            } else {
-                Serial.printf("[OSC] ERREUR parsing message OSC: code=%d\n", msg.getError());
-            }
-        } else {
+        const int len = udp.read(buffer, sizeof(buffer) - 1);
+        if (len <= 0) {
             Serial.printf("[OSC] ERREUR: impossible de lire le paquet\n");
+            continue;
         }
+        buffer[len] = 0;
+
+        OSCMessage msg;
+        msg.fill(buffer, len);
+        if (msg.hasError()) {
+            Serial.printf("[OSC] ERREUR parsing message OSC: code=%d\n", msg.getError());
+            continue;
+        }
+        const char* addr_ptr = msg.getAddress();
+        char addressBuffer[64];
+        addressBuffer[0] = '\0';
+        if (!addr_ptr) msg.getAddress(addressBuffer, sizeof(addressBuffer));
+        const String address = String(addr_ptr ? addr_ptr : addressBuffer);
+
+        if (!messageCallback) continue;
+        float value = -1.0f;      // -1 = sentinelle pour "pas de valeur" (tous les canaux)
+        String arg_string = "";
+        if (msg.size() > 0) {
+            if (msg.isFloat(0)) {
+                value = msg.getFloat(0);
+            } else if (msg.isString(0)) {
+                char strBuffer[64];
+                msg.getString(0, strBuffer, sizeof(strBuffer));
+                arg_string = String(strBuffer);
+            } else if (msg.isInt(0)) {
+                // Format MIDI (3 int) : data1, data2, canal ; format simple (1 int) : valeur
+                if (msg.size() >= 3 && msg.isInt(1) && msg.isInt(2)) {
+                    const int32_t data1 = msg.getInt(0);   // note/CC
+                    const int32_t data2 = msg.getInt(1);   // velocite/valeur
+                    const int32_t channel = msg.getInt(2); // canal MIDI
+                    value = (float)data2;
+                    arg_string = String((int)data1) + "," + String((int)channel);
+                } else {
+                    value = (float)msg.getInt(0);
+                }
+            }
+        }
+        messageCallback(address, value, arg_string);
     }
 }
 

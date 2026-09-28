@@ -915,7 +915,9 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += chrono("execution", Chronos::execution, false);
         json += chrono("emission", Chronos::emission, false);
         json += chrono("impression", Chronos::impression, false);
-        json += chrono("traitement_usb", Chronos::traitementUsb, true);
+        json += chrono("traitement_usb", Chronos::traitementUsb, false);
+        json += chrono("retard_cue", Chronos::retardCue, false);
+        json += chrono("application_cue", Chronos::applicationCue, true);
         json += "}}";
         request->send(200, "application/json", json);
     });

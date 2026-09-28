@@ -2,9 +2,76 @@
 #include "../config/EcrituresDifferees.h"
 #include "../audio/AudioEngine.h"
 #include <LittleFS.h>
+#include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace ScriptStore {
 namespace {
+
+/* ── LES SCRIPTS GARDES EN PSRAM (MESURES §172) ─────────────────────────────
+ * Une cue relisait ses scripts en flash a chaque arrivee. Ouvrir un fichier
+ * LittleFS, c'est plusieurs lectures de metadonnees, et chacune suspend le
+ * cache des DEUX coeurs : 28 a 51 ms par cue, et autant de micro-arrets pour
+ * l'audio et le MIDI. Un script lu une fois reste ici, en PSRAM ; ecrire() et
+ * supprimer() le tiennent a jour — ce sont les seuls chemins d'ecriture des
+ * .nms (les ecritures differees ne font qu'y reporter ce qu'ecrire() a pose).
+ * Seules des taches y touchent. */
+constexpr int    kGardesMax = 32;
+constexpr size_t kNomMax    = 48;
+struct Garde { char nom[kNomMax]; char* texte; size_t n; };
+Garde* _gardes = nullptr;          // kGardesMax entrees, en PSRAM, prises au premier besoin
+int    _nGardes = 0;
+StaticSemaphore_t _tamponVerrouGardes;
+SemaphoreHandle_t _verrouGardes = xSemaphoreCreateMutexStatic(&_tamponVerrouGardes);
+struct VerrouGardes {
+  VerrouGardes()  { if (_verrouGardes) xSemaphoreTake(_verrouGardes, portMAX_DELAY); }
+  ~VerrouGardes() { if (_verrouGardes) xSemaphoreGive(_verrouGardes); }
+};
+
+Garde* _trouver(const char* nom) {
+  for (int i = 0; i < _nGardes; i++)
+    if (!strcmp(_gardes[i].nom, nom)) return &_gardes[i];
+  return nullptr;
+}
+
+void _oublier(const char* nom) {
+  VerrouGardes v;
+  Garde* g = _gardes ? _trouver(nom) : nullptr;
+  if (!g) return;
+  heap_caps_free(g->texte);
+  *g = _gardes[--_nGardes];          // la derniere prend sa place
+}
+
+void _garder(const char* nom, const char* texte, size_t n) {
+  if (strlen(nom) >= kNomMax) return;          // nom trop long : on relira la flash
+  char* copie = (char*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!copie) return;
+  if (n) memcpy(copie, texte, n);
+  VerrouGardes v;
+  if (!_gardes) {
+    _gardes = (Garde*)heap_caps_calloc(kGardesMax, sizeof(Garde), MALLOC_CAP_SPIRAM);
+    if (!_gardes) { heap_caps_free(copie); return; }
+  }
+  Garde* g = _trouver(nom);
+  if (!g) {
+    if (_nGardes >= kGardesMax) { heap_caps_free(copie); return; }   // plein : la flash
+    g = &_gardes[_nGardes++];
+    strlcpy(g->nom, nom, kNomMax);
+  } else {
+    heap_caps_free(g->texte);
+  }
+  g->texte = copie;
+  g->n = n;
+}
+
+bool _relire(const char* nom, String& contenu) {
+  VerrouGardes v;
+  Garde* g = _gardes ? _trouver(nom) : nullptr;
+  if (!g) return false;
+  contenu.concat(g->texte, (unsigned)g->n);
+  return true;
+}
 
 constexpr const char* PARTITION = "mapfs";     // meme partition que les echantillons
 constexpr const char* BASE      = "/mapfs";
@@ -158,12 +225,14 @@ bool ecrire(const char* nom, const String& contenu) {
   }
   if (!Differe::poserFichierCopie(_chemin(nom).c_str(), contenu.c_str(), contenu.length()))
     return false;
+  _garder(_chemin(nom).c_str(), contenu.c_str(), contenu.length());
   Serial.printf("[scripts] %s recu (%u o, flash au premier silence)\n", nom, (unsigned)contenu.length());
   return true;
 }
 
 bool supprimer(const char* nom) {
   if (!nom || !*nom || !monter() || !existe(nom)) return false;
+  _oublier(_chemin(nom).c_str());
   return Differe::supprimerFichier(_chemin(nom).c_str());
 }
 
@@ -178,14 +247,20 @@ bool lire(const char* nom, String& contenu) {
       return true;
     }
   }
-  File f = LittleFS.open(_chemin(nom), FILE_READ);
+  const String chemin = _chemin(nom);
+  if (_relire(chemin.c_str(), contenu)) return true;     // deja lu : la PSRAM (§172)
+  File f = LittleFS.open(chemin, FILE_READ);
   if (!f) return false;
-  // On lit d'un bloc : un .nms est petit, et un flux caractere par caractere
-  // sur LittleFS coute bien plus cher que la lecture elle-meme.
-  contenu.reserve(f.size() + 1);
-  while (f.available()) contenu += (char)f.read();
+  // D'UN BLOC : un .nms est petit (8 Ko au plus).
+  const size_t n = f.size();
+  char* tampon = (char*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!tampon) { f.close(); return false; }
+  const size_t lu = f.read((uint8_t*)tampon, n);
   f.close();
-  return true;
+  contenu.concat(tampon, (unsigned)lu);
+  if (lu == n) _garder(chemin.c_str(), tampon, n);
+  heap_caps_free(tampon);
+  return lu == n;
 }
 
 }  // namespace ScriptStore

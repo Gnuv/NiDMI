@@ -40,11 +40,6 @@ void MidiRouter::begin() {
     }
 }
 
-void MidiRouter::update() {
-    // Mise à jour RTP si nécessaire
-    serverCore.rtpMidi().update();
-}
-
 void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;

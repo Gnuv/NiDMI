@@ -36,6 +36,10 @@ extern Chrono emission;     // ses sorties : MIDI (USB, RTP), OSC
 extern Chrono impression;   // print(), graph() : journal, port serie, WebSocket
 // Un message MIDI USB entrant : sa chaine de scripts, puis le son et les LEDs.
 extern Chrono traitementUsb;
+// Le sequenceur (§172) : le retard d'une cue minutee sur son echeance, et ce
+// que coute l'application d'une cue (scripts, echantillons, moteur).
+extern Chrono retardCue;
+extern Chrono applicationCue;
 
 void razTout();
 

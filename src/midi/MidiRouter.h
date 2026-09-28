@@ -103,7 +103,6 @@ public:
     ~MidiRouter() override;
 
     void begin() override;
-    void update() override;
 
     void sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) override;
     void sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) override;

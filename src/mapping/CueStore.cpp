@@ -10,9 +10,24 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "../diag/Chronos.h"     // le retard des cues minutees, et ce que coute une cue (§172)
 
 namespace Cues {
 namespace {
+
+/* ── LE VERROU DU SEQUENCEUR (MESURES §172) ────────────────────────────────
+ * Deux taches le pilotent : la boucle, qui fait avancer les cues minutees, et
+ * le serveur web, par qui arrivent PLAY, STOP, GO, goto. Rien ne les separait,
+ * et appliquer une cue prend 30 a 50 ms (scripts lus en flash, echantillons
+ * armes) : une commande pouvait s'intercaler au milieu d'une autre. Toute
+ * fonction publique le prend ; recursif, car elles s'appellent entre elles
+ * (demarrer -> aller). Cree a l'initialisation statique, avant toute tache. */
+StaticSemaphore_t _tamponVerrouSeq;
+SemaphoreHandle_t _verrouSeq = xSemaphoreCreateRecursiveMutexStatic(&_tamponVerrouSeq);
+struct VerrouSeq {
+  VerrouSeq()  { if (_verrouSeq) xSemaphoreTakeRecursive(_verrouSeq, portMAX_DELAY); }
+  ~VerrouSeq() { if (_verrouSeq) xSemaphoreGiveRecursive(_verrouSeq); }
+};
 
 constexpr const char* PARTITION = "mapfs";
 constexpr const char* BASE      = "/mapfs";
@@ -454,7 +469,10 @@ bool ecrireTout(const String& contenuTexte) {
    * abandonnait, porte de silence fermee, pendant qu'un `goto` declenchait des
    * sons dans le vide. Trouve par le banc trig-wav (MESURES §136). */
   const int total = nombre();
-  if (_index >= total) _index = (total > 0) ? total - 1 : 0;
+  {
+    VerrouSeq verrou;
+    if (_index >= total) _index = (total > 0) ? total - 1 : 0;
+  }
   Serial.printf("[cues] liste recue : %u o, %d cues (flash au premier silence)\n", (unsigned)n, total);
   return true;
 }
@@ -483,8 +501,8 @@ String contenu() {
  * sa barre de progression — elle connait la duree — et se resynchronise a
  * chaque annonce.
  *
- * Appele depuis loopTask (aller/demarrer/arreter/suivant y sont tous), donc
- * `nidmi_ws_pousser` est sur : il ne fait qu'empiler dans une file statique. */
+ * Appele sous le verrou du sequenceur, depuis la boucle ou le serveur web :
+ * `nidmi_ws_pousser` ne fait qu'empiler dans une file, loopTask envoie. */
 static void _annoncer() {
   if (!nidmi_ws_quelqu_un_ecoute()) return;   // personne n'ecoute : rien a dire
   char trame[80];
@@ -497,18 +515,22 @@ static void _annoncer() {
 }
 
 bool aller(int index) {
+  VerrouSeq verrou;
   Cue c;
   if (!lire(index, c)) return false;
   _index = index;
   _dureeCourante = c.duree;
   _debutMs = millis();
   _enPause = false;          // changer de cue annule une pause en cours
+  const uint32_t t0 = micros();
   _appliquer(c);
+  Chronos::applicationCue.noter(micros() - t0);
   _annoncer();
   return true;
 }
 
 void demarrer() {
+  VerrouSeq verrou;
   /* REPRISE : on ne recharge pas la cue, on rend son temps. La recharger
    * relancerait son script (loadbang, etats remis a plat) et son moteur — une
    * reprise qui recommence n'est pas une reprise. */
@@ -565,6 +587,7 @@ void demarrer() {
  * LE MIDI ENTRANT continue aussi d'etre traite — c'est du jeu live, il n'a
  * jamais dependu du transport. */
 void pauser() {
+  VerrouSeq verrou;
   if (!_lecture) return;
   _ecouleMs = millis() - _debutMs;
   _enPause = true;
@@ -577,6 +600,7 @@ void pauser() {
 /* ARRET : lui ferme la porte. Depuis qu'il est le SEUL a la fermer, c'est ce
  * qui le distingue de la pause — pas une nuance de decompte. */
 void arreter() {
+  VerrouSeq verrou;
   _enPause = false;          // un arret franc oublie la position gelee
   _lecture = false;
   AudioEngine::couperSon();
@@ -586,6 +610,7 @@ void arreter() {
 }
 
 void suivant() {
+  VerrouSeq verrou;
   const int n = nombre();
   if (n <= 0) return;
   const int suiv = _index + 1;
@@ -595,6 +620,7 @@ void suivant() {
 }
 
 void boucle() {
+  VerrouSeq verrou;
   if (!_lecture || _dureeCourante <= 0.0f) return;   // 0 = infinie, on attend un GO
 
   /* L'AUTOMATION, bridee a 50 Hz. `boucle()` tourne a chaque tour de
@@ -609,17 +635,32 @@ void boucle() {
     _appliquerAutomation(t < 0.f ? 0.f : (t > 1.f ? 1.f : t));
   }
 
-  if ((maintenant - _debutMs) >= (uint32_t)(_dureeCourante * 1000.0f)) suivant();
+  const uint32_t duree = (uint32_t)(_dureeCourante * 1000.0f);
+  if ((maintenant - _debutMs) >= duree) {
+    /* LE RETARD SUR L'ECHEANCE (§172) : ce que la boucle a mis a voir que la
+     * cue etait finie. Il atteignait 0,5 s quand le serveur web l'affamait. */
+    const uint32_t echeance = _debutMs + duree;
+    const uint32_t retard = maintenant - echeance;
+    Chronos::retardCue.noter(retard * 1000u);
+    const int avant = _index;
+    suivant();
+    /* SANS DERIVE : la cue suivante part de l'ECHEANCE, pas de l'instant ou la
+     * boucle l'a vue — sinon chaque retard s'ajoutait aux suivants et une
+     * liste minutee derivait. Au-dela d'un quart de seconde (la carte etait
+     * arretee), on repart de maintenant : rattraper enchainerait des cues. */
+    if (_lecture && _index != avant && retard < 250) _debutMs = echeance;
+  }
 }
 
-bool  enLecture()   { return _lecture; }
+bool  enLecture()   { VerrouSeq verrou; return _lecture; }
 /* GELEE, ET PAS ARRETEE. Trois etats de transport, pas deux : sans ce drapeau
  * l'app deduisait la pause d'un decompte non nul — inference fausse pour une
  * cue infinie, qui ne decompte rien et paraissait donc arretee alors qu'elle
  * sonnait. La carte le DIT au lieu de le laisser deviner. */
-bool  enPause()     { return _enPause; }
-int   indexCourant(){ return _index; }
+bool  enPause()     { VerrouSeq verrou; return _enPause; }
+int   indexCourant(){ VerrouSeq verrou; return _index; }
 float restantSec() {
+  VerrouSeq verrou;
   if (_dureeCourante <= 0.0f) return 0.0f;         // cue infinie : rien a decompter
   /* EN PAUSE, LE DECOMPTE EXISTE ENCORE — il est gele. Rendre 0 faisait croire
    * a l'app que la cue etait finie, et sa barre de progression se vidait au
