@@ -993,8 +993,11 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
     if (verbe(seg, "del", a)) {
         const long ms = (long)valeurArg(a);
         if (ms <= 0) return true;                 // sans delai, on continue tout droit
-        differer(ctx, courant, e, horlogeDe(ctx) + (uint32_t)ms);
-        return false;
+        if (differer(ctx, courant, e, horlogeDe(ctx) + (uint32_t)ms)) return false;
+        /* FILE PLEINE (MESURES §174) : une valeur retardee se perd — mais une
+         * NOTE-OFF perdue, c'est une note bloquee. Elle passe donc TOUT DE
+         * SUITE : une note ecourtee plutot qu'une note tenue pour toujours. */
+        return e.type == Evt::NoteOff;
     }
 
     /* makenote([vel[, duree]]) — fabrique une NOTE a partir de la valeur qui
@@ -1020,7 +1023,10 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
             if (ms > 0) {
                 Evt off = e;
                 off.type = Evt::NoteOff; off.a = note; off.b = 0; off.canal = ch;
-                differer(ctx, courant, off, horlogeDe(ctx) + (uint32_t)ms);
+                /* FILE PLEINE (MESURES §174) : la note-off n'aurait jamais
+                 * suivi — une note bloquee. On n'emet donc pas la note-on :
+                 * une note manquee plutot qu'une note tenue (regle du §151). */
+                if (!differer(ctx, courant, off, horlogeDe(ctx) + (uint32_t)ms)) return false;
             }
             return true;
         }
