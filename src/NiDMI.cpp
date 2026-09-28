@@ -603,6 +603,72 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     }
 }
 
+/* ── LES IMPRESSIONS DES SCRIPTS, DEPOSEES PUIS DRAINEES (MESURES §173) ───
+ * Voir le rappel pose par surImpression (nidmi_setup). La file est en PSRAM
+ * (seules des taches y touchent) ; pleine, un enregistrement est JETE sans
+ * attendre — ce sont des traces et des courbes, pas du MIDI : « perdre des
+ * points de courbe est correct ; bloquer la tache MIDI ne l'est pas ». */
+namespace {
+struct ImpressionDeposee {
+    float   valeur;
+    uint8_t montre, pipe, seg;
+    char    origine[12];
+    char    etiquette[32];
+};
+constexpr UBaseType_t kImpressionsMax = 64;
+StaticQueue_t g_impressionsTcb;
+QueueHandle_t g_impressions = nullptr;
+volatile uint32_t g_impressionsJetees = 0;
+}  // namespace
+
+static void impressionsInit() {
+    if (g_impressions) return;
+    const size_t taille = kImpressionsMax * sizeof(ImpressionDeposee);
+    uint8_t* stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (stock) g_impressions = xQueueCreateStatic(kImpressionsMax, sizeof(ImpressionDeposee),
+                                                  stock, &g_impressionsTcb);
+}
+
+static void impressionDeposer(const char* origine, const char* etiquette, float valeur,
+                              uint8_t montre, uint8_t pipe, uint8_t seg) {
+    if (!g_impressions) return;
+    ImpressionDeposee d;
+    d.valeur = valeur; d.montre = montre; d.pipe = pipe; d.seg = seg;
+    strlcpy(d.origine, (origine && origine[0]) ? origine : "?", sizeof d.origine);
+    strlcpy(d.etiquette, etiquette ? etiquette : "", sizeof d.etiquette);
+    if (xQueueSend(g_impressions, &d, 0) != pdTRUE) g_impressionsJetees = g_impressionsJetees + 1;
+}
+
+/* loopTask : formate, journalise, pousse. Au plus 16 par tour. */
+static void impressionsDrainer() {
+    if (!g_impressions) return;
+    ImpressionDeposee d;
+    char trame[112];
+    for (uint8_t k = 0; k < 16 && xQueueReceive(g_impressions, &d, 0) == pdTRUE; k++) {
+        /* L'ORIGINE D'ABORD : « pin:5 », « map:2 » ou « essai », puis
+         * l'etiquette, puis la valeur — sans elle l'app attribuait tout au bloc
+         * map, les print() des broches compris. */
+        if (d.montre == MappingEngine::MontreNombre) {
+            /* La POSITION voyage : « pipeline:segment », pour annoter la bonne
+             * boite de l'editeur (le `${pi}:${si}` du moteur de reference). */
+            snprintf(trame, sizeof(trame), "NMS_NUM:%s\x1f%s\x1f%.4f\x1f%u:%u",
+                     d.origine, d.etiquette, d.valeur, (unsigned)d.pipe, (unsigned)d.seg);
+        } else if (d.montre == MappingEngine::MontreCourbe) {
+            /* PAS dans le journal texte : une valeur continue qui defile en
+             * chiffres noie le journal — c'est tout l'objet de graph(). */
+            snprintf(trame, sizeof(trame), "NMS_GRAPH:%s\x1f%s\x1f%.4f",
+                     d.origine, d.etiquette, d.valeur);
+        } else {
+            /* Le journal de bord, TOUJOURS : c'est l'historique qu'un client
+             * rejouera en s'abonnant plus tard. */
+            NIDMI_WEB_LOG("[%s] %s : %.4f", d.origine, d.etiquette, d.valeur);
+            snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
+                     d.origine, d.etiquette, d.valeur);
+        }
+        if (nidmi_ws_quelqu_un_ecoute()) nidmi_ws_pousser(trame);
+    }
+}
+
 // Les etats, lus par r("sys.<nom>"). Publies a chaque changement seulement.
 static void publierEtatsSys(){
     static int8_t wifi = -1, cable = -1, autonome = -1, prio = -1;
@@ -1187,54 +1253,26 @@ void nidmi_begin() {
      * _msePrintLog n'est donc jamais appele, et la console de la zone I/O
      * restait vide alors que le script tournait tres bien. La carte pousse
      * maintenant une trame « NMS_PRINT:<etiquette>\x1f<valeur> » que l'app
-     * affiche dans la console du bloc concerne. */
+     * affiche dans la console du bloc concerne.
+     *
+     * LE RAPPEL NE FAIT QUE DEPOSER (MESURES §173). Il s'execute dans la
+     * tache qui fait tourner le script — MidiTask, le plus souvent — et il y
+     * formatait deux fois un flottant, ecrivait le journal (port serie,
+     * historique, memoire RTC) et poussait la trame : ~0,6 ms a chaque
+     * print(), pendant lesquelles une note entrante attendait. Il depose
+     * desormais un enregistrement de 52 octets ; la boucle formate, journalise
+     * et pousse (impressionsDrainer). */
+    impressionsInit();
     MappingEngine::surImpression([](const char* origine, const char* etiquette,
                                    float valeur, uint8_t montre,
                                    uint8_t pipe, uint8_t seg) {
         /* Ce que coute une impression a la tache MIDI (§170), jusqu'au retour. */
         struct Chrono { const uint32_t t0 = micros(); ~Chrono() { Chronos::impression.noter(micros() - t0); } } chrono;
-        /* L'ORIGINE D'ABORD. La trame ne portait que l'etiquette et la valeur :
-         * l'app ne pouvait donc pas savoir QUI avait imprime, et attribuait
-         * tout au bloc map dont le script tourne sur la carte — les print() des
-         * broches compris. Trois champs desormais : « pin:5 », « map:2 » ou
-         * « essai », puis l'etiquette, puis la valeur. */
-        const char* org = (origine && origine[0]) ? origine : "?";
-        char trame[112];
-        /* ⚠️ CE RAPPEL S'EXECUTE DANS MidiTask, SUR LE COEUR 0. Il ne doit donc
-         * PAS toucher a la WebSocket : envoyer, c'est du reseau, et le reseau
-         * n'a rien a faire sur le chemin du MIDI (ServerCore.h, « LES
-         * ONGLETS »). On POUSSE dans une file, loopTask draine. Le nombre
-         * d'onglets, lui, se lit sans risque de partout. */
         /* NI COURBE NI NOMBRE N'ONT D'HISTORIQUE : s'ils ne partent pas, ils
-         * n'existent pas. On sort donc AVANT de formater — en headless ce
+         * n'existent pas. On sort donc AVANT meme de deposer — en headless ce
          * chemin ne coute rien du tout. Seul print() garde une trace. */
-        const bool vivant = (montre != MappingEngine::MontreTexte);
-        if (vivant && !nidmi_ws_quelqu_un_ecoute()) return;
-        if (montre == MappingEngine::MontreNombre) {
-            /* La POSITION voyage : « pipeline:segment ». C'est elle qui permet
-             * a l'editeur d'annoter la bonne boite, exactement comme le
-             * `${pi}:${si}` du moteur de reference. */
-            snprintf(trame, sizeof(trame), "NMS_NUM:%s\x1f%s\x1f%.4f\x1f%u:%u",
-                     org, etiquette, valeur, (unsigned)pipe, (unsigned)seg);
-        } else if (montre == MappingEngine::MontreCourbe) {
-            /* PAS dans le journal texte : c'est tout l'objet de graph(). Une
-             * valeur continue qui defile en chiffres noie le journal — vingt
-             * lignes par seconde pour un potentiometre qui tremble. */
-            snprintf(trame, sizeof(trame), "NMS_GRAPH:%s\x1f%s\x1f%.4f",
-                     org, etiquette, valeur);
-        } else {
-            /* Le journal de bord AVANT la garde, et toujours : c'est
-             * l'historique qu'un client rejouera en s'abonnant plus tard. Une
-             * trace qu'on n'emet pas n'est pas une trace qu'on efface. */
-            NIDMI_WEB_LOG("[%s] %s : %.4f", org, etiquette, valeur);
-            snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
-                     org, etiquette, valeur);
-        }
-        /* Personne n'ecoute : on s'arrete la. Sinon on POUSSE — file pleine =
-         * le client ne suit pas, la trame est jetee sans bloquer cette tache.
-         * Empiler pour ne rien perdre, c'est perdre tout. */
-        if (!nidmi_ws_quelqu_un_ecoute()) return;
-        nidmi_ws_pousser(trame);
+        if (montre != MappingEngine::MontreTexte && !nidmi_ws_quelqu_un_ecoute()) return;
+        impressionDeposer(origine, etiquette, valeur, montre, pipe, seg);
     });
 
     /* MIDI USB ENTRANT -> moteur audio.
@@ -1502,6 +1540,7 @@ void nidmi_loop() {
     /* Le resume de ce que la carte a recu (§167) : AVANT le drainage, pour
      * partir dans ce meme tour. Au plus une trame toutes les 150 ms. */
     Activite::publier(millis());
+    impressionsDrainer();           // les print()/graph() des scripts (§173)
     nidmi_ws_drainer();
     nidmi_chrono("ws", tc); tc = nidmi_section("journal");
     nidmi_web_debug_pump();

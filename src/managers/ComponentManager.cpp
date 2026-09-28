@@ -923,17 +923,31 @@ void ComponentManager::midiTaskLoop() {
          * faut savoir ce qui reste. Mesure, pas estimation. */
         g_margePileMidi = (uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
 
+        /* ── LE MIDI ENTRANT PASSE ENTRE LES ETAPES DU TOUR (MESURES §173) ──
+         * Un message arrive pendant le tour attendait la fin du tour ENTIER :
+         * l'horloge des scripts, les differes, les multiplexeurs, toutes les
+         * broches — jusqu'a ~3,7 ms sous charge. Il passe desormais entre deux
+         * etapes, et avant chaque broche : il n'attend plus que l'etape en
+         * cours. Les chronos des etapes n'en comptent pas le temps. */
+        UsbMidiManager& usb = serverCore.usbMidi();
         uint32_t tEtape = micros();
         g_midiRouter.battreHorloge(millis());
-        Chronos::horloge.noter(micros() - tEtape); tEtape = micros();
+        Chronos::horloge.noter(micros() - tEtape);
+        usb.traiterEntree(0);
+        tEtape = micros();
         /* Et la file des differes — del(), makenote()... — une seule fois pour
          * TOUS les scripts : broches comprises, qui n'ont pas d'horloge a elles. */
         MappingEngine::battreDifferes(millis(), &g_midiRouter);
-        Chronos::differes.noter(micros() - tEtape); tEtape = micros();
+        Chronos::differes.noter(micros() - tEtape);
+        usb.traiterEntree(0);
+        tEtape = micros();
 
         // Envoyer les mises à jour MIDI des multiplexeurs
         mux_manager.sendMidiUpdates(midi_sender);
-        Chronos::mux.noter(micros() - tEtape); tEtape = micros();
+        Chronos::mux.noter(micros() - tEtape);
+        usb.traiterEntree(0);
+        tEtape = micros();
+        uint32_t tMidiEntreBroches = 0;   // soustrait du chrono des composants
         
         // Traiter les composants directs (potentiomètres, boutons, touch, etc.)
         // Round-robin: on ne traite qu'un sous-ensemble par cycle pour éviter de bloquer le CPU
@@ -952,6 +966,12 @@ void ComponentManager::midiTaskLoop() {
             while (processed < MAX_COMPONENTS_PER_CYCLE && processed < total) {
                 if (index >= total) {
                     index = 0;
+                }
+                /* Avant chaque broche, le MIDI arrive pendant la precedente. */
+                if (processed) {
+                    const uint32_t tm = micros();
+                    usb.traiterEntree(0);
+                    tMidiEntreBroches += micros() - tm;
                 }
                 
                 // Vérifier que le composant est valide avant de le traiter
@@ -1153,7 +1173,7 @@ void ComponentManager::midiTaskLoop() {
             
             next_component_index = index;
         }
-        Chronos::composants.noter(micros() - tEtape);
+        Chronos::composants.noter(micros() - tEtape - tMidiEntreBroches);
         // La periode suivante s'attend EN TETE de boucle, sur la file d'entree.
     }
 }
