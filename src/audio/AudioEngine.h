@@ -207,6 +207,12 @@ bool declencherEchantillon(const char* nom, bool boucle = false,
 uint8_t fixerGainBloc(uint32_t bloc, float gain);
 /* Le bloc que le clavier joue en mode MIDI, et son volume. */
 void fixerClavier(uint32_t bloc, float gain);
+/* LES VU-METRES DES PISTES DE L'APP (MESURES §169) : un onglet ecoute-t-il ?
+ * (sans lui, les voix ne mesurent rien) ; puis les cretes par bloc depuis la
+ * derniere lecture, apres le volume de sortie, remises a zero. Rend le nombre
+ * de blocs ecrits, au plus `max`. 32 767 = pleine echelle. */
+void fixerMesureVu(bool oui);
+uint8_t releverCretes(uint32_t* blocs, uint16_t* cretesG, uint16_t* cretesD, uint8_t max);
 void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
 void arreterEchantillon();                       // toutes les voix
 /* QUI DECLENCHE. `true` (defaut) : la cue, a la hauteur du fichier — l'original.

@@ -254,6 +254,8 @@ struct VoixEch {
   uint32_t bloc   = 0;        // bloc de la composition qui l'a lancee, 0 = aucun
   bool     boucle = false;
   uint32_t age    = 0;        // ordre de declenchement, pour le vol de voix
+  uint16_t picG   = 0;        // cretes depuis la derniere lecture (vu-metres, §169)
+  uint16_t picD   = 0;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
@@ -271,6 +273,12 @@ static inline float _borneGain(float g) {
 }
 VoixEch  voixEch[VOIX_MAX];
 uint32_t voixHorloge = 0;
+/* LES VU-METRES DE L'APP (MESURES §169) : chaque voix retient sa crete, que
+ * loopTask releve (releverCretes). SEULEMENT quand un onglet ecoute — sans lui,
+ * rien n'est mesure, pas seulement rien n'est envoye — et porte ouverte : une
+ * voix qui tourne derriere la porte fermee ne s'entend pas, elle ne doit pas
+ * s'afficher. */
+volatile bool mesureVu = false;
 
 /* Reste vrai tant qu'au moins une voix sonne — c'est ce que lit la porte de
  * silence et ce que « niveau » reflete. */
@@ -300,6 +308,7 @@ void rendreSample() {
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
+  const bool mesurer = mesureVu && !gSilence;
   for (size_t i = 0; i < FRAMES; i++) {
     int32_t g = 0, d = 0;
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
@@ -331,8 +340,16 @@ void rendreSample() {
       } else {
         eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
       }
-      g += (int32_t)(eg * vo.gain);
-      d += (int32_t)(ed * vo.gain);
+      const int32_t sg = (int32_t)(eg * vo.gain), sd = (int32_t)(ed * vo.gain);
+      g += sg; d += sd;
+      if (mesurer) {
+        /* La crete de la voix, APRES son gain : ce qu'elle apporte au melange.
+         * Au-dela de 32 767 (gain de fader > 1), elle sature : le vu-metre
+         * l'affichera plein, en rouge. */
+        const int32_t ag = (sg < 0) ? -sg : sg, ad = (sd < 0) ? -sd : sd;
+        if (ag > vo.picG) vo.picG = (uint16_t)((ag > 65535) ? 65535 : ag);
+        if (ad > vo.picD) vo.picD = (uint16_t)((ad > 65535) ? 65535 : ad);
+      }
       vo.pos += vo.pas;
     }
     if (g >  32767) g =  32767; else if (g < -32768) g = -32768;
@@ -966,6 +983,7 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   vo->bloc   = bloc;
   vo->boucle = boucle;
   vo->age    = ++voixHorloge;
+  vo->picG   = 0; vo->picD = 0;        // une voix volee ne garde pas la crete d'avant
   __sync_synchronize();
   vo->actif  = true;
   return true;
@@ -986,6 +1004,38 @@ uint8_t fixerGainBloc(uint32_t bloc, float gain) {
     if (vo.actif && vo.bloc == bloc) { vo.cible = vo.velo * g; n++; }
   }
   if (bloc == blocClavier) gainClavier = g;
+  return n;
+}
+
+/* LES VU-METRES (MESURES §169). `fixerMesureVu` : loopTask dit si un onglet
+ * ecoute ; sans lui, les voix ne mesurent rien. `releverCretes` : la plus haute
+ * valeur de chaque voix depuis la derniere lecture, rangee par BLOC (plusieurs
+ * voix d'un meme bloc : la plus haute), apres le volume de sortie. Remet les
+ * cretes a zero. Un bloc muet n'y figure pas. Lecture et remise se croisent
+ * sans verrou avec la tache audio : une crete peut s'y perdre, un vu-metre ne
+ * s'en apercoit pas. */
+void fixerMesureVu(bool oui) { mesureVu = oui; }
+
+uint8_t releverCretes(uint32_t* blocs, uint16_t* cretesG, uint16_t* cretesD, uint8_t max) {
+  uint8_t n = 0;
+  const float sortie = gVolume;
+  for (uint8_t i = 0; i < VOIX_MAX; i++) {
+    VoixEch& vo = voixEch[i];
+    const uint16_t pg = vo.picG, pd = vo.picD;
+    if (!pg && !pd) continue;
+    vo.picG = 0; vo.picD = 0;
+    if (!vo.bloc) continue;
+    const uint16_t g = (uint16_t)fminf(65535.f, pg * sortie);
+    const uint16_t d = (uint16_t)fminf(65535.f, pd * sortie);
+    uint8_t k = 0;
+    while (k < n && blocs[k] != vo.bloc) k++;
+    if (k == n) {
+      if (n >= max) continue;
+      blocs[n] = vo.bloc; cretesG[n] = 0; cretesD[n] = 0; n++;
+    }
+    if (g > cretesG[k]) cretesG[k] = g;
+    if (d > cretesD[k]) cretesD[k] = d;
+  }
   return n;
 }
 
