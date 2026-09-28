@@ -1303,6 +1303,11 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         /* Le RTP sortant, depose puis emis par la boucle (§175) : ce que sa
          * file pleine a jete. */
         json += ",\"rtp_sortant\":{\"jetes\":" + String((unsigned long)MidiRouter::rtpJetes()) + "}";
+        /* L'OSC des scripts, depose puis emis par la boucle (§176). */
+        uint32_t od = 0, oe = 0, oj = 0;
+        ComponentManager::statsOscScripts(od, oe, oj);
+        json += ",\"osc_scripts\":{\"deposes\":" + String((unsigned long)od)
+              + ",\"emis\":" + String((unsigned long)oe) + ",\"jetes\":" + String((unsigned long)oj) + "}";
 
         /* La borne par broche, pour que le client n'ait pas a la recopier :
          * elle est deja publiee par /api/pins/caps, et deux copies d'un meme

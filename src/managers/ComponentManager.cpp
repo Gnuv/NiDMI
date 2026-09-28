@@ -7,6 +7,7 @@
 #include <Arduino.h> // For Serial.printf
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <esp_heap_caps.h>
 #include "../server/ServerCore.h"
 #include "../osc/OSCQueue.h"
 #include "../diag/Activite.h"   // la LED d'activite de l'app (MESURES §167)
@@ -62,6 +63,51 @@ ComponentManager::~ComponentManager() {
     clearAll();
 }
 
+/* ── L'OSC DES SCRIPTS PASSE PAR LA BOUCLE (MESURES §176) ─────────────────
+ * osc.out() emettait depuis la tache du script — MidiTask le plus souvent —
+ * sur l'objet UDP d'OSCManager, que la boucle lit au meme moment : beginPacket()
+ * pose le destinataire dans l'objet, parsePacket() y ecrit l'expediteur du
+ * paquet recu — un osc.out() surpris entre les deux partait chez l'expediteur.
+ * Et l'octet d'hote changeait la cible le temps d'un envoi. Le rappel DEPOSE
+ * (file PSRAM de 32, jamais bloquante) ; la boucle emet juste apres avoir lu
+ * l'OSC entrant (emettreOscScripts). Une seule tache touche l'objet. */
+namespace {
+struct EnvoiOscScript {
+    char    adresse[MappingEngine::MAX_ADRESSE_OSC];
+    float   args[8];
+    uint8_t n, hote;
+};
+constexpr UBaseType_t kEnvoisOscMax = 32;
+StaticQueue_t g_fileOscTcb;
+QueueHandle_t g_fileOsc = nullptr;
+volatile uint32_t g_oscScriptsDeposes = 0, g_oscScriptsEmis = 0, g_oscScriptsJetes = 0;
+}  // namespace
+
+void ComponentManager::statsOscScripts(uint32_t& deposes, uint32_t& emis, uint32_t& jetes) {
+    deposes = g_oscScriptsDeposes; emis = g_oscScriptsEmis; jetes = g_oscScriptsJetes;
+}
+
+void ComponentManager::emettreOscScripts() {
+    if (!g_fileOsc) return;
+    EnvoiOscScript e;
+    OSCManager& o = osc_manager;
+    for (int k = 0; k < 16 && xQueueReceive(g_fileOsc, &e, 0) == pdTRUE; k++) {
+        const String adresse(e.adresse);
+        g_oscScriptsEmis = g_oscScriptsEmis + 1;
+        if (!e.hote) { o.sendMultiFloat(adresse, e.args, e.n); continue; }
+        /* Octet d'hote : le meme reseau que la cible configuree, dernier octet
+         * substitue. Le moteur de reference y lit 127.0.0.N — un poste de
+         * travail ; ici la lecture qui a un sens est « le voisin de la cible ». */
+        const String cible = o.getTargetIP();
+        const int point = cible.lastIndexOf('.');
+        if (point < 0) { o.sendMultiFloat(adresse, e.args, e.n); continue; }
+        const uint16_t port = o.getTargetPort();
+        o.setTarget(cible.substring(0, point + 1) + String((int)e.hote), port);
+        o.sendMultiFloat(adresse, e.args, e.n);
+        o.setTarget(cible, port);
+    }
+}
+
 void ComponentManager::begin(MidiSender* sender) {
     midi_sender = sender;
     telemetryQueue = xQueueCreate(32, sizeof(TelemetryWsMsg));  // 8->32 : moins d'overflow sur capteurs actifs
@@ -70,23 +116,25 @@ void ComponentManager::begin(MidiSender* sender) {
     /* Le TRANSPORT de osc.out(). Le moteur de script ne connait aucun
      * transport : on le lui pose, comme l'impression. Le banc de conformite ne
      * le pose pas — une epreuve n'arrose pas le reseau de l'usager. */
+    if (!g_fileOsc) {
+        uint8_t* stock = (uint8_t*)heap_caps_malloc(kEnvoisOscMax * sizeof(EnvoiOscScript),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (stock) g_fileOsc = xQueueCreateStatic(kEnvoisOscMax, sizeof(EnvoiOscScript), stock, &g_fileOscTcb);
+    }
     MappingEngine::surOsc([](const char* adresse, const float* args, int n,
                              uint8_t hote) {
-        OSCManager& o = g_componentManager.osc();
-        float copie[8];
-        if (n > (int)(sizeof copie / sizeof copie[0])) n = sizeof copie / sizeof copie[0];
-        for (int i = 0; i < n; i++) copie[i] = args[i];
-        if (!hote) { o.sendMultiFloat(String(adresse), copie, n); return; }
-        /* Octet d'hote : le meme reseau que la cible configuree, dernier octet
-         * substitue. Le moteur de reference y lit 127.0.0.N — un poste de
-         * travail ; ici la lecture qui a un sens est « le voisin de la cible ». */
-        const String cible = o.getTargetIP();
-        const int point = cible.lastIndexOf('.');
-        if (point < 0) { o.sendMultiFloat(String(adresse), copie, n); return; }
-        const uint16_t port = o.getTargetPort();
-        o.setTarget(cible.substring(0, point + 1) + String((int)hote), port);
-        o.sendMultiFloat(String(adresse), copie, n);
-        o.setTarget(cible, port);
+        if (!g_fileOsc) return;
+        EnvoiOscScript e;
+        strlcpy(e.adresse, adresse ? adresse : "", sizeof e.adresse);
+        if (n > (int)(sizeof e.args / sizeof e.args[0])) n = sizeof e.args / sizeof e.args[0];
+        if (n < 0) n = 0;
+        for (int i = 0; i < n; i++) e.args[i] = args[i];
+        e.n = (uint8_t)n;
+        e.hote = hote;
+        /* File pleine : l'envoi est jete sans attendre (de l'UDP, perte par
+         * nature) — la tache MIDI ne se bloque pas pour le reseau. */
+        if (xQueueSend(g_fileOsc, &e, 0) != pdTRUE) g_oscScriptsJetes = g_oscScriptsJetes + 1;
+        else g_oscScriptsDeposes = g_oscScriptsDeposes + 1;
     });
 
     /* Puis charger les configs des pins */
@@ -219,6 +267,8 @@ void ComponentManager::update() {
     
     // Traiter les messages OSC entrants (commandes de calibrage)
     osc_manager.update();
+    // Puis l'OSC que les scripts ont depose (§176) : la meme tache, le meme objet UDP.
+    emettreOscScripts();
     
     // Les multiplexeurs sont maintenant lus par la tâche FreeRTOS sur Core 0
     // Seulement envoyer les batches OSC si la sortie OSC globale est activée (NVS osc_out_all)

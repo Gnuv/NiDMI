@@ -118,6 +118,10 @@ public:
     
     void begin(MidiSender* sender);
     void update();
+    /* L'OSC des scripts, depose par le rappel de osc.out() et emis par la
+     * boucle, apres la lecture de l'OSC entrant (MESURES §176). loopTask. */
+    void emettreOscScripts();
+    static void statsOscScripts(uint32_t& deposes, uint32_t& emis, uint32_t& jetes);
     void reloadConfigs();
     void syncOSCConfig();
     // Gestion des composants

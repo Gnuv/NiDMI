@@ -6,9 +6,14 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-// Structure pour les messages OSC en queue
+// Structure pour les messages OSC en queue.
+/* A PLAT (MESURES §176) : une file FreeRTOS copie ses elements OCTET PAR OCTET.
+ * L'adresse etait une String : au-dela de 14 caractères elle pointe le tas, la
+ * copie en file gardait ce pointeur, l'original le rendait aussitot — et la
+ * lecture le rendait une seconde fois. Les adresses par defaut (« /ctl »)
+ * tenaient dans la String elle-meme : le defaut ne s'etait pas vu. */
 struct OSCMessageItem {
-    String address;
+    char address[48];
     float value;
     float value2; // Deuxième valeur float (pour canal MUX)
     uint8_t data1;
@@ -60,6 +65,8 @@ private:
     
 private:
     QueueHandle_t messageQueue;
+    StaticQueue_t messageQueueTcb;   // la structure en RAM interne, le stockage en PSRAM
+    uint8_t* stockage = nullptr;     // pris une fois, garde d'un begin() a l'autre
     WiFiUDP udp;
     String targetIP;
     uint16_t targetPort;
