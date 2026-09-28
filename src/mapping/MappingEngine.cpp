@@ -11,6 +11,9 @@
 #include "../midi/MidiSender.h"
 #include "../server/ServerCore.h"
 #include "../server/ServerCallbacks.h"   // nidmi_sys_recevoir : s("sys.<nom>")
+#include "../diag/Activite.h"            // la LED d'activite de l'app (MESURES §167)
+#include <stdlib.h>
+#include <string.h>
 #endif
 
 // INITIALISATION DES STATICS (Obligatoire dans le .cpp)
@@ -1503,6 +1506,14 @@ void MappingEngine::executerCapteur(const char* script, const float* valeurs,
                                     Etat* etats, int nEtats, const float* bruts,
                                     const char* origine) {
     if (!script || script[0] == '\0' || !valeurs || nValeurs <= 0) return;
+
+    /* UNE BROCHE QUI DONNE UNE VALEUR A SON SCRIPT est une entree qui recoit :
+     * la LED d'activite de l'app (§167). Le point commun a tous les capteurs en
+     * mode script — ils ne datent pas tous leur valeur (`last_telemetry_ts`,
+     * que le potentiometre ne pose qu'en balayage de notes). L'origine dit la
+     * broche : « pin:<gpio> », posee par chaque processeur. */
+    if (origine && !strncmp(origine, "pin:", 4))
+        Activite::noterBroche((uint8_t)atoi(origine + 4));
 
     Evenement e;
     e.type = Evenement::Capteur;       // sans famille : aucun passage transparent

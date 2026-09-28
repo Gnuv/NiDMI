@@ -20,6 +20,7 @@
 #include "config/EcrituresDifferees.h"
 #include "diag/SurveillantFlash.h"
 #include "diag/JournalAvant.h"
+#include "diag/Activite.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -1262,10 +1263,15 @@ void nidmi_begin() {
     
     // Initialiser RTP-MIDI
     serverCore.rtpMidi().begin(serverName.c_str());
+    /* Chaque entree note son passage pour la LED d'activite de l'app (§167) :
+     * un OU, rien de plus sur ce chemin. */
     serverCore.rtpMidi().setMidiInputHooks(
-        [](uint8_t ch, uint8_t note, uint8_t vel) { g_componentManager.handleMidiNoteOn(ch, note, vel); },
-        [](uint8_t ch, uint8_t note, uint8_t vel) { g_componentManager.handleMidiNoteOff(ch, note, vel); },
-        [](uint8_t ch, uint8_t cc,   uint8_t val) { g_midiRouter.ccEntrant(ch, cc, val); }
+        [](uint8_t ch, uint8_t note, uint8_t vel) { Activite::noter(Activite::MIDI_RTP);
+                                                    g_componentManager.handleMidiNoteOn(ch, note, vel); },
+        [](uint8_t ch, uint8_t note, uint8_t vel) { Activite::noter(Activite::MIDI_RTP);
+                                                    g_componentManager.handleMidiNoteOff(ch, note, vel); },
+        [](uint8_t ch, uint8_t cc,   uint8_t val) { Activite::noter(Activite::MIDI_RTP);
+                                                    g_midiRouter.ccEntrant(ch, cc, val); }
     );
     NIDMI_WEB_LOG("[MEM] apres RTP-MIDI: %d\n", (int)ESP.getFreeHeap());
     
@@ -1447,6 +1453,9 @@ void nidmi_loop() {
      * que ws.cleanupClients() de serverCore.update(). Tout le reste du firmware
      * POUSSE dans la file. Voir ServerCore.h. */
     tc = nidmi_section("ws");
+    /* Le resume de ce que la carte a recu (§167) : AVANT le drainage, pour
+     * partir dans ce meme tour. Au plus une trame toutes les 150 ms. */
+    Activite::publier(millis());
     nidmi_ws_drainer();
     nidmi_chrono("ws", tc); tc = nidmi_section("journal");
     nidmi_web_debug_pump();

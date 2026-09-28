@@ -13,7 +13,7 @@
  * les dernieres lignes des surveillants — l'audio (« [audio] », bloc lent),
  * le lien du cable (« [usbnet] », lien mort) —, les dernieres lignes tout
  * court, et les compteurs du son. Le demarrage suivant les met a
- * l'abri : /api/diag/avant, Reglages → Etat de la carte, et la console, qui
+ * l'abri : /api/diag/avant, panneau Carte → Etat de la carte, et la console, qui
  * les rejoue en tete de son historique. */
 namespace JournalAvant {
 

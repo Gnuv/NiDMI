@@ -4,6 +4,7 @@
 #include "OSCManager.h"
 #include <WiFi.h>
 #include "../server/ServerCore.h"   // LectureRadio : lire le WiFi sans courir apres une transition
+#include "../diag/Activite.h"         // la LED d'activite de l'app (MESURES §167)
 
 OSCManager::OSCManager() : 
     targetIP(""),
@@ -287,6 +288,7 @@ void OSCManager::update() {
     // Vérifier s'il y a des paquets entrants
     int packetSize = udp.parsePacket();
     if (packetSize > 0) {
+        Activite::noter(Activite::OSC);
         Serial.printf("[OSC] Paquet reçu: %d bytes\n", packetSize);
         
         // Lire le paquet entrant

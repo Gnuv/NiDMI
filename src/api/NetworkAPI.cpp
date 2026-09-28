@@ -139,7 +139,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
 
     /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand
      * l'hote laisse le cable « inactive » sans jamais le reactiver (§153).
-     * Coupe AUSSI le MIDI USB une a deux secondes — geste manuel (Reglages →
+     * Coupe AUSSI le MIDI USB une a deux secondes — geste manuel (panneau
      * Carte → Reseau), jamais automatique. Executee par nidmi_loop dans la
      * seconde ; ici on ne fait que la demander. */
     server.on("/api/reseau/cable/relancer", HTTP_POST, [](AsyncWebServerRequest *request){
@@ -198,7 +198,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
      *   open=1              -> reseau OUVERT, declare, jamais par defaut ;
      *   nouveau reseau sans mot de passe ni open=1 -> refuse ;
      *   rien a changer      -> aucune ecriture, aucun redemarrage.
-     * Ecrit dans le gestionnaire : geste de Reglages, qui redemarre la carte
+     * Ecrit dans le gestionnaire : geste du panneau Carte, qui redemarre la carte
      * (exception dite au §157). */
     server.on("/api/sta", HTTP_POST, [](AsyncWebServerRequest *request){
         auto par = [&](const char* n) -> String {

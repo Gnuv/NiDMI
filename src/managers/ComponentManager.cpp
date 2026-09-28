@@ -9,6 +9,7 @@
 #include <esp_task_wdt.h>
 #include "../server/ServerCore.h"
 #include "../osc/OSCQueue.h"
+#include "../diag/Activite.h"   // la LED d'activite de l'app (MESURES §167)
 #include "../midi/MidiMessageType.h"
 #include "../config/ConfigCache.h"
 #include "../config/ConfigLoader.h"
@@ -982,7 +983,20 @@ void ComponentManager::midiTaskLoop() {
 
                     // Appeler le processeur enregistré pour ce type de composant
                     if (filter_ptr || !def || def->pinType != PinType::PIN_ANALOG) {
-                        if (!ProcessorRegistry::process(config.type, configs[index], states[index], filter_ptr, midi_sender, osc_queue)) {
+                        /* L'ACTIVITE DE LA BROCHE (§167), en mode MIDI : le
+                         * processeur date une valeur utile (`last_telemetry_ts`) ;
+                         * datee pendant CET appel, elle allume la LED de la
+                         * broche dans l'app, et celle du bouton I/O. Pas de
+                         * tableau de plus en RAM interne : on compare a l'heure
+                         * d'avant l'appel. En mode SCRIPT, tous ne la datent pas
+                         * (le potentiometre, non) : c'est executerCapteur qui
+                         * note la broche (MappingEngine.cpp). */
+                        const uint32_t avantProcesseur = millis();
+                        const bool traite = ProcessorRegistry::process(config.type, configs[index], states[index], filter_ptr, midi_sender, osc_queue);
+                        const uint32_t dateValeur = states[index].last_telemetry_ts;
+                        if (dateValeur && (int32_t)(dateValeur - avantProcesseur) >= 0)
+                            Activite::noterBroche(configs[index].gpio);
+                        if (!traite) {
                             // Processeur non enregistré (ne devrait pas arriver si tous les processeurs sont chargés)
                             static unsigned long last_warning = 0;
                             if (millis() - last_warning > 5000) {  // Limiter les warnings

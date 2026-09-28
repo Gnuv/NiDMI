@@ -1,5 +1,6 @@
 #include "UsbMidiManager.h"
 #include "../server/WebDebugConsole.h"
+#include "../diag/Activite.h"   // la LED d'activite de l'app (MESURES §167)
 
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <Preferences.h>
@@ -376,7 +377,9 @@ void UsbMidiManager::update() {
     // Borne dure : une rafale (glissando, dump SysEx d'un DAW) ne doit pas
     // monopoliser la boucle principale, qui sert aussi les requetes HTTP.
     int garde = 0;
+    bool recu = false;
     while (usbMidi->readPacket(&paquet) && ++garde <= 64) {
+        recu = true;
         const uint8_t cin   = paquet.header & 0x0F;
         const uint8_t canal = (uint8_t)((paquet.byte1 & 0x0F) + 1);   // 1..16
         switch (cin) {
@@ -397,6 +400,9 @@ void UsbMidiManager::update() {
                 break;   // horloge, SysEx, pitch bend : pas encore route
         }
     }
+    /* Un OU, une fois par lecture : la LED d'activite (§167). Tout ce qui est
+     * arrive compte, route ou non — l'horloge d'un sequenceur est une entree. */
+    if (recu) Activite::noter(Activite::MIDI_USB);
 #endif
 }
 
