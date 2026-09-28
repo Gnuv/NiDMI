@@ -2,6 +2,8 @@
 #include "../config/EcrituresDifferees.h"
 
 #include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include "../audio/AudioEngine.h"
 #include "../mapping/MappingEngine.h"   // FluxRegistry
@@ -17,6 +19,21 @@ int           s_nb = 0;
 // Armement du CC learn : une cible en attente du prochain CC entrant.
 char  s_cibleArmee[16] = {0};
 float s_minArme = 0.0f, s_maxArme = 1.0f;
+
+/* LE VERROU DE LA TABLE (MESURES §178). Trois taches y touchent : MidiTask (CC
+ * USB et broches, coeur 0) et la boucle (CC RTP, coeur 1) l'appliquent et
+ * apprennent ; le serveur web la lit, la remplace, arme l'apprentissage.
+ * setTexte() remettait le compte a zero puis remplissait sous les yeux d'un CC
+ * entrant — une cible a moitie copiee partait dans le FluxRegistry, et une
+ * lecture de l'app (texte(), qu'elle modifie et renvoie) pouvait MEMORISER une
+ * affectation abimee. Tenu le temps d'une copie, jamais d'un calcul : le CC
+ * n'attend pas le serveur web. Cree a l'initialisation statique. */
+StaticSemaphore_t s_tamponVerrou;
+SemaphoreHandle_t s_verrou = xSemaphoreCreateRecursiveMutexStatic(&s_tamponVerrou);
+struct Verrou {
+    Verrou()  { if (s_verrou) xSemaphoreTakeRecursive(s_verrou, portMAX_DELAY); }
+    ~Verrou() { if (s_verrou) xSemaphoreGiveRecursive(s_verrou); }
+};
 
 // Au premier silence (§157) : apprendre un CC en jouant ne doit pas couter le son.
 void ecrireNvs(const String& t) {
@@ -70,14 +87,19 @@ static void poser(const Entree& e, uint8_t valeur) {
 }
 
 int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur) {
+    // Copier sous le verrou, poser hors du verrou : poser() peut changer de moteur.
+    Entree vises[MAX];
     int touches = 0;
-    for (int i = 0; i < s_nb; i++) {
-        const Entree& e = s_table[i];
-        if (e.cc != cc) continue;
-        if (e.canal != 0 && e.canal != canal) continue;   // 0 = tous canaux
-        poser(e, valeur);
-        touches++;
+    {
+        Verrou verrou;
+        for (int i = 0; i < s_nb; i++) {
+            const Entree& e = s_table[i];
+            if (e.cc != cc) continue;
+            if (e.canal != 0 && e.canal != canal) continue;   // 0 = tous canaux
+            vises[touches++] = e;
+        }
     }
+    for (int i = 0; i < touches; i++) poser(vises[i], valeur);
     return touches;
 }
 
@@ -85,37 +107,46 @@ int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur) {
 
 void armer(const char* cible, float mn, float mx) {
     if (!cible || !*cible) { desarmer(); return; }
-    strlcpy(s_cibleArmee, cible, sizeof(s_cibleArmee));
-    s_minArme = mn; s_maxArme = mx;
-    Serial.printf("[CcMap] apprentissage arme sur '%s' [%.3f..%.3f]\n", s_cibleArmee, mn, mx);
+    {
+        Verrou verrou;
+        strlcpy(s_cibleArmee, cible, sizeof(s_cibleArmee));
+        s_minArme = mn; s_maxArme = mx;
+    }
+    Serial.printf("[CcMap] apprentissage arme sur '%s' [%.3f..%.3f]\n", cible, mn, mx);
 }
 
-void desarmer()          { s_cibleArmee[0] = '\0'; }
+void desarmer()          { Verrou verrou; s_cibleArmee[0] = '\0'; }
 bool arme()              { return s_cibleArmee[0] != '\0'; }
 const char* cibleArmee() { return s_cibleArmee; }
 
 bool apprendre(uint8_t canal, uint8_t cc) {
     if (!arme()) return false;
+    Entree e{};
+    {
+        Verrou verrou;
+        if (!arme()) return false;       // desarme entre-temps (l'app, ou un autre CC)
 
-    // Reapprendre la MEME cible remplace son affectation au lieu d'en empiler
-    // une seconde : sans ca, corriger un CC laissait l'ancien actif et deux
-    // potentiometres se disputaient le parametre.
-    int place = -1;
-    for (int i = 0; i < s_nb; i++)
-        if (!strcmp(s_table[i].cible, s_cibleArmee)) { place = i; break; }
-    if (place < 0) {
-        if (s_nb >= MAX) {
-            Serial.println("[CcMap] table pleine — apprentissage abandonne");
-            desarmer();
-            return false;
+        // Reapprendre la MEME cible remplace son affectation au lieu d'en empiler
+        // une seconde : sans ca, corriger un CC laissait l'ancien actif et deux
+        // potentiometres se disputaient le parametre.
+        int place = -1;
+        for (int i = 0; i < s_nb; i++)
+            if (!strcmp(s_table[i].cible, s_cibleArmee)) { place = i; break; }
+        if (place < 0) {
+            if (s_nb >= MAX) {
+                s_cibleArmee[0] = '\0';
+                Serial.println("[CcMap] table pleine — apprentissage abandonne");
+                return false;
+            }
+            place = s_nb;
         }
-        place = s_nb++;
+        e.canal = canal; e.cc = cc;
+        strlcpy(e.cible, s_cibleArmee, sizeof(e.cible));
+        e.min = s_minArme; e.max = s_maxArme;
+        s_table[place] = e;
+        if (place == s_nb) s_nb++;       // l'entree complete, PUIS le compte
+        s_cibleArmee[0] = '\0';
     }
-    Entree& e = s_table[place];
-    e.canal = canal; e.cc = cc;
-    strlcpy(e.cible, s_cibleArmee, sizeof(e.cible));
-    e.min = s_minArme; e.max = s_maxArme;
-    desarmer();
     ecrireNvs(texte());     // une affectation apprise survit au redemarrage
     Serial.printf("[CcMap] appris : canal %u CC %u -> %s\n",
                   (unsigned)canal, (unsigned)cc, e.cible);
@@ -125,9 +156,16 @@ bool apprendre(uint8_t canal, uint8_t cc) {
 // ── Serialisation ────────────────────────────────────────────────────────────
 
 String texte() {
+    Entree copie[MAX];
+    int n;
+    {
+        Verrou verrou;
+        n = s_nb;
+        memcpy(copie, s_table, sizeof(Entree) * n);
+    }
     String out;
-    for (int i = 0; i < s_nb; i++) {
-        const Entree& e = s_table[i];
+    for (int i = 0; i < n; i++) {
+        const Entree& e = copie[i];
         if (out.length()) out += ';';
         out += String(e.canal); out += ':';
         out += String(e.cc);    out += ':';
@@ -139,9 +177,11 @@ String texte() {
 }
 
 bool setTexte(const String& t, bool persister) {
-    s_nb = 0;
+    // Lue a cote, posee d'un coup : un CC entrant voit l'ancienne table ou la nouvelle.
+    Entree table[MAX];
+    int nb = 0;
     int debut = 0;
-    while (debut < (int)t.length() && s_nb < MAX) {
+    while (debut < (int)t.length() && nb < MAX) {
         int fin = t.indexOf(';', debut);
         if (fin < 0) fin = t.length();
         String ligne = t.substring(debut, fin);
@@ -170,17 +210,25 @@ bool setTexte(const String& t, bool persister) {
         e.min = ligne.substring(c[2] + 1, c[3]).toFloat();
         e.max = ligne.substring(c[3] + 1).toFloat();
         if (e.min == e.max) continue;                 // etalement impossible
-        s_table[s_nb++] = e;
+        table[nb++] = e;
+    }
+    {
+        Verrou verrou;
+        memcpy(s_table, table, sizeof(Entree) * nb);
+        s_nb = nb;
     }
     if (persister) ecrireNvs(texte());
     Serial.printf("[CcMap] table : %d affectation(s)%s\n",
-                  s_nb, persister ? " memorisee(s)" : "");
+                  nb, persister ? " memorisee(s)" : "");
     return true;
 }
 
 void vider(bool persister) {
-    s_nb = 0;
-    desarmer();
+    {
+        Verrou verrou;
+        s_nb = 0;
+        s_cibleArmee[0] = '\0';
+    }
     if (persister) ecrireNvs("");
 }
 
