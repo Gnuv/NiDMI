@@ -10,6 +10,7 @@
 #include "../server/ServerCore.h"
 #include "../osc/OSCQueue.h"
 #include "../diag/Activite.h"   // la LED d'activite de l'app (MESURES §167)
+#include "../diag/Chronos.h"    // ou passe le temps du tour (MESURES §170)
 #include "../midi/MidiMessageType.h"
 #include "../config/ConfigCache.h"
 #include "../config/ConfigLoader.h"
@@ -234,24 +235,20 @@ void ComponentManager::update() {
     /* Drainer la file de telemetrie, remplie par midiTaskLoop sur le coeur 0.
      *
      * ⚠️ Ce commentaire disait : « textAll() est appele ici sur Core 1, ou vit
-     * le serveur web — thread-safe ». C'est FAUX, et le raisonnement a fait des
-     * degats ailleurs : print()/graph() s'en sont crus dispenses et appelaient
-     * textAll() depuis le coeur 0. Le meme coeur n'est PAS la meme tache —
-     * loopTask est preemptee par async_tcp a n'importe quelle instruction.
+     * le serveur web — thread-safe ». C'est FAUX : le meme coeur n'est PAS la
+     * meme tache — loopTask est preemptee par async_tcp a n'importe quelle
+     * instruction. Il a ensuite dit que loopTask etait la seule a modifier la
+     * liste de clients : FAUX aussi, async_tcp la modifie a chaque depart
+     * d'onglet — la carte en a plante (MESURES §171).
      *
-     * La vraie raison de passer par une file est ailleurs, et elle tient :
-     * ce drain tourne dans loopTask, LA MEME TACHE qui appelle
-     * ws.cleanupClients() — donc rien n'efface la liste de clients pendant
-     * qu'on l'itere. Voir ServerCore.h. */
+     * La file tient le reseau hors de MidiTask ; l'envoi passe par le registre
+     * des onglets, sous son verrou (ServerCore.h, « LES ONGLETS »). On DRAINE
+     * dans tous les cas — sinon la file deborde et bloque le producteur. */
     if (telemetryQueue) {
         TelemetryWsMsg tm;
         uint8_t drained = 0;
-        /* Meme garde que les deux autres chemins d'emission : on DRAINE la file
-         * dans tous les cas — sinon elle deborde et bloque le producteur — mais
-         * on n'emet que si quelqu'un ecoute ET suit. Voir ServerCore.h. */
-        const bool emettre = nidmi_ws_peut_emettre(serverCore.websocket());
         while (drained < 32 && xQueueReceive(telemetryQueue, &tm, 0) == pdTRUE) {
-            if (emettre) serverCore.websocket().textAll(tm.payload);
+            nidmi_ws_envoyer_a_tous(tm.payload);
             drained++;
         }
     }
@@ -852,15 +849,15 @@ void ComponentManager::midiTask(void* parameter) {
 uint32_t g_margePileMidi = 0;   // cf. /api/audio/status
 
 /* ── GIGUE D'ORDONNANCEMENT ────────────────────────────────────────────────
- * Cette tache a une periode FIXE (vTaskDelayUntil, 10 ms). Si une autre tache
- * plus prioritaire la preempte, l'intervalle reel s'allonge — et c'est une note
- * en retard. Or le serveur web (async_tcp) tourne a la priorite 10, celle-ci a
- * 4 : il la preempte par construction. La regle du projet dit l'inverse (l'UI
- * web cede, jamais le MIDI — CONVERGENCE §1.5), d'ou cette mesure : on ne
- * corrigera l'ordonnancement qu'apres avoir constate un prejudice, pas sur la
- * foi d'un tableau de priorites.
+ * Le TOUR de cette tache a une periode fixe (10 ms, a la milliseconde) ; entre
+ * deux tours elle traite le MIDI entrant des qu'il arrive (§170). Si une autre
+ * tache plus prioritaire la preempte, l'intervalle reel s'allonge — et c'est
+ * une note en retard. Elle etait a 4, sous le serveur web (10) : il la
+ * preemptait par construction ; elle est a 19 depuis le §149. La mesure reste :
+ * on juge l'ordonnancement sur un prejudice constate, pas sur la foi d'un
+ * tableau de priorites.
  * On mesure l'ECART a la periode visee, pas l'intervalle : c'est le retard qui
- * s'entend. vTaskDelayUntil rattrape au tour suivant, donc un tour long est
+ * s'entend. Un tour en retard est rattrape au suivant, donc un tour long est
  * suivi d'un tour court — les deux comptent comme de la gigue.            */
 volatile uint32_t g_gigueMidiMaxUs   = 0;   // pire ecart a 10 ms, en us
 volatile uint32_t g_gigueMidiTours   = 0;   // tours comptes dans la fenetre
@@ -881,9 +878,26 @@ void ComponentManager::midiTaskLoop() {
             _tempsReelEnPause = true;      // acquittement lu par pauseRealtimeTasks()
             vTaskDelay(pdMS_TO_TICKS(10));
             precedent = 0;   // une PAUSE n'est pas de la gigue : on repart a zero
+            xLastWakeTime = xTaskGetTickCount();   // ... et on ne rattrape pas les tours manques
             continue;
         }
         _tempsReelEnPause = false;
+
+        /* ── LE MIDI ENTRANT N'ATTEND PAS LE TOUR (MESURES §170) ───────────
+         * Entre deux tours, la tache DORT SUR LA FILE D'ENTREE au lieu de
+         * dormir tout court : un message MIDI arrive par l'USB, elle se
+         * reveille et le traite aussitot — scripts, son, composants — puis se
+         * rendort jusqu'au tour. Le tour garde sa periode de 10 ms, a la
+         * milliseconde pres, comme avec vTaskDelayUntil (qui rattrapait de la
+         * meme facon un tour en retard). */
+        const TickType_t prochainTour = xLastWakeTime + xFrequency;
+        const TickType_t maintenant = xTaskGetTickCount();
+        if ((int32_t)(prochainTour - maintenant) > 0) {
+            serverCore.usbMidi().traiterEntree(prochainTour - maintenant);
+            continue;   // un message, ou l'heure du tour : on re-evalue
+        }
+        xLastWakeTime = prochainTour;
+        serverCore.usbMidi().traiterEntree(0);   // ce qui vient d'arriver passe avant le tour
 
         /* L'ecart a la periode visee. `precedent == 0` = premier tour, ou reprise
          * apres pause : on ne mesure rien, on amorce. */
@@ -909,13 +923,17 @@ void ComponentManager::midiTaskLoop() {
          * faut savoir ce qui reste. Mesure, pas estimation. */
         g_margePileMidi = (uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t);
 
+        uint32_t tEtape = micros();
         g_midiRouter.battreHorloge(millis());
+        Chronos::horloge.noter(micros() - tEtape); tEtape = micros();
         /* Et la file des differes — del(), makenote()... — une seule fois pour
          * TOUS les scripts : broches comprises, qui n'ont pas d'horloge a elles. */
         MappingEngine::battreDifferes(millis(), &g_midiRouter);
+        Chronos::differes.noter(micros() - tEtape); tEtape = micros();
 
         // Envoyer les mises à jour MIDI des multiplexeurs
         mux_manager.sendMidiUpdates(midi_sender);
+        Chronos::mux.noter(micros() - tEtape); tEtape = micros();
         
         // Traiter les composants directs (potentiomètres, boutons, touch, etc.)
         // Round-robin: on ne traite qu'un sous-ensemble par cycle pour éviter de bloquer le CPU
@@ -1135,8 +1153,7 @@ void ComponentManager::midiTaskLoop() {
             
             next_component_index = index;
         }
-        
-        // Attendre jusqu'à la prochaine période (10ms)
-        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+        Chronos::composants.noter(micros() - tEtape);
+        // La periode suivante s'attend EN TETE de boucle, sur la file d'entree.
     }
 }

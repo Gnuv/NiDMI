@@ -65,7 +65,12 @@ public:
     // Initialisation
     bool begin();
     void stop();
-    void update();
+
+    /* L'ENTREE, traitee par MidiTask des qu'elle arrive (MESURES §170) :
+     * attend au plus `attente` le premier message, traite tout ce qui est la,
+     * rend vrai si elle a traite quelque chose. Voir « L'ENTREE MIDI USB,
+     * TRAITEE DES QU'ELLE ARRIVE » dans le .cpp. */
+    bool traiterEntree(TickType_t attente);
     
     // Envoi MIDI
     void sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
@@ -81,7 +86,7 @@ public:
     void sendContinue();
     
     // Reception : brancher ce que devient une note entrante. Sans ces hooks,
-    // update() lit les paquets et les jette.
+    // traiterEntree() lit les paquets et les jette.
     void setMidiInputHooks(HookNote noteOn, HookNote noteOff, HookCC cc) {
         onNoteOn = noteOn; onNoteOff = noteOff; onControlChange = cc;
     }
@@ -104,6 +109,21 @@ public:
     };
     static void statsSortie(StatsSortie& s);
     static void reinitStatsSortie();
+
+    /** L'entree (§170) : ce que chaque message a attendu, de son arrivee par
+     *  l'USB a son traitement. Pour /api/diag/gigue. */
+    struct StatsEntree {
+        uint32_t messages;     // messages traites
+        uint32_t attenteMax;   // pire attente, en µs
+        uint32_t attenteMoy;   // attente moyenne, en µs
+        uint32_t retards1ms;   // messages qui ont attendu plus d'1 ms
+        uint32_t retards5ms;   // ... plus de 5 ms
+        uint32_t retenues;     // fois ou notre file pleine a laisse l'hote attendre
+        uint16_t fileMax;      // remplissage maximal vu de notre file
+        uint16_t capacite;
+    };
+    static void statsEntree(StatsEntree& s);
+    static void reinitStatsEntree();
 
     /** Banc (POST /api/diag/midi-rafale) : un accord de `notes` notes, toutes
      *  les note-on puis toutes les note-off, d'un seul coup. `direct` rejoue

@@ -7,12 +7,26 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>   // le plus gros bloc contigu : la vraie limite de la chaine
 #include <new>               // std::nothrow : une allocation refusee se dit, elle ne jette pas
+#include <atomic>
 
 // Dépendances vers le serveur core
 #include "../server/ServerCore.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
+
+/* Voir « LE MIDI COMPTE AUSSI POUR LE SILENCE » (MidiRouter.h). 0 au
+ * demarrage : un long silence, rien n'est passe. */
+namespace {
+std::atomic<uint32_t> g_dernierTraficMs{0};
+}
+void MidiRouter::noterTrafic() { g_dernierTraficMs.store(millis(), std::memory_order_relaxed); }
+uint32_t MidiRouter::silenceMidiDepuisMs() {
+    // Le dernier passage D'ABORD, l'heure ensuite : dans cet ordre la
+    // difference non signee est juste (meme raisonnement que silenceDepuisMs).
+    const uint32_t dernier = g_dernierTraficMs.load(std::memory_order_relaxed);
+    return millis() - dernier;
+}
 
 MidiRouter::MidiRouter()
     : rtpEnabled(true), oscEnabled(true), bluetoothEnabled(true), usbMidiEnabled(true), oscToSta(true), oscPort(8000), defaultChannel(1) {}
@@ -32,6 +46,7 @@ void MidiRouter::update() {
 }
 
 void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendNoteOn(ch, note, velocity);
@@ -61,6 +76,7 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 }
 
 void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendNoteOff(ch, note, velocity);
@@ -84,6 +100,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
 }
 
 void MidiRouter::sendControlChange(uint8_t channel, uint8_t control, uint8_t value) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendControlChange(ch, control, value);
@@ -102,6 +119,7 @@ void MidiRouter::sendControlChange(uint8_t channel, uint8_t control, uint8_t val
 }
 
 void MidiRouter::sendProgramChange(uint8_t channel, uint8_t program) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendProgramChange(ch, program);
@@ -115,6 +133,7 @@ void MidiRouter::sendProgramChange(uint8_t channel, uint8_t program) {
 }
 
 void MidiRouter::sendPitchBend(uint8_t channel, int bend) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendPitchBend(ch, bend);
@@ -128,6 +147,7 @@ void MidiRouter::sendPitchBend(uint8_t channel, int bend) {
 }
 
 void MidiRouter::sendAftertouch(uint8_t channel, uint8_t pressure) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendAftertouch(ch, pressure);
@@ -141,6 +161,7 @@ void MidiRouter::sendAftertouch(uint8_t channel, uint8_t pressure) {
 }
 
 void MidiRouter::sendKeyPressure(uint8_t channel, uint8_t note, uint8_t pressure) {
+    noterTrafic();
     const uint8_t ch = channel ? channel : defaultChannel;
     if (rtpEnabled) {
         serverCore.rtpMidi().sendKeyPressure(ch, note, pressure);
@@ -248,9 +269,11 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
  * c'est ce qui rend un filtre exprimable.
  */
 bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
+    MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous un CC (§170)
+    const uint16_t cc = MappingEngine::masqueDe(MappingEngine::Evenement::Cc);
     for (uint8_t e = 0; e < emplacements.size(); e++) {
         Emplacement& em = *emplacements[e];
-        if (!em.contenu.length()) continue;
+        if (!(em.repond & cc)) continue;   // rien dans ce maillon ne repond a un CC (§170)
         MappingEngine::SortieCc sortie;
         /* QUI execute — « map:0 ». Le battement d'horloge le passait deja ;
          * ce chemin-ci, non, si bien qu'un print() ou un graph() declenche par
@@ -267,6 +290,7 @@ bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
 
 void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
     uint8_t c = channel, n = control, v = value;
+    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
 
     // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
     //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
@@ -309,9 +333,12 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
      * battre apres un STOP et le script de la cue emettait tout seul. Le MIDI
      * entrant, lui, reste traite plus bas : c'est du jeu live. */
     if (!_enLecture) return;
+    MappingEngine::Verrou verrou;   // voir MappingEngine.h (§170)
+    const uint16_t init = MappingEngine::masqueDe(MappingEngine::Evenement::Init);
+    const uint16_t tick = MappingEngine::masqueDe(MappingEngine::Evenement::Tick);
     for (uint8_t e = 0; e < emplacements.size(); e++) {
         Emplacement& em = *emplacements[e];
-        if (!em.contenu.length()) continue;
+        if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
         /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
          * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
          * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
@@ -321,20 +348,28 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
         char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         if (em.initEnAttente) {
             em.initEnAttente = false;
-            MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
-                                  maintenant, this, em.etats,
-                                  MappingEngine::MAX_PIPELINES_SCRIPT, org);
+            if (em.repond & init)
+                MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
+                                      maintenant, this, em.etats,
+                                      MappingEngine::MAX_PIPELINES_SCRIPT, org);
         }
+        /* Le battement seulement quand un metro() est du : avant, il ne ferait
+         * rien — l'interpreteur le dit lui-meme (prochainUtile, §170). */
+        if (!(em.repond & tick)) continue;
+        if (em.tickConnu && (int32_t)(maintenant - em.prochainTick) < 0) continue;
         MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
                               maintenant, this, em.etats,
-                              MappingEngine::MAX_PIPELINES_SCRIPT, org);
+                              MappingEngine::MAX_PIPELINES_SCRIPT, org, &em.prochainTick);
+        em.tickConnu = true;
     }
 }
 
 void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
+    MappingEngine::Verrou verrou;
+    const uint16_t osc = MappingEngine::masqueDe(MappingEngine::Evenement::Osc);
     for (uint8_t e = 0; e < emplacements.size(); e++) {
         Emplacement& em = *emplacements[e];
-        if (!em.contenu.length()) continue;
+        if (!(em.repond & osc)) continue;   // rien ici n'ecoute l'OSC (§170)
         char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
         MappingEngine::battreOsc(em.contenu.c_str(), adresse, valeur, this,
                                  em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
@@ -359,28 +394,40 @@ static String fichierEmplacement(uint8_t e) {
 }
 
 void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
-    Emplacement* pem = _assurerEmplacement(emplacement);
-    if (!pem) return;                 // plafond ou memoire : deja dit sur le port serie
-    Emplacement& em = *pem;
-    const bool memeCode = (em.contenu == script);
+    const String fichier = fichierEmplacement(emplacement);
+    String copie = script;            // l'allocation AVANT le verrou : il ne tient qu'un echange
+    const uint16_t repond = MappingEngine::evenementsDuScript(copie.c_str());   // idem (§170)
+    bool memeCode = false, dejaNomme = false;
+    {
+        /* PERSONNE N'EXECUTE CE MAILLON PENDANT QU'ON LE REMPLACE (§170). */
+        MappingEngine::Verrou verrou;
+        Emplacement* pem = _assurerEmplacement(emplacement);
+        if (!pem) return;             // plafond ou memoire : deja dit sur le port serie
+        Emplacement& em = *pem;
+        memeCode  = (em.contenu == copie);
+        dejaNomme = (em.nom == fichier);
 
-    /* ⚠ LES REPRISES DE L'ANCIEN TEXTE, D'ABORD.
-     * Une reprise en attente — del(), makenote(), lag(), ramp() — retient un
-     * `const char*` sur le texte du script. Remplacer `em.contenu` libere ce
-     * tampon (ou, pire, le REUTILISE pour le nouveau texte) : la file rejouait
-     * alors sur de la memoire rendue, ou sur le segment d'un autre script.
-     * `viderDifferes` existait pour ca et n'etait appelee QUE par le chemin des
-     * broches (ComponentManager) — les emplacements de scripts map ne l'ont
-     * jamais appelee. Trouve par le compteur de /api/diag/reservoirs : apres
-     * avoir vide l'emplacement 0, la file annoncait encore 16 places tenues. */
-    MappingEngine::viderDifferes(em.contenu.c_str());
-    em.contenu = script;
-    em.initEnAttente = true;          // nouveau script : son loadbang() est du
-    /* L'etat par pipeline de CET emplacement n'a plus de sens : un counter
-     * reprendrait la ou en etait le script precedent — decalage silencieux, et
-     * d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note. On ne
-     * touche PAS aux autres emplacements, qui n'ont pas change. */
-    for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
+        /* ⚠ LES REPRISES DE L'ANCIEN TEXTE, D'ABORD.
+         * Une reprise en attente — del(), makenote(), lag(), ramp() — retient un
+         * `const char*` sur le texte du script. Remplacer `em.contenu` libere ce
+         * tampon (ou, pire, le REUTILISE pour le nouveau texte) : la file rejouait
+         * alors sur de la memoire rendue, ou sur le segment d'un autre script.
+         * `viderDifferes` existait pour ca et n'etait appelee QUE par le chemin des
+         * broches (ComponentManager) — les emplacements de scripts map ne l'ont
+         * jamais appelee. Trouve par le compteur de /api/diag/reservoirs : apres
+         * avoir vide l'emplacement 0, la file annoncait encore 16 places tenues. */
+        MappingEngine::viderDifferes(em.contenu.c_str());
+        em.contenu = std::move(copie);
+        em.repond = repond;
+        em.tickConnu = false;             // ses metro() repartent de zero
+        em.initEnAttente = true;          // nouveau script : son loadbang() est du
+        /* L'etat par pipeline de CET emplacement n'a plus de sens : un counter
+         * reprendrait la ou en etait le script precedent — decalage silencieux, et
+         * d'autant plus deroutant qu'il ne se voit qu'a la deuxieme note. On ne
+         * touche PAS aux autres emplacements, qui n'ont pas change. */
+        for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
+        if (!script.length()) em.nom = "";
+    }
 
     /* UN SCRIPT POUSSE EN LIGNE EST PERSISTE, comme les autres.
      *
@@ -397,44 +444,50 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
      *
      * L'ecriture est evitee quand le code n'a pas change : l'app republie a
      * chaque enregistrement, et la flash n'a pas a payer une republication
-     * identique. */
+     * identique. Hors du verrou : le script tourne deja. */
     const String cle = cleNvsEmplacement(emplacement);
     if (!script.length()) {
-        em.nom = "";
         Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
         Serial.printf("[MidiRouter] emplacement %u : vide\n", (unsigned)emplacement);
         return;
     }
 
-    const String fichier = fichierEmplacement(emplacement);
-    if (!memeCode || em.nom != fichier) {
-        if (ScriptStore::ecrire(fichier.c_str(), script)) {
-            em.nom = fichier;
-            Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), em.nom);   // au silence (§157)
+    if (!memeCode || !dejaNomme) {
+        const bool ecrit = ScriptStore::ecrire(fichier.c_str(), script);
+        _nommer(emplacement, ecrit ? fichier : String("(en ligne, NON persiste)"));
+        if (ecrit) {
+            Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), fichier);   // au silence (§157)
         } else {
             /* mapfs pleine ou absente : le script TOURNE quand meme, mais il ne
              * survivra pas au redemarrage. On le DIT — un comportement qui
              * s'evapore sans message est ce qu'on passe la session a supprimer. */
-            em.nom = "(en ligne, NON persiste)";
             Serial.printf("[MidiRouter] emplacement %u : ecriture de '%s' impossible — "
                           "le script tourne mais ne survivra pas au redemarrage\n",
                           (unsigned)emplacement, fichier.c_str());
         }
     }
     Serial.printf("[MidiRouter] emplacement %u : %u o (%s)\n",
-                  (unsigned)emplacement, (unsigned)script.length(), em.nom.c_str());
+                  (unsigned)emplacement, (unsigned)script.length(), nomEmplacement(emplacement).c_str());
 }
 
-// Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,
-// donc identiquement pour l'USB, le clavier de l'app et le reste : c'est ce qui
-// garantit qu'un bloc mapping vaut pour toutes les sources, et pas seulement
-// pour celles qu'on aurait pense cabler une a une.
-void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
-    uint8_t n = note, v = velocity, c = channel;
+/* Le nom d'un maillon, pose apres coup (l'ecriture du fichier se fait hors du
+ * verrou) : le maillon peut avoir disparu entre-temps, raccourci par la
+ * composition — on ne nomme alors rien. */
+void MidiRouter::_nommer(uint8_t e, const String& nom) {
+    MappingEngine::Verrou verrou;
+    if (e < emplacements.size()) emplacements[e]->nom = nom;
+}
 
+/* La chaine des scripts map appliquee a une note — pendant de chaineScriptsCc,
+ * et sous le meme verrou (§170) : un maillon ne se remplace pas pendant qu'une
+ * note le traverse. Rend false si un maillon l'a avalee. */
+bool MidiRouter::chaineScriptsNote(uint8_t& c, uint8_t& n, uint8_t& v, bool estNoteOff) {
+    MappingEngine::Verrou verrou;
+    const uint16_t genre = MappingEngine::masqueDe(estNoteOff ? MappingEngine::Evenement::NoteOff
+                                                              : MappingEngine::Evenement::NoteOn);
     for (uint8_t e = 0; e < emplacements.size(); e++) {
         Emplacement& em = *emplacements[e];
-        if (!em.contenu.length()) continue;
+        if (!(em.repond & genre)) continue;   // rien dans ce maillon ne repond a cette note (§170)
         MappingEngine::SortieNote sortie;
         char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);   // idem
         if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c,
@@ -448,10 +501,23 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
         // Mais un script qui ne parle QUE de CC ne doit rien bloquer : sans
         // cette nuance, charger un mapping de controleurs rendait le clavier
         // muet. Symetrique de ce que fait ccEntrant pour les CC.
-        else if (sortie.traite) return;
+        else if (sortie.traite) return false;
     }
+    return true;
+}
+
+// Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,
+// donc identiquement pour l'USB, le clavier de l'app et le reste : c'est ce qui
+// garantit qu'un bloc mapping vaut pour toutes les sources, et pas seulement
+// pour celles qu'on aurait pense cabler une a une.
+void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
+    uint8_t n = note, v = velocity, c = channel;
+    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
+
+    if (!chaineScriptsNote(c, n, v, estNoteOff)) return;   // un maillon l'a avalee
 
     // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
+    // Hors du verrou : elles ne lisent plus rien d'un maillon.
     if (estNoteOff) {
         g_componentManager.handleMidiNoteOff(c, n, v);
         AudioEngine::noteOff(n);
@@ -534,9 +600,14 @@ void MidiRouter::fixerMaillonsPermanents(uint8_t n) {
  * la memoire a manque, c'est la carte qui le dit, pas l'app qui le suppose. */
 uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
     if (n > PLAFOND_SCRIPTS_MAP) n = PLAFOND_SCRIPTS_MAP;
-    if (n < emplacements.size()) _reduireChaine(n);
-    else if (n > 0)              _assurerEmplacement((uint8_t)(n - 1));
-    const uint8_t obtenu = (uint8_t)emplacements.size();
+    uint8_t obtenu;
+    {
+        /* Le vecteur change : personne ne le parcourt pendant ce temps (§170). */
+        MappingEngine::Verrou verrou;
+        if (n < emplacements.size()) _reduireChaine(n);
+        else if (n > 0)              _assurerEmplacement((uint8_t)(n - 1));
+        obtenu = (uint8_t)emplacements.size();
+    }
     /* Une chaine raccourcie sous la zone MAIN ne peut plus en tenir autant :
        la frontiere suit, sinon elle designerait des maillons disparus. */
     if (_nPermanents > obtenu) fixerMaillonsPermanents(obtenu);
@@ -554,38 +625,43 @@ uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
  * « script1 », « script2 »... */
 
 bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emplacement) {
-    Emplacement* pem = _assurerEmplacement(emplacement);
-    if (!pem) return false;
-    Emplacement& em = *pem;
     const String cle = cleNvsEmplacement(emplacement);
 
-    if (!nom || !*nom) {                       // "" = plus de script du tout
+    /* LE FICHIER SE LIT AVANT LE VERROU (§170) : le verrou ne tient qu'un
+     * echange de textes, jamais une lecture de la flash. */
+    String contenu;
+    const bool aucun = (!nom || !*nom);        // "" = plus de script du tout
+    if (!aucun && !ScriptStore::lire(nom, contenu)) {
+        Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
+        return false;
+    }
+    const unsigned taille = contenu.length();
+    const uint16_t repond = MappingEngine::evenementsDuScript(contenu.c_str());   // hors verrou (§170)
+    {
+        MappingEngine::Verrou verrou;
+        Emplacement* pem = _assurerEmplacement(emplacement);
+        if (!pem) return false;
+        Emplacement& em = *pem;
         MappingEngine::viderDifferes(em.contenu.c_str());   // voir setScriptMidi
-        em.contenu = "";
-        em.nom = "";
+        em.contenu = std::move(contenu);
+        em.nom     = aucun ? "" : nom;
+        em.repond  = repond;
+        em.tickConnu = false;
+        em.initEnAttente = !aucun;
         for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
+    }
+    if (aucun) {
         if (persister) {
             Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
         }
         Serial.printf("[MidiRouter] emplacement %u : aucun script\n", (unsigned)emplacement);
         return true;
     }
-    String contenu;
-    if (!ScriptStore::lire(nom, contenu)) {
-        Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
-        return false;
-    }
-    MappingEngine::viderDifferes(em.contenu.c_str());       // voir setScriptMidi
-    em.contenu = contenu;
-    em.nom     = nom;
-    em.initEnAttente = true;
-    for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
     if (persister) {
-        Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), em.nom);   // au silence (§157)
+        Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), String(nom));   // au silence (§157)
     }
     Serial.printf("[MidiRouter] emplacement %u : '%s' charge (%u o)%s\n",
-                  (unsigned)emplacement, nom, (unsigned)contenu.length(),
-                  persister ? " et memorise" : "");
+                  (unsigned)emplacement, nom, taille, persister ? " et memorise" : "");
     return true;
 }
 
@@ -601,8 +677,11 @@ void MidiRouter::restaurerScript() {
     for (uint8_t e = 0; e < nmap; e++)
         noms[e] = p.getString(cleNvsEmplacement(e).c_str(), "");
     p.end();
-    if (nmap) _assurerEmplacement((uint8_t)(nmap - 1));
-    _nPermanents = (nperm <= emplacements.size()) ? nperm : (uint8_t)emplacements.size();
+    {
+        MappingEngine::Verrou verrou;
+        if (nmap) _assurerEmplacement((uint8_t)(nmap - 1));
+        _nPermanents = (nperm <= emplacements.size()) ? nperm : (uint8_t)emplacements.size();
+    }
     Serial.printf("[MidiRouter] chaine restauree : %u emplacement(s), dont %u permanent(s)\n",
                   (unsigned)emplacements.size(), (unsigned)_nPermanents);
     for (uint8_t e = 0; e < nmap; e++) {

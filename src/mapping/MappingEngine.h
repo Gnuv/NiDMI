@@ -24,6 +24,31 @@ public:
 // 2. Le Moteur : Découpe et exécute le script segment par segment
 class MappingEngine {
 public:
+    /* ── LE VERROU DES SCRIPTS (MESURES §170) ─────────────────────────────
+     * Un script s'executait dans quatre taches, sur deux coeurs : MidiTask
+     * (horloge, broches, differes, MIDI USB), async_tcp (notes de l'app,
+     * scripts remplaces, essais), loopTask (OSC, cues). Rien ne les separait.
+     * Or elles partagent la file des reprises — seize places qui pointent le
+     * TEXTE des scripts — et, pour les maillons map, ce texte lui-meme : un
+     * script remplace par l'app pendant qu'une note le traversait sur l'autre
+     * coeur rendait la memoire qu'elle lisait.
+     *
+     * Un seul verrou, RECURSIF : pris ici (executer, les differes, le bus) et
+     * par MidiRouter autour de sa chaine — on ne remplace un maillon que quand
+     * personne ne l'execute. Un mutex FreeRTOS, a HERITAGE de priorite : si
+     * MidiTask (19) attend le serveur web (10) qui remplace un script, celui-ci
+     * passe au rang du MIDI le temps de finir, une affectation de chaine. On
+     * n'y fait aucune entree-sortie : un fichier se lit AVANT de le prendre, et
+     * les sorties d'un script s'emettent APRES l'avoir rendu.
+     * Sur le poste (banc de conformite, un seul fil), il ne fait rien. */
+    class Verrou {
+    public:
+        Verrou();
+        ~Verrou();
+        Verrou(const Verrou&) = delete;
+        Verrou& operator=(const Verrou&) = delete;
+    };
+
     // Etat d'UN pipeline, d'un evenement au suivant : toggle, counter, seq,
     // l'index retenu par sel pour map, lp, drunk, hysteresis, change.
     //
@@ -188,10 +213,33 @@ public:
     //              la boucle MIDI ne vide jamais. Sans ca, la route d'essai
     //              deposait ses differes dans la file VIVANTE : ils partaient
     //              en MIDI reel et ne revenaient jamais a l'essai.
+    // prochainUtile (battement seulement) : l'instant avant lequel un
+    //              battement ne fera RIEN pour ce script et ces etats — le plus
+    //              proche metro() du (MESURES §170). Loin dans le futur s'il n'a
+    //              pas de metro() actif. Voir « A QUOI UN SCRIPT REPOND ».
     static int executer(const char* script, const Evenement& evt,
                         Sortie* sorties, int max, bool& traite,
                         Etat* etats = nullptr, int nEtats = 0,
-                        bool horsLigne = false);
+                        bool horsLigne = false, uint32_t* prochainUtile = nullptr);
+
+    /* ── A QUOI UN SCRIPT REPOND (MESURES §170) ────────────────────────────
+     * L'interpreteur relit le TEXTE du script a chaque execution — 300 a
+     * 400 µs sur la carte, quel que soit l'evenement. Et il etait appele pour
+     * TOUT : transpose.nms (note.in) a chaque battement d'horloge et a chaque
+     * CC, un script a metro() a chaque note et a chaque battement, meme
+     * quand son metro n'etait pas du. Une note entrante traversait ainsi
+     * deux scripts pour rien : 900 µs.
+     *
+     * Un script ne peut repondre qu'aux evenements que ses SOURCES (le
+     * premier segment de chaque pipeline) acceptent. evenementsDuScript() rend
+     * ce masque — un bit par Evenement::Type, masqueDe() — calcule une fois,
+     * quand le script change. Il est CALQUE sur evaluerSource() : le banc de
+     * conformite (hardware/bench/nms) verifie sur tout son corpus qu'un
+     * evenement ecarte par le masque ne produit rien, et qu'un battement
+     * anterieur a prochainUtile non plus. Toucher a l'un sans l'autre fait
+     * echouer le banc. */
+    static uint16_t evenementsDuScript(const char* script);
+    static uint16_t masqueDe(Evenement::Type t) { return (uint16_t)(1u << (unsigned)t); }
 
     /* Le BATTEMENT D'HORLOGE : fait tourner les pipelines qui n'attendent aucun
      * MIDI. `Tick` (avec l'instant en millis) tire metro() ; `Init`, envoye une
@@ -200,7 +248,7 @@ public:
      * d'un DSL passe de script MIDI a script generaliste (DMX, OSC...). */
     static void battre(const char* script, Evenement::Type type, uint32_t instant,
                        MidiSender* sender, Etat* etats = nullptr, int nEtats = 0,
-                       const char* origine = nullptr);
+                       const char* origine = nullptr, uint32_t* prochainUtile = nullptr);
 
     /* Un message OSC ENTRANT : fait tourner osc.in(). Meme office que battre()
      * pour l'horloge — le moteur fabrique l'evenement, execute et emet. Un

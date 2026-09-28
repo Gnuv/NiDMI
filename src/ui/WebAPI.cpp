@@ -172,13 +172,13 @@ String getDefaultConfig(String pin) {
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
         Serial.println("WebSocket client connected");
-        /* Un COMPTEUR, tenu ici. Il permet aux producteurs des autres taches de
-         * savoir si quelqu'un ecoute SANS toucher au std::list de clients, que
-         * la bibliotheque modifie sans verrou. Voir ServerCore.h. */
-        nidmi_ws_client_arrive();
+        /* LE REGISTRE DES ONGLETS, tenu ici, dans la tache qui ajoute et retire
+         * les clients : personne d'autre ne parcourt plus la liste de la
+         * bibliotheque. Voir ServerCore.h, « LES ONGLETS » (MESURES §171). */
+        nidmi_ws_client_arrive(client);
     } else if (type == WS_EVT_DISCONNECT) {
         Serial.println("WebSocket client disconnected");
-        nidmi_ws_client_parti();
+        nidmi_ws_client_parti(client);
         g_pinMonitoringEnabled = false;
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo *info = (AwsFrameInfo*)arg;
@@ -292,27 +292,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
             }
         }
     }
-}
-
-// Fonction pour envoyer le statut RTP-MIDI via WebSocket
-void sendRtpStatus(AsyncWebSocket& ws) {
-    preferences.begin("nidmi", false);
-    bool enabled = preferences.getBool("rtp_enabled", false);
-    String name = preferences.getString("rtp_name", "ESP32-Studio");
-    String target = preferences.getString("rtp_target", "sta");
-    preferences.end();
-    
-    bool connected = serverCore.rtpMidi().isConnected();
-    
-    String json = "{";
-    json += "\"type\":\"rtp_status\",";
-    json += "\"enabled\":" + String(enabled ? "true" : "false") + ",";
-    json += "\"name\":\"" + name + "\",";
-    json += "\"target\":\"" + target + "\",";
-    json += "\"connected\":" + String(connected ? "true" : "false");
-    json += "}";
-    
-    ws.textAll(json);
 }
 
 /* Sert un fichier de l'application embarquée (app_archive.h), en streaming

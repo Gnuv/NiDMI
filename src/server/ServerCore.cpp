@@ -1,4 +1,6 @@
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include "ServerCore.h"
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
@@ -302,15 +304,16 @@ void ServerCore::update() {
         coupurePrepareeA = 0;
         mdnsInterfacesWifi(true);
     }
-    uint32_t tc = nidmi_section("ws.cleanup");
-    ws.cleanupClients();
-    nidmi_chrono("ws.cleanup", tc); tc = nidmi_section("rtpmidi");
+    /* Plus de ws.cleanupClients() : elle modifiait la liste de clients de la
+     * bibliotheque depuis cette tache, pendant qu'async_tcp la modifiait de la
+     * sienne (voir « LES ONGLETS », ServerCore.h, MESURES §171). */
+    uint32_t tc = nidmi_section("rtpmidi");
     rtpMidiInstance.update();
     nidmi_chrono("rtpmidi", tc); tc = nidmi_section("bluetooth");
     bluetoothInstance.update();
-    nidmi_chrono("bluetooth", tc); tc = nidmi_section("usbmidi");
-    usbMidiInstance.update();
-    nidmi_chrono("usbmidi", tc);
+    nidmi_chrono("bluetooth", tc);
+    /* Le MIDI USB n'est plus lu ici : MidiTask le traite des qu'il arrive
+     * (UsbMidiManager, MESURES §170). */
 }
 
 void ServerCore::reconfigureMdns(const char* hostname) {
@@ -392,16 +395,6 @@ UsbMidiManager& ServerCore::usbMidi() {
     return usbMidiInstance; 
 }
 
-/* Voir ServerCore.h pour le pourquoi. Deux questions, pas une : « quelqu'un
- * ecoute-t-il ? » puis « suit-il ? ». */
-/* ⚠️ N'appeler que depuis loopTask : count() et availableForWriteAll() itèrent
- * le std::list de clients, que cleanupClients() efface depuis cette meme tache.
- * Voir ServerCore.h. */
-bool nidmi_ws_peut_emettre(AsyncWebSocket& ws) {
-    if (ws.count() == 0) return false;          // headless : personne n'ecoute
-    return ws.availableForWriteAll();           // un client a la traine : on jette
-}
-
 /* ── La file de sortie ─────────────────────────────────────────────────────
  * Pas un octet pris au TAS INTERNE, dont le plus gros bloc contigu decide si
  * AsyncTCP peut encore recevoir une image OTA : 24 x 216 = 5,2 ko, en PSRAM —
@@ -415,8 +408,22 @@ namespace {
 
     StaticQueue_t  g_fileTCB;
     QueueHandle_t  g_fileWs = nullptr;
-    volatile int      g_clientsWs = 0;
     volatile uint32_t g_jetees   = 0;
+
+    /* LE REGISTRE DES ONGLETS (voir ServerCore.h, « LES ONGLETS »). Huit au
+     * plus — la borne qu'appliquait cleanupClients() (DEFAULT_MAX_WS_CLIENTS) ;
+     * seize places, pour les arrivants pendant qu'un ancien finit de partir.
+     * Le verrou est cree a l'initialisation statique, comme celui de Serial. */
+    constexpr uint8_t kOngletsMax    = 8;
+    constexpr uint8_t kOngletsPlaces = 16;
+    AsyncWebSocketClient* g_onglets[kOngletsPlaces] = {};
+    volatile uint8_t g_nOnglets = 0;
+    StaticSemaphore_t g_verrouOngletsTampon;
+    SemaphoreHandle_t g_verrouOnglets = xSemaphoreCreateRecursiveMutexStatic(&g_verrouOngletsTampon);
+    struct VerrouOnglets {
+        VerrouOnglets()  { if (g_verrouOnglets) xSemaphoreTakeRecursive(g_verrouOnglets, portMAX_DELAY); }
+        ~VerrouOnglets() { if (g_verrouOnglets) xSemaphoreGiveRecursive(g_verrouOnglets); }
+    };
 }
 
 void nidmi_ws_file_init() {
@@ -426,13 +433,64 @@ void nidmi_ws_file_init() {
     if (!stock) stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stock) g_fileWs = xQueueCreateStatic(kFileLen, sizeof(TrameWs), stock, &g_fileTCB);
 }
-void nidmi_ws_client_arrive() { g_clientsWs++; }
-void nidmi_ws_client_parti()  { if (g_clientsWs > 0) g_clientsWs--; }
+/* async_tcp, rappel WS_EVT_CONNECT. */
+void nidmi_ws_client_arrive(AsyncWebSocketClient* c) {
+    if (!c) return;
+    /* Une file pleine JETTE la trame au lieu de FERMER l'onglet : fermer le
+     * retirait de la liste en plein parcours (voir « LES ONGLETS »). */
+    c->setCloseClientOnQueueFull(false);
+    VerrouOnglets verrou;
+    if (g_nOnglets >= kOngletsPlaces) { c->close(); return; }   // jamais vu : 16 onglets de front
+    g_onglets[g_nOnglets] = c;
+    g_nOnglets = g_nOnglets + 1;
+    /* Au-dela de huit, le plus ancien s'en va — ce que faisait cleanupClients().
+     * Il reste inscrit jusqu'a son depart effectif (WS_EVT_DISCONNECT). */
+    if (g_nOnglets > kOngletsMax) g_onglets[0]->close();
+}
 
-/* Un COMPTEUR, pas la liste : lisible depuis n'importe quelle tache sans
- * toucher a ce que la bibliotheque modifie. C'est ce qui permet a un producteur
- * sur le coeur 0 de sortir immediatement en headless. */
-bool nidmi_ws_quelqu_un_ecoute() { return g_clientsWs > 0; }
+/* async_tcp, rappel WS_EVT_DISCONNECT — emis par le destructeur du client,
+ * avant que sa memoire ne soit rendue. Attendre ici le verrou, c'est attendre
+ * que l'envoi en cours vers ce client soit fini. */
+void nidmi_ws_client_parti(AsyncWebSocketClient* c) {
+    VerrouOnglets verrou;
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        if (g_onglets[i] != c) continue;
+        for (uint8_t j = i + 1; j < g_nOnglets; j++) g_onglets[j - 1] = g_onglets[j];
+        g_nOnglets = g_nOnglets - 1;
+        g_onglets[g_nOnglets] = nullptr;
+        return;
+    }
+}
+
+/* Un OCTET, pas la liste : lisible depuis n'importe quelle tache sans verrou.
+ * C'est ce qui permet a un producteur sur le coeur 0 de sortir immediatement
+ * en headless. */
+bool nidmi_ws_quelqu_un_ecoute() { return g_nOnglets > 0; }
+
+void nidmi_ws_envoyer_a_tous(const char* texte) {
+    if (!texte || !texte[0] || g_nOnglets == 0) return;
+    VerrouOnglets verrou;
+    /* Par INDICE, relu a chaque tour : un envoi qui echoue peut, dans cette
+     * meme tache, rayer un onglet du registre (verrou recursif). */
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        AsyncWebSocketClient* c = g_onglets[i];
+        if (c->status() == WS_CONNECTED && c->canSend()) c->text(texte);
+        /* sinon : il ne suit pas, la trame est jetee pour lui seul */
+    }
+}
+
+int nidmi_ws_envoyer_a(uint32_t id, const char* texte) {
+    VerrouOnglets verrou;
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        AsyncWebSocketClient* c = g_onglets[i];
+        if (c->id() != id) continue;
+        if (c->status() != WS_CONNECTED) return -1;
+        if (!c->canSend()) return 0;
+        c->text(texte);
+        return 1;
+    }
+    return -1;
+}
 uint32_t nidmi_ws_trames_jetees() { return g_jetees; }
 
 bool nidmi_ws_pousser(const char* trame) {
@@ -448,14 +506,12 @@ bool nidmi_ws_pousser(const char* trame) {
 
 void nidmi_ws_drainer() {
     if (!g_fileWs) return;
-    AsyncWebSocket& ws = serverCore.websocket();
-    /* On vide la file MEME si l'on n'emet pas : la laisser pleine ferait jeter
-     * les trames suivantes a tort, et masquerait le retour d'un client. */
-    const bool emettre = nidmi_ws_peut_emettre(ws);
+    /* On vide la file MEME si personne n'ecoute : la laisser pleine ferait
+     * jeter les trames suivantes a tort, et masquerait le retour d'un client. */
     TrameWs m;
     uint8_t n = 0;
     while (n < kFileLen && xQueueReceive(g_fileWs, &m, 0) == pdTRUE) {
-        if (emettre) ws.textAll(m.t);
+        nidmi_ws_envoyer_a_tous(m.t);
         n++;
     }
 }

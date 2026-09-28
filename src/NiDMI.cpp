@@ -21,6 +21,7 @@
 #include "diag/SurveillantFlash.h"
 #include "diag/JournalAvant.h"
 #include "diag/Activite.h"
+#include "diag/Chronos.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -1190,6 +1191,8 @@ void nidmi_begin() {
     MappingEngine::surImpression([](const char* origine, const char* etiquette,
                                    float valeur, uint8_t montre,
                                    uint8_t pipe, uint8_t seg) {
+        /* Ce que coute une impression a la tache MIDI (§170), jusqu'au retour. */
+        struct Chrono { const uint32_t t0 = micros(); ~Chrono() { Chronos::impression.noter(micros() - t0); } } chrono;
         /* L'ORIGINE D'ABORD. La trame ne portait que l'etiquette et la valeur :
          * l'app ne pouvait donc pas savoir QUI avait imprime, et attribuait
          * tout au bloc map dont le script tourne sur la carte — les print() des
@@ -1198,10 +1201,10 @@ void nidmi_begin() {
         const char* org = (origine && origine[0]) ? origine : "?";
         char trame[112];
         /* ⚠️ CE RAPPEL S'EXECUTE DANS MidiTask, SUR LE COEUR 0. Il ne doit donc
-         * PAS toucher a la WebSocket : cleanupClients() efface la liste de
-         * clients depuis loopTask, et l'iterer d'ici est un acces a de la
-         * memoire rendue (ServerCore.h). On POUSSE dans une file, loopTask
-         * draine. Le compteur, lui, se lit sans risque de partout. */
+         * PAS toucher a la WebSocket : envoyer, c'est du reseau, et le reseau
+         * n'a rien a faire sur le chemin du MIDI (ServerCore.h, « LES
+         * ONGLETS »). On POUSSE dans une file, loopTask draine. Le nombre
+         * d'onglets, lui, se lit sans risque de partout. */
         /* NI COURBE NI NOMBRE N'ONT D'HISTORIQUE : s'ils ne partent pas, ils
          * n'existent pas. On sort donc AVANT de formater — en headless ce
          * chemin ne coute rien du tout. Seul print() garde une trace. */
@@ -1308,7 +1311,33 @@ void nidmi_begin() {
     Serial.println();
 }
 
+/* ── L'INTERVALLE ENTRE DEUX TOURS DE LA BOUCLE (MESURES §170) ─────────────
+ * Le MIDI USB etait lu une fois par tour de nidmi_loop() : l'intervalle entre
+ * deux tours est ce qu'une note attendait. Il n'est plus sur le chemin d'aucune
+ * note, et reste mesure pour deux raisons : c'est la preuve, dans le meme
+ * demarrage et sous la meme charge, de ce que l'ancien chemin coutait ; et
+ * c'est ce qu'attend encore tout ce qui vit dans cette boucle (RTP, OSC, la
+ * WebSocket). Publie par /api/diag/gigue (« boucle »). */
+volatile uint32_t g_boucleMaxUs = 0, g_boucleTours = 0, g_boucleCumulUs = 0,
+                  g_boucleRetards1ms = 0, g_boucleRetards5ms = 0;
+void nidmi_boucle_reset() {
+    g_boucleMaxUs = g_boucleTours = g_boucleCumulUs = g_boucleRetards1ms = g_boucleRetards5ms = 0;
+}
+
 void nidmi_loop() {
+    {
+        static uint32_t debutPrecedent = 0;
+        const uint32_t debut = micros();
+        if (debutPrecedent) {
+            const uint32_t d = debut - debutPrecedent;
+            if (d > g_boucleMaxUs) g_boucleMaxUs = d;
+            if (d > 1000) g_boucleRetards1ms = g_boucleRetards1ms + 1;
+            if (d > 5000) g_boucleRetards5ms = g_boucleRetards5ms + 1;
+            g_boucleCumulUs = g_boucleCumulUs + d;
+            g_boucleTours = g_boucleTours + 1;
+        }
+        debutPrecedent = debut;
+    }
     /* Chargement du process audio mémorisé, sur un tas encore vierge : c'est
        l'ordre d'allocation qui décide (MESURES.md §15), et trois secondes après
        le boot on est très loin devant l'ouverture d'un navigateur.
@@ -1449,9 +1478,9 @@ void nidmi_loop() {
     nidmi_chrono("composants", tc);
     /* Le rattrapage de la console web : une ligne par tour, hors du rappel
      * WebSocket (voir WebDebugConsole.cpp). */
-    /* LA SEULE FENETRE ou l'on ecrit sur la WebSocket : loopTask, la meme tache
-     * que ws.cleanupClients() de serverCore.update(). Tout le reste du firmware
-     * POUSSE dans la file. Voir ServerCore.h. */
+    /* LA SEULE FENETRE ou l'on ecrit sur la WebSocket : loopTask, par le
+     * registre des onglets et sous son verrou. Tout le reste du firmware
+     * POUSSE dans la file. Voir ServerCore.h, « LES ONGLETS » (§171). */
     tc = nidmi_section("ws");
     /* Le resume de ce que la carte a recu (§167) : AVANT le drainage, pour
      * partir dans ce meme tour. Au plus une trame toutes les 150 ms. */
@@ -1462,15 +1491,21 @@ void nidmi_loop() {
     nidmi_chrono("journal", tc);
     g_sectionEnCours = "hors boucle";
 
-    /* LA BOUCLE REND LA MAIN A CHAQUE TOUR (MESURES §163). Sur le coeur 1,
-     * une tache devenue prete n'est pas toujours elue (§161) : l'audio y
-     * restait « prete » pendant que loopTask (priorite 1) tournait seule. La
-     * garde d'election devait forcer ce choix toutes les 2 ms — mais elle se
-     * reveille par le meme chemin : mesure le 27/09, garde en retard de
-     * 190 ms, bloc audio de 255 ms, quatre decrochages en 23 minutes. Ceder
-     * la main ici fait choisir l'ordonnanceur a chaque tour : la plus haute
-     * tache prete passe, sinon la boucle reprend aussitot. */
-    taskYIELD();
+    /* LA BOUCLE DORT A CHAQUE TOUR (MESURES §170 ; elle cedait la main depuis
+     * le §163). Sur le coeur 1, une tache devenue prete n'est pas toujours
+     * elue (§161) : l'audio y restait « prete » pendant que loopTask (priorite
+     * 1) tournait seule — d'ou taskYIELD() ici, qui faisait choisir
+     * l'ordonnanceur a chaque tour. Mais la boucle reprenait aussitot : 93 %
+     * du coeur 1, 7 000 tours par seconde a parcourir beaucoup de code. Or le
+     * cache d'instructions de l'ESP32-S3 (16 Ko) est PARTAGE par les deux
+     * coeurs : ce tourbillon en chassait le code des autres taches. Dormir un
+     * battement (1 ms) fait choisir l'ordonnanceur tout autant, et rend le
+     * coeur : mesure, la boucle tombe a 13-17 % du coeur 1, l'interpreteur de
+     * scripts gagne 15 % (408 -> 346 µs par execution), l'audio ne perd rien.
+     * Rien de ce qui reste dans la boucle ne se joue a la milliseconde : le
+     * MIDI USB n'y passe plus (§170), le reste est du reseau, des minuteries
+     * de cues et des ecritures au silence. */
+    vTaskDelay(1);
 }
 
 // Instance globale

@@ -17,6 +17,7 @@
 #include "../diag/JournalAvant.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
+#include "../diag/Chronos.h"             // ou passe le temps de la tache MIDI (§170)
 #include <nvs.h>
 #include <esp_heap_caps.h>   // le bloc contigu : le reservoir qui predit la panne
 #include <memory>          // la carte du tas garde son texte jusqu'au dernier envoi
@@ -47,6 +48,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"underruns\":"          + String(m.sousAlimentations) + ",";
         // dont ceux d'une ecriture flash faite en silence : inaudibles (§156)
         json += "\"underruns_ecritures\":" + String(m.retardsEcritures) + ",";
+        // Les notes que la file vers le son n'a pas prises : 0 attendu (§170).
+        json += "\"notes_perdues\":"     + String(AudioEngine::notesPerdues()) + ",";
         // Plaits demande 16 ko contigus, plus sa marge de manœuvre.
         json += "\"engine\":"             + String(m.moteur) + ",";
         json += "\"plaits_ready\":"       + String(m.plaitsPret ? "true" : "false") + ",";
@@ -814,14 +817,17 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * construit rien, pas un octet de tas pris a AsyncTCP.                    */
     /* ── GIGUE D'ORDONNANCEMENT ───────────────────────────────────────────
      * « Si quelque chose doit ralentir, c'est l'UI web — jamais le MIDI »
-     * (CONVERGENCE §1.5). Or le serveur web tourne a la priorite 10 et les
-     * taches temps reel a 5 (ADC) et 4 (MIDI) : il les preempte PAR
-     * CONSTRUCTION. L'inversion est certaine ; le prejudice, lui, se mesure.
+     * (CONVERGENCE §1.5). Le serveur web tourne a la priorite 10 ; les taches
+     * temps reel etaient dessous (5 et 4) et il les preemptait par
+     * construction — elles sont au-dessus depuis le §149 (20 et 19). Le
+     * prejudice se mesure, et c'est ici.
      *
-     * Les deux taches ont une periode fixe (vTaskDelayUntil). On publie donc
+     * Les deux taches ont une periode fixe (10 et 5 ms). On publie donc
      * l'ECART a cette periode : pire cas, moyenne, et nombre de tours ou
-     * l'ecart depasse la moitie de la periode. `?reset=1` ouvre une fenetre
-     * propre — mesurer au repos, puis sous charge, et comparer.
+     * l'ecart depasse la moitie de la periode. Et depuis le §170, ce que le
+     * MIDI USB entrant ATTEND (entree_usb) — et ce qu'il attendait quand la
+     * boucle le lisait (boucle). `?reset=1` ouvre une fenetre propre —
+     * mesurer au repos, puis sous charge, et comparer.
      *
      * La lecture elle-meme est une requete HTTP, donc une charge : c'est
      * pourquoi on RESET avant la charge et on LIT apres, jamais pendant.   */
@@ -832,9 +838,15 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
                                  g_gigueMuxRetards, g_gigueMuxCumulUs;
         extern void nidmi_gigue_midi_reset();
         extern void nidmi_gigue_mux_reset();
+        extern volatile uint32_t g_boucleMaxUs, g_boucleTours, g_boucleCumulUs,
+                                 g_boucleRetards1ms, g_boucleRetards5ms;
+        extern void nidmi_boucle_reset();
         if (request->hasParam("reset")) {
             nidmi_gigue_midi_reset();
             nidmi_gigue_mux_reset();
+            nidmi_boucle_reset();
+            UsbMidiManager::reinitStatsEntree();
+            Chronos::razTout();
             request->send(200, "application/json", "{\"reset\":true}");
             return;
         }
@@ -866,7 +878,45 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         json += ",\"tours\":"     + String(nMux);
         json += ",\"max_us\":"    + String(g_gigueMuxMaxUs);
         json += ",\"moy_us\":"    + String(nMux ? (g_gigueMuxCumulUs / nMux) : 0);
-        json += ",\"retards\":"   + String(g_gigueMuxRetards) + "}}";
+        json += ",\"retards\":"   + String(g_gigueMuxRetards) + "},";
+        /* L'ENTREE MIDI USB (§170) : ce que chaque message a attendu, de son
+         * arrivee a son traitement par MidiTask. */
+        UsbMidiManager::StatsEntree eu;
+        UsbMidiManager::statsEntree(eu);
+        json += "\"entree_usb\":{\"messages\":" + String(eu.messages);
+        json += ",\"max_us\":"        + String(eu.attenteMax);
+        json += ",\"moy_us\":"        + String(eu.attenteMoy);
+        json += ",\"retards_1ms\":"   + String(eu.retards1ms);
+        json += ",\"retards_5ms\":"   + String(eu.retards5ms);
+        json += ",\"retenues\":"      + String(eu.retenues);
+        json += ",\"file_max\":"      + String((unsigned)eu.fileMax);
+        json += ",\"capacite\":"      + String((unsigned)eu.capacite) + "},";
+        /* L'intervalle entre deux tours de la boucle : ce qu'une note USB
+         * attendait AVANT le §170, quand la boucle la lisait. */
+        const uint32_t nB = g_boucleTours;
+        json += "\"boucle\":{\"tours\":" + String(nB);
+        json += ",\"max_us\":"        + String(g_boucleMaxUs);
+        json += ",\"moy_us\":"        + String(nB ? (g_boucleCumulUs / nB) : 0);
+        json += ",\"retards_1ms\":"   + String(g_boucleRetards1ms);
+        json += ",\"retards_5ms\":"   + String(g_boucleRetards5ms) + "},";
+        /* OU PASSE LE TEMPS DE LA TACHE MIDI (§170) : chaque etape, pire et
+         * moyenne en µs, et combien de fois. Voir diag/Chronos.h. */
+        auto chrono = [](const char* nom, const Chronos::Chrono& c, bool dernier) {
+            const uint32_t n = c.n.load();
+            return String("\"") + nom + "\":{\"max_us\":" + String(c.max.load())
+                 + ",\"moy_us\":" + String(n ? c.cumul.load() / n : 0)
+                 + ",\"n\":" + String(n) + (dernier ? "}" : "},");
+        };
+        json += "\"chronos\":{";
+        json += chrono("horloge", Chronos::horloge, false);
+        json += chrono("differes", Chronos::differes, false);
+        json += chrono("mux", Chronos::mux, false);
+        json += chrono("composants", Chronos::composants, false);
+        json += chrono("execution", Chronos::execution, false);
+        json += chrono("emission", Chronos::emission, false);
+        json += chrono("impression", Chronos::impression, false);
+        json += chrono("traitement_usb", Chronos::traitementUsb, true);
+        json += "}}";
         request->send(200, "application/json", json);
     });
 

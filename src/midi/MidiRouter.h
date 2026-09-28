@@ -161,26 +161,38 @@ public:
     // contenu vit dans LittleFS, et l'y ecrire a chaque cue ferait payer une
     // ecriture flash, donc un craquement audio (MESURES.md §13).
     bool chargerScriptNomme(const char* nom, bool persister = false, uint8_t emplacement = 0);
-    const String& nomScript() const { return nomEmplacement(0); }
+
+    /* LES LECTEURS RENDENT UNE COPIE, prise sous le verrou des scripts (§170).
+     * Ils rendaient une reference : le serveur web la recopiait dans sa
+     * reponse pendant qu'une autre tache pouvait remplacer le texte. */
+    String nomScript() const { return nomEmplacement(0); }
     /* Le CONTENU d'un maillon — ce que la carte execute a cet instant. Publie
      * par /api/midi/script?slot=N : sans lui, on ne pouvait que deviner. */
-    const String& contenuEmplacement(uint8_t e) const {
-        static const String vide;
-        return (e < emplacements.size()) ? emplacements[e]->contenu : vide;
+    String contenuEmplacement(uint8_t e) const {
+        MappingEngine::Verrou verrou;
+        return (e < emplacements.size()) ? emplacements[e]->contenu : String();
     }
     /* Le nom porte par un emplacement donne — chaine vide s'il est libre OU
      * s'il n'existe pas encore : pour un lecteur, les deux se valent. */
-    const String& nomEmplacement(uint8_t e) const {
-        static const String vide;
-        return (e < emplacements.size()) ? emplacements[e]->nom : vide;
+    String nomEmplacement(uint8_t e) const {
+        MappingEngine::Verrou verrou;
+        return (e < emplacements.size()) ? emplacements[e]->nom : String();
     }
 
     // Au boot : recharge le script memorise. Appele une fois depuis nidmi_setup.
     void restaurerScript();
-    const String& scriptMidi() const {
-        static const String vide;
-        return emplacements.empty() ? vide : emplacements[0]->contenu;
-    }
+    String scriptMidi() const { return contenuEmplacement(0); }
+
+    /* ── LE MIDI COMPTE AUSSI POUR LE SILENCE (MESURES §170) ───────────────
+     * Une ecriture en flash arrete les deux coeurs jusqu'a ~45 ms (§155) :
+     * elle attend donc que rien ne s'entende. Mais « rien » ne voulait dire que
+     * la sortie AUDIO — une note arrivee pendant l'ecriture, dans le creux
+     * d'une sequence, partait en retard d'autant ; et une carte sans son (un
+     * controleur MIDI) ecrivait n'importe quand. Chaque message MIDI, entrant
+     * ou sortant, date donc son passage ; AudioEngine::silencePourLaFlash()
+     * exige les deux silences. Un mot atomique : rien de plus sur le chemin. */
+    static void noterTrafic();
+    static uint32_t silenceMidiDepuisMs();
 
     // Point d'entree UNIQUE de toute note ENTRANTE (USB, clavier de l'app par
     // WebSocket, RTP...) : applique le script s'il y en a un, puis joue.
@@ -201,6 +213,9 @@ public:
      * par /api/midi/chaine — un seul code, donc un essai qui prouve la
      * production. */
     bool chaineScriptsCc(uint8_t& canal, uint8_t& cc, uint8_t& valeur);
+    /* Son pendant pour les notes, sous le meme verrou. Rend false si un
+     * maillon a avale la note. */
+    bool chaineScriptsNote(uint8_t& canal, uint8_t& note, uint8_t& velocite, bool estNoteOff);
 
     // Réception MIDI pour piloter les LEDs
     void handleMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
@@ -230,6 +245,12 @@ private:
         String contenu;        // "" = emplacement vide, ignore
         String nom;            // nom du fichier .nms, ou "(en ligne)"
         bool   initEnAttente = true;   // un loadbang() est du
+        /* A quoi ce maillon peut repondre, et quand son horloge a quelque chose
+         * a faire (MESURES §170) : on ne l'execute pas pour rien. Voir
+         * MappingEngine, « A QUOI UN SCRIPT REPOND ». Pose avec le contenu. */
+        uint16_t repond = 0;
+        uint32_t prochainTick = 0;
+        bool     tickConnu = false;       // faux : battre au prochain tour
         MappingEngine::Etat etats[MappingEngine::MAX_PIPELINES_SCRIPT];
     };
     /* Alloues un par un, jamais deplaces : voir PLAFOND_SCRIPTS_MAP. */
@@ -243,6 +264,8 @@ private:
     /* Libere les emplacements au-dela de `n`, apres avoir purge leurs reprises :
      * une reprise retient un pointeur sur le texte du script (§101). */
     void _reduireChaine(uint8_t n);
+    /* Nomme un maillon apres coup, sous le verrou — s'il existe encore. */
+    void _nommer(uint8_t e, const String& nom);
     bool rtpEnabled;
     bool oscEnabled;
     bool bluetoothEnabled;

@@ -1,12 +1,15 @@
 #include "UsbMidiManager.h"
 #include "../server/WebDebugConsole.h"
 #include "../diag/Activite.h"   // la LED d'activite de l'app (MESURES §167)
+#include "../diag/Chronos.h"    // ce que coute un message entrant (MESURES §170)
 
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <Preferences.h>
 #include <atomic>
 #include "tusb.h"   // tud_ready, tud_mounted, tud_midi_packet_write
+#include "device/usbd_pvt.h"   // usbd_defer_func : relire l'entree dans la tache usbd
 #include <esp_heap_caps.h>   // le stockage de la file, en PSRAM
+#include <esp_timer.h>       // l'heure d'arrivee d'un message, en microsecondes
 
 // Même clé et règles que nidmi_begin() : mdns_name (SSID AP, mDNS, RTP, BT, nom USB MIDI).
 static String nidmiUsbMidiHostNameFromNvs() {
@@ -212,7 +215,64 @@ void deposer(uint8_t cin, uint8_t statut, uint8_t d1, uint8_t d2) {
     }
 }
 
+/* ── L'ENTREE MIDI USB, TRAITEE DES QU'ELLE ARRIVE (MESURES §170) ─────────
+ * Elle etait lue par update(), dans nidmi_loop() : loopTask, priorite 1, la
+ * tache la moins prioritaire de la carte. Chaque geste dans l'app — ouvrir un
+ * panneau, changer un script — passe par async_tcp (10), qui la preempte :
+ * les notes d'un sequenceur branche en USB attendaient dans la file de TinyUSB
+ * et repartaient par paquets. « La sequence saute un peu quand je touche a
+ * l'UI » (28/09).
+ *
+ * TinyUSB appelle tud_midi_rx_cb() dans la tache usbd (coeur 1, priorite 24)
+ * des qu'un transfert arrive. On y lit tout, on DATE chaque message et on le
+ * depose dans NOTRE file (PSRAM, 512 messages) : quelques microsecondes, rien
+ * d'autre — cette tache passe avant l'audio. MidiTask (coeur 0, 19) dort sur
+ * cette file et traite chaque message des qu'il est la : scripts, son,
+ * composants. La lecture de TinyUSB reste sur le coeur 1 : elle peut rearmer
+ * le point d'entree, une ecriture dans le controleur (§163).
+ *
+ * RIEN NE SE PERD. Notre file pleine (MidiTask arretee : rechargement des
+ * broches), on laisse le reste dans celle de TinyUSB, qui cesse alors
+ * d'accepter les transferts : l'hote attend, il ne jette rien. MidiTask, en
+ * faisant de la place, redemande la lecture a la tache usbd
+ * (usbd_defer_func). Retarde, jamais perdu. */
+struct EntreeUsb { uint32_t paquet; uint32_t t_us; };
+constexpr UBaseType_t kCapaciteEntree = 512;
+StaticQueue_t s_entreeStruct;   // en RAM interne : il porte le verrou de la file
+QueueHandle_t s_entree = nullptr;
+std::atomic<bool> s_relectureDue{false};
+/* L'ATTENTE de chaque message, de son arrivee a son traitement : ce que le
+ * sequenceur entend. Publiee par /api/diag/gigue (« entree_usb »). */
+std::atomic<uint32_t> s_eMessages{0}, s_eAttenteMax{0}, s_eAttenteCumul{0},
+                      s_eRetards1ms{0}, s_eRetards5ms{0}, s_eRetenues{0}, s_eFileMax{0};
+
+// TACHE USBD SEULEMENT (tud_midi_rx_cb, ou relire() par usbd_defer_func).
+void lireTinyUsb() {
+    uint8_t p[4];
+    while (uxQueueSpacesAvailable(s_entree) > 0 && tud_midi_n_packet_read(0, p)) {
+        EntreeUsb e;
+        memcpy(&e.paquet, p, 4);
+        e.t_us = (uint32_t)esp_timer_get_time();
+        xQueueSend(s_entree, &e, 0);   // la place vient d'etre verifiee : seul producteur
+    }
+    const uint32_t n = (uint32_t)uxQueueMessagesWaiting(s_entree);
+    if (n > s_eFileMax.load()) s_eFileMax.store(n);
+    if (uxQueueSpacesAvailable(s_entree) == 0 && tud_midi_n_available(0, 0)) {
+        s_relectureDue = true;         // le reste attend chez TinyUSB, l'hote aussi
+        s_eRetenues++;
+    }
+}
+
+void relire(void*) { lireTinyUsb(); }
+
 }  // namespace
+
+/* Appele par TinyUSB (midi_device.c) a chaque transfert recu, dans la tache
+ * usbd. Le symbole faible de la bibliotheque ne faisait rien. */
+extern "C" void tud_midi_rx_cb(uint8_t itf) {
+    (void)itf;
+    if (s_entree) lireTinyUsb();
+}
 #endif
 
 UsbMidiManager::UsbMidiManager() 
@@ -304,6 +364,23 @@ bool UsbMidiManager::begin() {
 #endif
     }
 
+    if (s_entree == nullptr) {
+        /* La file d'ENTREE, avant USB.begin() : un hote peut envoyer des le
+         * montage. En PSRAM, comme celle de sortie ; a defaut, un quart en RAM
+         * interne. Seules des taches y touchent. */
+        UBaseType_t n = kCapaciteEntree;
+        uint8_t* stockage = (uint8_t*)heap_caps_malloc(n * sizeof(EntreeUsb), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (stockage == nullptr) {
+            n = kCapaciteEntree / 4;
+            stockage = (uint8_t*)heap_caps_malloc(n * sizeof(EntreeUsb), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        }
+        if (stockage != nullptr) {
+            s_entree = xQueueCreateStatic(n, sizeof(EntreeUsb), stockage, &s_entreeStruct);
+        } else {
+            NIDMI_WEB_LOG("[USB-MIDI] ERREUR : pas de memoire pour la file d'entree — le MIDI USB entrant est ignore");
+        }
+    }
+
     if (!usbInitialized) {
         // Sans ceci, l’OS affiche encore le fabricant par défaut du core (« Espressif Systems »).
         USB.manufacturerName("NiDMI");
@@ -357,52 +434,92 @@ void UsbMidiManager::stop() {
     available = false;
 }
 
-void UsbMidiManager::update() {
+/* MidiTask SEULEMENT : voir « L'ENTREE MIDI USB, TRAITEE DES QU'ELLE ARRIVE ».
+ * Attend au plus `attente` le premier message, puis traite tout ce qui est la.
+ *
+ * Format d'un paquet USB-MIDI (4 octets) :
+ *   header = (cable << 4) | CIN,  CIN 0x8 = note off, 0x9 = note on,
+ *                                 0xB = control change
+ *   byte1  = statut (0x9n / 0x8n / 0xBn), byte2 = note/CC, byte3 = velo/valeur
+ *
+ * Convention MIDI respectee : un note-on de velocite 0 EST un note-off. Sans
+ * ca, les claviers qui n'emettent jamais de 0x8n laissent des notes tenues pour
+ * toujours. */
+bool UsbMidiManager::traiterEntree(TickType_t attente) {
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
-    // RECEPTION. Le MIDI USB etait uniquement SORTANT : un clavier ou un
-    // sequenceur branche au port USB de la carte n'avait aucun effet, faute
-    // d'etre lu. On draine ici la file d'entree et on dispatche par les hooks.
-    //
-    // Format d'un paquet USB-MIDI (4 octets) :
-    //   header = (cable << 4) | CIN,  CIN 0x8 = note off, 0x9 = note on,
-    //                                 0xB = control change
-    //   byte1  = statut (0x9n / 0x8n / 0xBn), byte2 = note/CC, byte3 = velo/valeur
-    //
-    // Convention MIDI respectee : un note-on de velocite 0 EST un note-off.
-    // Sans ca, les claviers qui n'emettent jamais de 0x8n laissent des notes
-    // tenues pour toujours.
-    if (!isStarted || !usbInitialized || usbMidi == nullptr) return;
-
-    midiEventPacket_t paquet;
-    // Borne dure : une rafale (glissando, dump SysEx d'un DAW) ne doit pas
-    // monopoliser la boucle principale, qui sert aussi les requetes HTTP.
-    int garde = 0;
-    bool recu = false;
-    while (usbMidi->readPacket(&paquet) && ++garde <= 64) {
-        recu = true;
-        const uint8_t cin   = paquet.header & 0x0F;
-        const uint8_t canal = (uint8_t)((paquet.byte1 & 0x0F) + 1);   // 1..16
-        switch (cin) {
-            case 0x9:
-                if (paquet.byte3 == 0) {
-                    if (onNoteOff) onNoteOff(canal, paquet.byte2, 0);
-                } else if (onNoteOn) {
-                    onNoteOn(canal, paquet.byte2, paquet.byte3);
-                }
-                break;
-            case 0x8:
-                if (onNoteOff) onNoteOff(canal, paquet.byte2, paquet.byte3);
-                break;
-            case 0xB:
-                if (onControlChange) onControlChange(canal, paquet.byte2, paquet.byte3);
-                break;
-            default:
-                break;   // horloge, SysEx, pitch bend : pas encore route
-        }
+    if (s_entree == nullptr) {
+        if (attente) vTaskDelay(attente);
+        return false;
     }
-    /* Un OU, une fois par lecture : la LED d'activite (§167). Tout ce qui est
-     * arrive compte, route ou non — l'horloge d'un sequenceur est une entree. */
-    if (recu) Activite::noter(Activite::MIDI_USB);
+    EntreeUsb e;
+    bool traite = false;
+    if (xQueueReceive(s_entree, &e, attente) == pdTRUE) {
+        traite = true;
+        do {
+            const uint32_t d = (uint32_t)esp_timer_get_time() - e.t_us;
+            s_eMessages++;
+            s_eAttenteCumul += d;
+            if (d > s_eAttenteMax.load()) s_eAttenteMax.store(d);
+            if (d > 1000) s_eRetards1ms++;
+            if (d > 5000) s_eRetards5ms++;
+            /* Arrete depuis l'API : lu, et laisse la. L'hote ne s'engorge pas
+             * pour autant. */
+            if (!isStarted) continue;
+            const uint32_t t0 = (uint32_t)esp_timer_get_time();
+            uint8_t o[4];
+            memcpy(o, &e.paquet, 4);
+            const uint8_t cin   = o[0] & 0x0F;
+            const uint8_t canal = (uint8_t)((o[1] & 0x0F) + 1);   // 1..16
+            switch (cin) {
+                case 0x9:
+                    if (o[3] == 0) {
+                        if (onNoteOff) onNoteOff(canal, o[2], 0);
+                    } else if (onNoteOn) {
+                        onNoteOn(canal, o[2], o[3]);
+                    }
+                    break;
+                case 0x8:
+                    if (onNoteOff) onNoteOff(canal, o[2], o[3]);
+                    break;
+                case 0xB:
+                    if (onControlChange) onControlChange(canal, o[2], o[3]);
+                    break;
+                default:
+                    break;   // horloge, SysEx, pitch bend : pas encore route
+            }
+            Chronos::traitementUsb.noter((uint32_t)esp_timer_get_time() - t0);
+        } while (xQueueReceive(s_entree, &e, 0) == pdTRUE);
+        /* Un OU par lot : la LED d'activite (§167). Tout ce qui est arrive
+         * compte, route ou non — l'horloge d'un sequenceur est une entree. */
+        Activite::noter(Activite::MIDI_USB);
+    }
+    /* De la place est revenue : la tache usbd relit ce que TinyUSB gardait. */
+    if (s_relectureDue.exchange(false)) usbd_defer_func(relire, nullptr, false);
+    return traite;
+#else
+    if (attente) vTaskDelay(attente);
+    return false;
+#endif
+}
+
+void UsbMidiManager::statsEntree(StatsEntree& s) {
+    s = {};
+#if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
+    s.messages   = s_eMessages;
+    s.attenteMax = s_eAttenteMax;
+    s.attenteMoy = s.messages ? (uint32_t)(s_eAttenteCumul / s.messages) : 0;
+    s.retards1ms = s_eRetards1ms;
+    s.retards5ms = s_eRetards5ms;
+    s.retenues   = s_eRetenues;
+    s.fileMax    = (uint16_t)s_eFileMax.load();
+    s.capacite   = s_entree ? (uint16_t)(uxQueueMessagesWaiting(s_entree) + uxQueueSpacesAvailable(s_entree)) : 0;
+#endif
+}
+
+void UsbMidiManager::reinitStatsEntree() {
+#if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
+    s_eMessages = 0; s_eAttenteMax = 0; s_eAttenteCumul = 0;
+    s_eRetards1ms = 0; s_eRetards5ms = 0; s_eRetenues = 0; s_eFileMax = 0;
 #endif
 }
 

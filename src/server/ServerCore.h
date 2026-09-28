@@ -122,55 +122,58 @@ public:
  * L'app ne se reconnectait pas : le moniteur restait muet sans rien dire.
  *
  * Deux questions, dans cet ordre :
- *   1. count() == 0      personne n'ecoute. En headless — la cible — on ne
- *                        formate meme pas. C'est le §9.5 : rien ne part sans
- *                        abonnement d'un client.
- *   2. !availableForWriteAll()   quelqu'un ne suit pas. On JETTE la trame.
+ *   1. personne n'ecoute : en headless — la cible — on ne formate meme pas.
+ *      C'est le §9.5 : rien ne part sans abonnement d'un client.
+ *   2. un onglet ne suit pas (sa file est pleine) : on JETTE la trame, pour
+ *      LUI seulement.
  *
- * Le second point est le coeur du correctif, et c'est un choix de conception :
- * ces flux sont des VISUALISATIONS. Perdre des points de courbe est correct —
- * l'oeil ne les verra pas ; perdre la connexion ne l'est pas. Empiler pour ne
- * rien perdre, c'est perdre tout.
- *
- * L'en-tete de la bibliotheque recommande exactement ces appels avant
- * d'envoyer (AsyncWebSocket.h, commentaire ligne 280). */
-bool nidmi_ws_peut_emettre(AsyncWebSocket& ws);
+ * Le second point est un choix de conception : ces flux sont des
+ * VISUALISATIONS. Perdre des points de courbe est correct — l'oeil ne les
+ * verra pas ; perdre la connexion ne l'est pas. Empiler pour ne rien perdre,
+ * c'est perdre tout. */
 
-/* ── UNE SEULE TACHE TOUCHE LA SOCKET ──────────────────────────────────────
+/* ── LES ONGLETS : UN REGISTRE A NOUS, SOUS VERROU (MESURES §171) ──────────
  *
- * AsyncWebSocket garde ses clients dans un std::list, et — verifie ligne a
- * ligne dans la bibliotheque 3.9.4 — TOUS ses verrous appartiennent a
- * AsyncWebSocketClient (la file de messages d'UN client). Le membre
- * AsyncWebSocket::_lock, lui, n'est JAMAIS pris : la LISTE est nue.
+ * AsyncWebSocket garde ses clients dans un std::list sans verrou (verifie
+ * ligne a ligne, 3.9.4), et elle le MODIFIE dans sa tache, async_tcp : un
+ * client arrive (emplace_back), un client part (erase — onglet ferme, page
+ * rechargee, delai depasse). La regle posee ici disait « on draine depuis
+ * loopTask, la tache qui appelle cleanupClients() » : elle ecartait la course
+ * avec MidiTask, pas celle-la. loopTask (1) et async_tcp (10) partagent le
+ * coeur 1, et async_tcp la preempte a n'importe quelle instruction — au milieu
+ * d'un parcours de la liste. Et la bibliotheque avait sa propre course : un
+ * client dont la file debordait etait FERME par textAll(), donc retire de la
+ * liste que textAll() parcourait.
+ * Constate le 28/09 : panique sur le coeur 1, loopTask dans
+ * availableForWriteAll(), le verrou d'un client deja rendu (MESURES §171).
  *
- * Or nous l'effacons nous-memes : ServerCore::update() appelle
- * ws.cleanupClients(), qui fait _clients.erase(), et update() tourne dans
- * loopTask. Pendant ce temps print()/graph() appelaient textAll() depuis
- * MidiTask, sur le coeur 0 : une iteration de liste pendant qu'un autre fil
- * en retire un maillon. C'est un acces a de la memoire rendue, et il ne se
- * manifeste qu'a la deconnexion d'un client — une fois par soiree, en concert.
+ * On ne touche plus a la liste de la bibliotheque, d'aucune tache. Les
+ * onglets sont dans NOTRE registre : inscrits a WS_EVT_CONNECT, rayes a
+ * WS_EVT_DISCONNECT — deux evenements qu'async_tcp emet lui-meme, le second
+ * depuis le destructeur du client, AVANT que sa memoire ne soit rendue. Un
+ * verrou (mutex, heritage de priorite) couvre le registre ET chaque envoi : un
+ * client en cours de destruction attend, dans son destructeur, que l'envoi en
+ * cours finisse ; il est deja deconnecte, text() rend faux sans rien toucher.
+ * Aucun client n'est plus ferme sur debordement (setCloseClientOnQueueFull) :
+ * sa trame est jetee, la connexion vit. Et cleanupClients() n'est plus
+ * appele : en 3.9.4 la bibliotheque retire elle-meme un client parti, et la
+ * borne du nombre d'onglets se pose a l'arrivee, dans sa tache.
  *
- * ATTENTION au raisonnement qui avait ete pose ici : la telemetrie passait par
- * une file « pour appeler textAll sur le coeur 1, ou vit le serveur web —
- * thread-safe ». C'est FAUX. Le meme coeur n'est pas la meme tache : loopTask
- * (priorite 1) est preemptee par async_tcp (priorite 10) a n'importe quelle
- * instruction, y compris au milieu d'une iteration. L'affinite de coeur
- * n'exclut que le parallelisme vrai, pas l'entrelacement.
- *
- * Regle, donc : ON POUSSE depuis n'importe quelle tache, ON DRAINE depuis
- * loopTask et de nulle part ailleurs — la meme qui appelle cleanupClients().
- * La file est ALLOUEE STATIQUEMENT : le plus gros bloc contigu est la ressource
- * rare de cette carte, une file de 5 ko prise au tas la grignoterait.
- *
- * Reste hors de notre portee : la bibliotheque ajoute et retire des clients
- * depuis sa propre tache sans verrou. On ne peut pas l'en empecher ; on peut
- * cesser d'y ajouter notre propre course. */
-bool nidmi_ws_quelqu_un_ecoute();          // sans toucher a la liste : un compteur
+ * Regle, toujours : ON POUSSE depuis n'importe quelle tache, ON DRAINE depuis
+ * loopTask — la file garde le reseau hors des taches temps reel. Elle est en
+ * PSRAM : le plus gros bloc contigu est la ressource rare de cette carte. */
+bool nidmi_ws_quelqu_un_ecoute();          // un octet : lisible de partout, sans verrou
 bool nidmi_ws_pousser(const char* trame);  // depuis N'IMPORTE QUELLE tache
 void nidmi_ws_drainer();                   // loopTask UNIQUEMENT
+/* L'envoi lui-meme, sous le verrou du registre — pour les drains de loopTask.
+ * A tous : chaque onglet qui suit la recoit, les autres non. */
+void nidmi_ws_envoyer_a_tous(const char* texte);
+/* A un seul, par son IDENTIFIANT (jamais un pointeur gardé : il pend des que
+ * l'onglet part). 1 = envoye, 0 = sa file est pleine (repasser), -1 = parti. */
+int  nidmi_ws_envoyer_a(uint32_t id, const char* texte);
 uint32_t nidmi_ws_trames_jetees();         // ce qu'on a perdu, pour le dire
 void nidmi_ws_file_init();                 // appele par ServerCore::begin()
-void nidmi_ws_client_arrive();             // depuis le rappel WebSocket
-void nidmi_ws_client_parti();
+void nidmi_ws_client_arrive(AsyncWebSocketClient* client);   // WS_EVT_CONNECT (async_tcp)
+void nidmi_ws_client_parti(AsyncWebSocketClient* client);    // WS_EVT_DISCONNECT (async_tcp)
 
 // Note: L'instance globale serverCore est déclarée dans Globals.h

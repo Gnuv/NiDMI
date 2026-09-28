@@ -246,9 +246,15 @@ float volume();
  * rien ne s'entend. */
 uint32_t silenceDepuisMs();
 
-/* LE MOMENT D'ECRIRE EN FLASH (MESURES §155, §156). Une ecriture qui efface une
- * page arrete les deux coeurs ~45 ms, plus que les 30 ms d'avance du DMA : ce
- * qui peut attendre attend donc que la sortie soit muette depuis 0,5 s. */
+/* Les notes que la file vers le son n'a pas pu prendre, meme apres 10 ms
+ * d'attente (§170) : 0 attendu. Publie par /api/audio/status. */
+uint32_t notesPerdues();
+
+/* LE MOMENT D'ECRIRE EN FLASH (MESURES §155, §156, §170). Une ecriture qui
+ * efface une page arrete les deux coeurs ~45 ms, plus que les 30 ms d'avance
+ * du DMA : ce qui peut attendre attend donc que la sortie soit muette depuis
+ * 0,5 s — ET qu'aucun message MIDI ne soit passe depuis 0,5 s : une note
+ * arrivee pendant l'ecriture partait en retard d'autant (§170). */
 constexpr uint32_t SILENCE_POUR_LA_FLASH_MS = 500;
 bool silencePourLaFlash();
 

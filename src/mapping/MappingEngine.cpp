@@ -12,16 +12,38 @@
 #include "../server/ServerCore.h"
 #include "../server/ServerCallbacks.h"   // nidmi_sys_recevoir : s("sys.<nom>")
 #include "../diag/Activite.h"            // la LED d'activite de l'app (MESURES §167)
+#include "../diag/Chronos.h"             // execution / emission d'un battement (§170)
 #include <stdlib.h>
 #include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#endif
+
+/* Le verrou des scripts : voir MappingEngine.h. Cree a l'initialisation
+ * statique, avant toute tache — comme le verrou de Serial : creer un mutex ne
+ * demande pas l'ordonnanceur. Statique : pas un octet pris au tas. */
+#ifndef NMS_BANC_HOTE
+namespace {
+StaticSemaphore_t g_tamponVerrou;
+SemaphoreHandle_t g_verrou = xSemaphoreCreateRecursiveMutexStatic(&g_tamponVerrou);
+}  // namespace
+// Nul seulement avant l'initialisation statique de ce fichier : un seul fil.
+MappingEngine::Verrou::Verrou()  { if (g_verrou) xSemaphoreTakeRecursive(g_verrou, portMAX_DELAY); }
+MappingEngine::Verrou::~Verrou() { if (g_verrou) xSemaphoreGiveRecursive(g_verrou); }
+#else
+MappingEngine::Verrou::Verrou()  {}
+MappingEngine::Verrou::~Verrou() {}
 #endif
 
 // INITIALISATION DES STATICS (Obligatoire dans le .cpp)
 FluxRegistry::Entry FluxRegistry::entries[32];
 int FluxRegistry::count = 0;
 
+/* Sous le verrou des scripts : deux taches qui publiaient chacune un NOUVEAU
+ * nom ecrivaient la meme case, et le compte en avancait de deux. */
 void FluxRegistry::update(const char* name, float val) {
     if (!name || name[0] == '\0') return;
+    MappingEngine::Verrou verrou;
     for (int i = 0; i < count; i++) {
         if (strcmp(entries[i].name, name) == 0) {
             entries[i].value = val;
@@ -148,6 +170,18 @@ uint32_t g_maintenant = 0;
  * lignes de temps, deux horloges, chacune ecrite par une seule tache. */
 uint32_t g_horsLigneMaintenant = 0;
 
+/* LE PROCHAIN BATTEMENT UTILE (§170), releve pendant un battement : chaque
+ * metro() evalue y note son echeance, executer() en rend la plus proche. Une
+ * seule execution a la fois (verrou des scripts) : un accumulateur suffit. */
+bool     g_indiceActif = false;
+uint32_t g_indiceInstant = 0;
+int32_t  g_indiceMin = INT32_MAX;     // ecart a l'instant du battement, en ms
+void noterIndice(uint32_t echeance) {
+    if (!g_indiceActif) return;
+    const int32_t d = (int32_t)(echeance - g_indiceInstant);
+    if (d < g_indiceMin) g_indiceMin = d;
+}
+
 
 MappingEngine::Impression g_impression = nullptr;
 MappingEngine::EmetteurOsc g_emetteurOsc = nullptr;
@@ -156,14 +190,21 @@ MappingEngine::EmetteurOsc g_emetteurOsc = nullptr;
 
 // Retire les commentaires « // … » et normalise les blancs. Le moteur web fait
 // exactement ceci (script.replace(/\/\/[^\n]*/g,'')) avant de decouper.
+/* UNE allocation, pas une par caractere (MESURES §170). `s += c` sur une
+ * String Arduino REALLOUAIT a chaque caractere — et le texte etait d'abord
+ * recopie : une centaine d'allocations du tas interne par execution, a chaque
+ * battement d'horloge et a chaque note. Mesure : la tache MIDI en lecture est
+ * passee de 18,6 a 16,3 % du coeur 0. Le gros du cout etait ailleurs — des
+ * executions pour rien, voir « A QUOI UN SCRIPT REPOND » (MappingEngine.h). */
 String nettoyer(const char* script) {
     String s;
-    const String brut = String(script);
+    const size_t n = strlen(script);
+    s.reserve(n);
     bool enCommentaire = false;
-    for (unsigned i = 0; i < brut.length(); i++) {
-        const char c = brut[i];
+    for (size_t i = 0; i < n; i++) {
+        const char c = script[i];
         if (enCommentaire) { if (c == '\n') enCommentaire = false; continue; }
-        if (c == '/' && i + 1 < brut.length() && brut[i + 1] == '/') { enCommentaire = true; i++; continue; }
+        if (c == '/' && i + 1 < n && script[i + 1] == '/') { enCommentaire = true; i++; continue; }
         if (c == '\n' || c == '\r' || c == '\t') { s += ' '; continue; }
         s += c;
     }
@@ -287,6 +328,7 @@ void MappingEngine::surImpression(Impression fn) { g_impression = fn; }
 void MappingEngine::surOsc(EmetteurOsc fn) { g_emetteurOsc = fn; }
 
 void MappingEngine::reinitialiser() {
+    Verrou verrou;
     for (int i = 0; i < MAX_PIPELINES; i++) g_etats[i].reinitialiser();
     /* Et les reprises en attente : elles portent un POINTEUR vers le texte du
      * script. Changer de script libere ce texte — rejouer ensuite lirait de la
@@ -439,9 +481,15 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
     if (verbe(seg, "metro", args)) {
         if (e.type != Evt::Tick) return non;
         const long ms = (long)valeurArg(args.length() ? args : String("0"));
-        if (ms <= 0) return non;
-        if (!st.metroArme) { st.metroArme = true; st.metroProchain = e.instant + (uint32_t)ms; return non; }
-        if ((int32_t)(e.instant - st.metroProchain) < 0) return non;
+        /* Eteint (periode nulle) : a revoir des le battement suivant — sa
+         * periode peut revenir par le bus, « metro(r("tempo")) » (§170). */
+        if (ms <= 0) { noterIndice(e.instant + 1); return non; }
+        if (!st.metroArme) {
+            st.metroArme = true; st.metroProchain = e.instant + (uint32_t)ms;
+            noterIndice(st.metroProchain);
+            return non;
+        }
+        if ((int32_t)(e.instant - st.metroProchain) < 0) { noterIndice(st.metroProchain); return non; }
         /* Replanification : « prochain += ms », donc SANS DERIVE — et
          * resynchronisation sur maintenant seulement si l'on a plus d'une
          * periode de retard. C'est mot pour mot la regle du moteur web ; y
@@ -452,6 +500,7 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
          * fois par appel. Divergence declaree dans le vocabulaire, pas tue. */
         if ((int32_t)(e.instant - st.metroProchain) > (int32_t)ms) st.metroProchain = e.instant;
         st.metroProchain += (uint32_t)ms;
+        noterIndice(st.metroProchain);
         return { 1.0f, true };
     }
     const bool note = (e.type == Evt::NoteOn || e.type == Evt::NoteOff);
@@ -523,7 +572,57 @@ Source evaluerSource(const String& seg, const Evt& e, MappingEngine::Etat& st) {
     return non;
 }
 
+/* LES EVENEMENTS AUXQUELS UNE SOURCE PEUT REPONDRE — un bit par
+ * Evenement::Type. CALQUE SUR evaluerSource(), dans le meme ordre, et en
+ * ignorant les filtres (canal, numero) : ce masque dit « peut-etre », jamais
+ * « non » a tort. Le banc de conformite le verifie sur tout son corpus. */
+uint16_t evenementsDeSource(const String& seg) {
+    using M = MappingEngine;
+    const uint16_t horsHorloge = (uint16_t)(0xFFFFu & ~(M::masqueDe(Evt::Tick) | M::masqueDe(Evt::Init)));
+    String args;
+    // Sur un battement, seules loadbang() et metro( passent la garde ; elles ne
+    // repondent qu'a leur propre battement, et le reste ne repond qu'hors horloge.
+    if (seg == "loadbang()")         return M::masqueDe(Evt::Init);
+    if (seg.startsWith("metro("))    return M::masqueDe(Evt::Tick);
+    if (estNombre(seg))              return horsHorloge;
+    if (verbe(seg, "in", args) || verbe(seg, "inlet", args) || verbe(seg, "raw.in", args))
+                                     return horsHorloge;
+    if (verbe(seg, "osc.in", args))  return M::masqueDe(Evt::Osc);
+    if (verbe(seg, "f", args) || verbe(seg, "i", args) ||
+        verbe(seg, "r", args) || verbe(seg, "receive", args))
+                                     return horsHorloge;
+    if (verbe(seg, "note.in", args)) return (uint16_t)(M::masqueDe(Evt::NoteOn) | M::masqueDe(Evt::NoteOff));
+    if (verbe(seg, "note.on", args) || verbe(seg, "vel.in", args) || verbe(seg, "notechan.in", args))
+                                     return M::masqueDe(Evt::NoteOn);
+    if (verbe(seg, "note.off", args)) return M::masqueDe(Evt::NoteOff);
+    if (verbe(seg, "ctl.in", args) || verbe(seg, "ccnum.in", args) || verbe(seg, "ctlchan.in", args))
+                                     return M::masqueDe(Evt::Cc);
+    if (verbe(seg, "bend.in", args))      return M::masqueDe(Evt::Bend);
+    if (verbe(seg, "touch.in", args))     return M::masqueDe(Evt::Touch);
+    if (verbe(seg, "polytouch.in", args)) return M::masqueDe(Evt::PolyTouch);
+    if (verbe(seg, "pgm.in", args))       return M::masqueDe(Evt::Pgm);
+    return 0;   // une source inconnue ne tire jamais
+}
+
 }  // namespace
+
+uint16_t MappingEngine::evenementsDuScript(const char* script) {
+    if (!script || !script[0]) return 0;
+    const String s = nettoyer(script);
+    uint16_t m = 0;
+    int debutPipe = 0;
+    while (debutPipe <= (int)s.length()) {
+        const int finPipe = prochainSep(s, debutPipe, ';');
+        const String pipe = s.substring(debutPipe, (finPipe == -1) ? s.length() : finPipe);
+        const int finSrc = prochainSep(pipe, 0, ':');
+        String src = pipe.substring(0, (finSrc == -1) ? pipe.length() : finSrc);
+        src.trim();
+        if (src.length()) m |= evenementsDeSource(src);
+        if (finPipe == -1) break;
+        debutPipe = finPipe + 1;
+    }
+    return m;
+}
 
 namespace {
 
@@ -1182,11 +1281,13 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
 
 int MappingEngine::executer(const char* script, const Evenement& evt,
                             Sortie* sorties, int max, bool& traite,
-                            Etat* etats, int nEtats, bool horsLigne) {
+                            Etat* etats, int nEtats, bool horsLigne,
+                            uint32_t* prochainUtile) {
     if (!etats || nEtats <= 0) { etats = g_etats; nEtats = MAX_PIPELINES; }
     traite = false;
     int n = 0;
     if (!script || script[0] == '\0' || !sorties || max <= 0) return 0;
+    Verrou verrou;   // les reprises, le bus, l'horloge : a une tache a la fois (§170)
 
     /* L'HORLOGE AVANCE AVANT LES PIPELINES. Un del() ou un makenote()
      * rencontre pendant ce battement doit compter a partir de maintenant, pas
@@ -1197,6 +1298,9 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
      * tard. */
     if (evt.type == Evenement::Tick)
         (horsLigne ? g_horsLigneMaintenant : g_maintenant) = evt.instant;
+    /* Le prochain battement utile : releve par les metro() de ce battement. */
+    const bool indice = (evt.type == Evenement::Tick && prochainUtile);
+    if (indice) { g_indiceActif = true; g_indiceInstant = evt.instant; g_indiceMin = INT32_MAX; }
 
     const String s = nettoyer(script);
     const Famille fEvt = familleEvenement(evt);
@@ -1270,6 +1374,14 @@ int MappingEngine::executer(const char* script, const Evenement& evt,
      * note d'origine ressortirait par le passage transparent A COTE de la note
      * fabriquee — deux notes la ou le script n'en demandait qu'une. */
     if (e.type != type0 || e.a != a0 || e.b != b0) traite = true;
+    if (indice) {
+        g_indiceActif = false;
+        /* Aucun metro() actif : un battement ne fera rien avant que le script
+         * ou ses etats ne changent — ce qui remet l'indice a zero chez
+         * l'appelant. « Loin » : douze jours, sans deborder. */
+        *prochainUtile = evt.instant + ((g_indiceMin == INT32_MAX) ? 0x40000000u
+                                        : (uint32_t)((g_indiceMin < 1) ? 1 : g_indiceMin));
+    }
     return n;
 }
 
@@ -1330,6 +1442,7 @@ static int rejouerDepuis(const char* script, uint8_t pipeIdx, uint8_t segIdx,
  * elle qui prouve del(), makenote(), lag() et ramp(). */
 int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
                                   bool horsLigne) {
+    Verrou verrou;   // une reprise pointe un texte qu'une autre tache peut rendre (§170)
     (horsLigne ? g_horsLigneMaintenant : g_maintenant) = maintenant;
     int total = 0;
     for (int i = 0; i < MAX_REPRISES; i++) {
@@ -1367,6 +1480,7 @@ int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
 }
 
 void MappingEngine::viderDifferes(const char* script) {
+    Verrou verrou;
     for (int i = 0; i < MAX_REPRISES; i++)
         if (!script || g_reprises[i].script == script) g_reprises[i].actif = false;
 }
@@ -1546,7 +1660,7 @@ void MappingEngine::executerCapteur(const char* script, float valeur,
  * le declencheur. */
 void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t instant,
                            MidiSender* sender, Etat* etats, int nEtats,
-                           const char* origine) {
+                           const char* origine, uint32_t* prochainUtile) {
     if (!script || script[0] == '\0') return;
     Evenement e;
     e.type = type;
@@ -1554,8 +1668,15 @@ void MappingEngine::battre(const char* script, Evenement::Type type, uint32_t in
     e.instant = instant;                  // l'horloge est posee par executer()
     Sortie liste[MAX_SORTIES];
     bool traite = false;
-    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
-    if (n > 0) emettreVers(sender, liste, n);
+    const uint32_t t0 = micros();
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats,
+                           /*horsLigne=*/false, prochainUtile);
+    const uint32_t t1 = micros();
+    Chronos::execution.noter(t1 - t0);
+    if (n > 0) {
+        emettreVers(sender, liste, n);
+        Chronos::emission.noter(micros() - t1);
+    }
 }
 
 void MappingEngine::battreOsc(const char* script, const char* adresse, float valeur,

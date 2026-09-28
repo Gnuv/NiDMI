@@ -17,6 +17,7 @@
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
 #include "../config/EcrituresDifferees.h"
+#include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
 #include <Preferences.h>
 #include <driver/i2s_std.h>
 #include <esp_attr.h>
@@ -36,6 +37,12 @@ constexpr float  RAMPE_MS   = 8.0f;         // anti-clic à l'attaque et à l'ex
 I2SClass    i2s;
 TaskHandle_t tache      = nullptr;
 QueueHandle_t evenements = nullptr;
+/* Le stockage de la file des notes : pris une fois, garde d'un demarrage du
+ * moteur a l'autre (voir « LA FILE DES NOTES VERS LE SON »). */
+constexpr UBaseType_t CAPACITE_EVENEMENTS = 256;
+uint8_t*      stockageEvenements = nullptr;
+StaticQueue_t structureEvenements;
+volatile uint32_t notesPerduesCompte = 0;
 volatile bool demarre    = false;
 /* Arret propre de la tache audio : elle rend la main d'elle-meme plutot que
  * d'etre tuee. La tuer pendant un i2s.write() laisserait le DMA a moitie servi
@@ -772,7 +779,21 @@ bool ensureStarted() {
 
   heapAvant = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
 
-  evenements = xQueueCreate(32, sizeof(Evenement));
+  /* LA FILE DES NOTES VERS LE SON (MESURES §170). Elle tenait 32 evenements,
+   * et un envoi sur une file pleine JETAIT la note — une note-off comprise :
+   * une voix tenue pour toujours. 256, en PSRAM (seules des taches y touchent,
+   * jamais cache coupe) : l'audio la vide a chaque bloc (2,5 ms), et le MIDI
+   * USB n'en apporte pas le dixieme dans ce temps. */
+  if (!stockageEvenements) {
+    stockageEvenements = (uint8_t*)heap_caps_malloc(CAPACITE_EVENEMENTS * sizeof(Evenement),
+                                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!stockageEvenements)
+      stockageEvenements = (uint8_t*)heap_caps_malloc(CAPACITE_EVENEMENTS * sizeof(Evenement),
+                                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  }
+  if (stockageEvenements)
+    evenements = xQueueCreateStatic(CAPACITE_EVENEMENTS, sizeof(Evenement),
+                                    stockageEvenements, &structureEvenements);
   if (!evenements) { Serial.println("[audio] file impossible"); return false; }
 
   // ── Reprendre les broches au domaine RTC avant de configurer l'I2S ───────
@@ -902,17 +923,26 @@ void couperSon() {
  * Et c'est la volonte de l'usager : pas de son tant qu'un moteur audio n'a pas
  * ete charge. Un boitier qui chante sans qu'on le lui ait demande est une
  * surprise, pas une fonction. */
+/* PERDRE UNE NOTE EST UNE FAUTE, une note-off surtout (regle du 24/09). File
+ * pleine, on ATTEND qu'un bloc la vide — 2,5 ms — plutot que de jeter : un
+ * retard d'un bloc s'entend a peine, une voix bloquee s'entend toujours. Au
+ * plus 10 ms : au-dela, l'audio est deja arrete, et le MIDI ne doit pas
+ * rester pendu a lui. Ce qui se perd alors se COMPTE (notesPerdues). */
+static void deposerEvenement(const Evenement& e) {
+  if (xQueueSend(evenements, &e, pdMS_TO_TICKS(10)) != pdTRUE) notesPerduesCompte = notesPerduesCompte + 1;
+}
+
 void noteOn(uint8_t note, uint8_t velocity) {
   if (!demarre) return;
-  Evenement e{note, velocity};
-  xQueueSend(evenements, &e, 0);            // jamais bloquant : on préfère
-}                                           // perdre une note qu'un paquet TCP
+  deposerEvenement(Evenement{note, velocity});
+}
 
 void noteOff(uint8_t note) {
   if (!demarre) return;
-  Evenement e{note, 0};
-  xQueueSend(evenements, &e, 0);
+  deposerEvenement(Evenement{note, 0});
 }
+
+uint32_t notesPerdues() { return notesPerduesCompte; }
 
 void testTone(float hz, uint32_t ms) {
   if (!ensureStarted()) return;
@@ -1196,7 +1226,8 @@ uint32_t pireBlocEtRaz(uint32_t* renduUs) {
 }
 
 bool silencePourLaFlash() {
-  return silenceDepuisMs() >= SILENCE_POUR_LA_FLASH_MS;
+  return silenceDepuisMs() >= SILENCE_POUR_LA_FLASH_MS
+      && MidiRouter::silenceMidiDepuisMs() >= SILENCE_POUR_LA_FLASH_MS;   // et le MIDI (§170)
 }
 void ecritureFlashDebut() { ecrituresFlash = ecrituresFlash + 1; }   // -> impair
 void ecritureFlashFin()   { ecrituresFlash = ecrituresFlash + 1; }   // -> pair

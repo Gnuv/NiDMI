@@ -57,17 +57,6 @@ static void ring_push(const char* line) {
     r[pos][kLineCap - 1] = '\0';
 }
 
-static void send_debug_log(AsyncWebSocketClient* client, const char* line) {
-    if (!line) {
-        return;
-    }
-    char msg[kLineCap + 16];
-    snprintf(msg, sizeof(msg), "DEBUG_LOG:%s", line);
-    if (client) {
-        client->text(msg);
-    }
-}
-
 /* LE RATTRAPAGE D'HISTORIQUE SE FAIT HORS DU RAPPEL, UNE LIGNE A LA FOIS.
  *
  * Il se faisait ICI, dans le rappel WS_EVT_DATA, en poussant les 48 lignes du
@@ -95,26 +84,31 @@ bool nidmi_web_debug_is_supported() {
     return true;
 }
 
+/* Par le registre des onglets (ServerCore.h, « LES ONGLETS ») : g_ws->client()
+ * parcourait la liste de la bibliotheque pendant qu'async_tcp la modifiait
+ * (MESURES §171). */
 void nidmi_web_debug_pump() {
     if (!g_flushClient || !g_ws) return;
-    AsyncWebSocketClient* c = g_ws->client(g_flushClient);
-    if (!c || c->status() != WS_CONNECTED) { g_flushClient = 0; return; }
-    if (!c->canSend()) return;                 // file pleine : on repassera
     /* D'abord la vie precedente (§162) : ce qu'un redemarrage a efface de
      * l'historique, la memoire RTC l'a garde. */
     const uint16_t avant = JournalAvant::nbLignesRejeu();
     if (g_flushIndex >= avant + g_size) {
-        c->text("DEBUG_CONSOLE_STATE:1");      // l'accuse ferme le rattrapage
-        g_flushClient = 0;
+        // l'accuse ferme le rattrapage ; file pleine (0) : on repassera
+        if (nidmi_ws_envoyer_a(g_flushClient, "DEBUG_CONSOLE_STATE:1") != 0) g_flushClient = 0;
         return;
     }
+    const char* ligne = nullptr;
     if (g_flushIndex < avant) {
-        send_debug_log(c, JournalAvant::ligneRejeu((uint8_t)g_flushIndex));
+        ligne = JournalAvant::ligneRejeu((uint8_t)g_flushIndex);
     } else {
         LigneRing* r = ring();
-        if (r) send_debug_log(c, r[(g_start + g_flushIndex - avant) % kRingLines]);
+        if (r) ligne = r[(g_start + g_flushIndex - avant) % kRingLines];
     }
-    ++g_flushIndex;
+    char msg[kLineCap + 16];
+    snprintf(msg, sizeof(msg), "DEBUG_LOG:%s", ligne ? ligne : "");
+    const int r = nidmi_ws_envoyer_a(g_flushClient, msg);
+    if (r < 0) { g_flushClient = 0; return; }   // parti
+    if (r > 0) ++g_flushIndex;                  // 0 : file pleine, on repassera
 }
 
 void nidmi_web_debug_handle_ws_text(AsyncWebSocketClient* client, const String& message) {
