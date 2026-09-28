@@ -35,11 +35,18 @@ size_t espaceUtilise();
 // Liste JSON des échantillons présents : [{"name":…,"bytes":…}, …]
 String listerJson();
 
-// Écriture par fragments (le corps d'un POST arrive en morceaux).
-bool ecrireDebut(const char* nom);
-bool ecrireMorceau(const uint8_t* donnees, size_t taille);
-bool ecrireFin();
-void ecrireAbandon();
+// Écriture par fragments (le corps d'un POST arrive en morceaux). UN
+// téléversement à la fois, tenu par `qui` (la requête qui l'a ouvert) : les
+// autres fonctions n'agissent que pour lui. ecrireFin() referme, puis refuse
+// — et RETIRE — un fichier que le lecteur ne saurait pas jouer (écriture
+// incomplète, pas un WAV PCM 16 bits) : il était accepté, listé, marqué ●, et
+// ne sonnait jamais (MESURES §177). ecrireAbandon() : la requête est partie
+// avant la fin, le fichier à moitié écrit s'en va avec elle.
+constexpr size_t NOM_MAX = 48;          // nul final compris
+bool ecrireDebut(const void* qui, const char* nom);
+bool ecrireMorceau(const void* qui, const uint8_t* donnees, size_t taille);
+bool ecrireFin(const void* qui, String& raison);
+void ecrireAbandon(const void* qui);
 
 bool supprimer(const char* nom);
 
@@ -58,24 +65,42 @@ bool supprimer(const char* nom);
 //
 // Décharger ne rend donc rien qui manque, et recharger coûte 32 à 72 ms par
 // échantillon (mesuré) — une latence à chaque changement de cue, pour rien.
-// On charge tout au démarrage et on n'y revient plus. Ce n'est pas une
-// exception qui complique : c'est un mécanisme en moins.
+// On charge tout UNE fois ; ensuite, un téléversement ou une suppression ne
+// touche qu'à SON échantillon (§177) — il ne se passait rien : un son
+// téléversé après ce chargement restait « absent » jusqu'au redémarrage, un
+// son remplacé gardait l'ancien.
 #ifndef SAMPLES_MAX
 #define SAMPLES_MAX 24        // mapfs n'en tiendra jamais beaucoup plus
 #endif
 
-// Charge tout ce que mapfs contient. Retourne le nombre d'échantillons prêts.
+// Charge tout ce que mapfs contient, la première fois ; les appels suivants
+// ne relisent rien. Retourne le nombre d'échantillons prêts.
 uint8_t chargerTout();
-// Recharge après un téléversement ou une suppression.
-void    oublierTout();
 
-uint8_t         nombreCharges();
+// ── Changer le magasin pendant que la tâche audio le lit ───────────────────
+//
+// Un emplacement n'est jamais réécrit sous une voix. Le son NOUVEAU va dans un
+// emplacement libre ; il devient lisible (par son nom) AVANT que l'ancien du
+// même nom cesse de l'être — aucun déclenchement ne tombe entre les deux.
+// L'ancien est RETIRÉ : plus trouvé par son nom, plus lu (donnees() rend nul,
+// ses voix se taisent au bloc suivant). Sa PSRAM ne se rend qu'avec liberer(),
+// que l'appelant ne fait qu'une fois la tâche audio sortie du bloc qui a pu la
+// lire (AudioEngine::echantillonArrive / echantillonParti).
+//
+// installer() : lit `nom` (30 à 70 ms de flash, hors verrou) et le publie ;
+// `retire` = l'emplacement de l'ancien, -1 s'il n'y en avait pas. Magasin pas
+// encore chargé : rien à faire, chargerTout() le lira avec les autres.
+bool installer(const char* nom, String& raison, int& retire);
+int  retirer(const char* nom);                 // l'emplacement retiré, -1 si absent
+void liberer(int i);
+
+uint8_t         nombreCharges();               // les emplacements lisibles
 int             indexDe(const char* nom);      // -1 si absent
-const int16_t*  donnees(uint8_t i);            // en PSRAM
+bool            lisible(uint8_t i);            // faux : retiré, ou vide
+const int16_t*  donnees(uint8_t i);            // en PSRAM ; nul si pas lisible
 size_t          trames(uint8_t i);
 bool            stereo(uint8_t i);
 uint32_t        frequence(uint8_t i);          // celle du fichier, pas celle de l'I2S
-const char*     nom(uint8_t i);
 size_t          octetsPsram();                 // total, tous échantillons
 
 }  // namespace SampleStore

@@ -458,6 +458,13 @@ void boucleAudio(void*) {
     if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
+    /* UN SON RETIRE (remplace, supprime — §177) se tait ici, au debut du bloc :
+     * sa memoire ne se rend que deux blocs plus tard (rendreApresLecture). Sans
+     * ce balayage, une voix restee sur un emplacement retire — magasin vide,
+     * rendreSample() n'etait plus appele — rejouait le son suivant qui s'y
+     * installe. */
+    for (uint8_t v = 0; v < VOIX_MAX; v++)
+      if (voixEch[v].actif && !SampleStore::lisible(voixEch[v].iEch)) voixEch[v].actif = false;
 
     const uint32_t t0 = millis();
     const uint32_t u0 = micros();
@@ -577,9 +584,9 @@ void memoriser(const String& valeur) {
   restaurationCoupee = false;
 }
 
-// Appele une seule fois, a la premiere note : on ne charge JAMAIS au boot, pour
-// la meme raison que le reste du moteur est paresseux — un echec ici ne doit
-// pas pouvoir couter l'OTA.
+// Appele une seule fois, par restaurerAuBoot() (3 s apres le demarrage, sous le
+// garde-fou des plantages consecutifs) : un echec ici ne doit pas pouvoir couter
+// l'OTA.
 void restaurer() {
   Preferences p;
   if (!p.begin(NVS_ESPACE, true)) return;
@@ -1099,7 +1106,7 @@ bool declenchementSurCue() { return sampleSurCue; }
 bool setSampler(const char* nom, String& raison, bool persister) {
   if (!ensureStarted()) { raison = "audio indisponible"; return false; }
   libererPlaits();                       // on ne tient jamais les deux à la fois
-  if (SampleStore::nombreCharges() == 0) SampleStore::chargerTout();
+  SampleStore::chargerTout();            // la premiere fois ; ensuite, rien a relire
   if (nom && *nom && SampleStore::indexDe(nom) < 0) {
     raison = "echantillon « " + String(nom) + " » absent de mapfs";
     return false;
@@ -1114,15 +1121,47 @@ void arreterSampler(bool persister) {
   const bool etaitArme = (moteurCourant == -2);
   if (etaitArme) { moteurCourant = -1; if (persister) memoriser("-1"); }
   arreterEchantillon();
-  /* ON NE LIBERE PLUS LA PSRAM. Il n'y a plus rien a liberer au bon moment :
-   * les echantillons restent charges pour la vie de la carte (voir
-   * SampleStore.h — le pire cas absolu tient dans 12,7 % de la PSRAM). Avec eux
-   * disparait l'acces-apres-liberation que ce vTaskDelay protegeait, et la
-   * latence de 32 a 72 ms qu'un rechargement coutait a chaque cue. */
+  /* ON NE LIBERE PAS LA PSRAM. Les echantillons restent charges tant que
+   * leur fichier est dans mapfs (voir SampleStore.h — le pire cas absolu tient
+   * dans 12,7 % de la PSRAM) : pas de rechargement de 32 a 72 ms a chaque cue.
+   * Seuls un remplacement ou une suppression rendent la memoire d'UN son, et
+   * a l'abri de la tache audio (echantillonArrive / echantillonParti). */
 }
 
 bool samplerActif() { return moteurCourant == -2 && SampleStore::nombreCharges() > 0; }
 const char* samplerNom() { return echantillonClavier; }
+
+/* RENDRE LA PSRAM D'UN SON RETIRE, quand la tache audio ne peut plus la lire.
+ * Retire, il n'est plus trouve par son nom, et le bloc suivant coupe ses voix
+ * (boucleAudio) ; seul le bloc EN COURS a l'instant du retrait a pu le lire.
+ * Deux blocs finis (5 ms) : il est fini. La tache arretee ne lit rien — et
+ * une tache qui ne rend plus de bloc depuis 200 ms n'est pas en train de
+ * rendre. */
+static void rendreApresLecture(int i) {
+  if (i < 0) return;
+  if (demarre) {
+    const uint32_t b0 = nBlocs, t0 = millis();
+    while (nBlocs - b0 < 2 && millis() - t0 < 200) vTaskDelay(1);
+  }
+  SampleStore::liberer(i);
+}
+
+/* UN SON ARRIVE DANS MAPFS : jouable des la reponse au televersement. Il ne
+ * l'etait qu'apres un redemarrage (MESURES §177) — liste, marque ● dans
+ * l'inspecteur, il repondait « absent de la carte » ; un son REMPLACE gardait
+ * l'ancien. Appele par le serveur web : les 30 a 70 ms de lecture en flash sont
+ * les siennes, pas celles de l'audio ni du MIDI. */
+bool echantillonArrive(const char* nom, String& raison) {
+  int ancien = -1;
+  if (!SampleStore::installer(nom, raison, ancien)) return false;
+  rendreApresLecture(ancien);
+  return true;
+}
+
+/* UN SON QUITTE MAPFS : il se tait, et sa PSRAM est rendue. */
+void echantillonParti(const char* nom) {
+  rendreApresLecture(SampleStore::retirer(nom));
+}
 
 bool setEngine(int moteur, bool persister) {
   if (moteur == -2) return false;        // passer par setSampler

@@ -298,21 +298,41 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
 
     /* Téléversement d'un WAV : corps BRUT, comme /api/ota — le nom passe en
-     * paramètre d'URL. PCM 16 bits mono ou stéréo. */
+     * paramètre d'URL. PCM 16 bits mono ou stéréo. La réponse dit la VÉRITÉ
+     * (MESURES §177) : elle disait « ok » à tout — un 24 bits, une mapfs
+     * pleine —, et le son téléversé n'était jouable qu'après un redémarrage.
+     * Maintenant : refusé et retiré s'il ne sonnera pas, jouable dès « ok ». */
     server.on("/api/audio/sample", HTTP_POST,
         [](AsyncWebServerRequest *request){
-            SampleStore::ecrireFin();
+            const String nom = request->hasParam("name")
+                             ? request->getParam("name")->value() : String("sample.wav");
+            String raison;
+            if (!SampleStore::ecrireFin(request, raison)) {
+                request->send(422, "application/json",
+                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                return;
+            }
+            /* Écrit et vérifié : le fichier reste. Si la PSRAM ne peut pas le
+             * prendre maintenant, le prochain démarrage le chargera — on le dit. */
+            if (!AudioEngine::echantillonArrive(nom.c_str(), raison)) {
+                request->send(507, "application/json",
+                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                return;
+            }
             request->send(200, "application/json", "{\"status\":\"ok\"}");
         },
         nullptr,
         [](AsyncWebServerRequest *request, uint8_t *data, size_t len,
            size_t index, size_t total){
             if (index == 0) {
-                String nom = request->hasParam("name")
-                           ? request->getParam("name")->value() : String("sample.wav");
-                if (!SampleStore::ecrireDebut(nom.c_str())) return;
+                const String nom = request->hasParam("name")
+                                 ? request->getParam("name")->value() : String("sample.wav");
+                /* La requête part avant la fin : rien n'est gardé. Appelé aussi
+                 * après une fin normale — sans effet, le téléversement est clos. */
+                request->onDisconnect([request]() { SampleStore::ecrireAbandon(request); });
+                SampleStore::ecrireDebut(request, nom.c_str());
             }
-            SampleStore::ecrireMorceau(data, len);
+            SampleStore::ecrireMorceau(request, data, len);
         });
 
     /* DECLENCHER L'ECHANTILLON MAINTENANT — le chemin VIVANT.
@@ -398,9 +418,11 @@ void setupAudioAPI(AsyncWebServer& server) {
             "{\"status\":\"ok\",\"voix\":" + String(voix) + "}");
     });
 
-    /* Suppression d'un échantillon. Si c'est celui qui est chargé, on arrête
-     * d'abord le lecteur : sinon la PSRAM garderait des données orphelines et la
-     * NVS pointerait sur un fichier absent. */
+    /* Suppression d'un échantillon : il se tait et sa PSRAM est rendue
+     * (§177). Elle arrêtait tout le lecteur quand c'était celui du clavier —
+     * pour ne pas garder de données orphelines en PSRAM, ce que
+     * echantillonParti() règle pour chaque son, sans couper ceux des autres
+     * pistes. Le clavier, lui, ne trouvera plus son son : il se tait. */
     server.on("/api/audio/sample", HTTP_DELETE, [](AsyncWebServerRequest *request){
         if (!request->hasParam("name")) {
             request->send(400, "application/json",
@@ -408,9 +430,7 @@ void setupAudioAPI(AsyncWebServer& server) {
             return;
         }
         const String nom = request->getParam("name")->value();
-        if (nom == String(AudioEngine::samplerNom())) {
-            AudioEngine::arreterSampler(/*persister=*/true);
-        }
+        AudioEngine::echantillonParti(nom.c_str());
         if (SampleStore::supprimer(nom.c_str())) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"deleted\":\"" + nom + "\"}");

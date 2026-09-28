@@ -2,6 +2,8 @@
 #include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace SampleStore {
 namespace {
@@ -9,34 +11,168 @@ namespace {
 constexpr const char* PARTITION = "mapfs";        // 1 Mo, table nidmi_s3_ota_dual_littlefs
 constexpr const char* BASE      = "/mapfs";
 constexpr const char* DOSSIER   = "/samples";
+/* Le televersement s'ecrit A COTE, et ne prend son nom qu'une fois verifie
+ * (§177) : ouvrir le fichier definitif le tronquait d'emblee — un remplacement
+ * interrompu ou refuse emportait l'ancien son, et un fichier a moitie ecrit
+ * etait liste pendant tout l'envoi. Hors de /samples : ni liste, ni charge. */
+constexpr const char* PROVISOIRE = "/televersement.part";
+/* Un televersement sans nouvelle depuis ce delai est mort sans prevenir : le
+ * suivant le remplace plutot que d'etre refuse pour toujours. */
+constexpr uint32_t    ABANDON_MS = 30000;
 
 bool   _monte = false;
-File   _enCours;
+
+/* LE TELEVERSEMENT EN COURS, et la requete qui le tient (SampleStore.h). Tout
+ * ceci n'est touche que par le serveur web (async_tcp) : une seule tache. */
+File        _enCours;
+String      _nomEnCours;
+const void* _proprietaire = nullptr;
+uint32_t    _dernierMorceauMs = 0;
+bool        _echecEcriture = false;
+const void* _refuse = nullptr;          // la derniere requete refusee a l'ouverture...
+String      _raisonRefus;               // ... et pourquoi : sa reponse le dira
 
 /* N ECHANTILLONS, tous en PSRAM, tous permanents. Les descripteurs vivent en
- * RAM interne — 24 x ~64 o, soit ~1,5 ko de .bss, et pas un octet du bloc
- * contigu qui decide du service web. Le PCM, lui, est entierement en PSRAM. */
+ * RAM interne — 24 x ~72 o, soit ~1,7 ko de .bss, et pas un octet du bloc
+ * contigu qui decide du service web. Le PCM, lui, est entierement en PSRAM.
+ *
+ * TROIS ETATS (§177) : vide (pcm nul) ; LISIBLE (`pret`) ; RETIRE (plus
+ * `pret`, mais le PCM encore la : la tache audio a pu le lire au bloc en
+ * cours). Seul un emplacement vide se remplit. */
 struct Echantillon {
   int16_t* pcm    = nullptr;
   size_t   trames = 0;
+  size_t   octets = 0;
   bool     stereo = false;
   uint32_t freq   = 48000;
-  char     nom[48] = {0};
+  char     nom[NOM_MAX] = {0};
+  volatile bool pret = false;
 };
-Echantillon _ech[SAMPLES_MAX];
-uint8_t     _n      = 0;
-size_t      _octets = 0;
+Echantillon      _ech[SAMPLES_MAX];
+volatile uint8_t _prets  = 0;
+size_t           _octets = 0;
+bool             _charge = false;      // chargerTout() est passe
 
-String _chemin(const char* nom) {
-  String p = String(DOSSIER) + "/";
-  // Pas de traversée : on ne garde que le nom de base.
-  const char* base = strrchr(nom, '/');
-  p += (base ? base + 1 : nom);
-  return p;
+/* LES ECRIVAINS du magasin — chargement, televersement, suppression — passent
+ * l'un apres l'autre. Les LECTEURS (la tache audio, un declenchement) ne
+ * prennent rien : un emplacement ne devient lisible qu'une fois rempli
+ * (`pret` pose en dernier), et ne se vide que deux blocs audio apres avoir
+ * cesse de l'etre. Cree a l'initialisation statique, comme le verrou des
+ * scripts : creer un mutex ne demande pas l'ordonnanceur. */
+StaticSemaphore_t _tamponVerrou;
+SemaphoreHandle_t _verrou = xSemaphoreCreateRecursiveMutexStatic(&_tamponVerrou);
+struct Verrou {
+  Verrou()  { if (_verrou) xSemaphoreTakeRecursive(_verrou, portMAX_DELAY); }
+  ~Verrou() { if (_verrou) xSemaphoreGiveRecursive(_verrou); }
+};
+
+// Pas de traversée : on ne garde que le nom de base. mapfs est un panier plat.
+const char* _base(const char* nom) {
+  const char* b = strrchr(nom, '/');
+  return b ? b + 1 : nom;
 }
+String _chemin(const char* nom) { return String(DOSSIER) + "/" + _base(nom); }
 
 uint32_t _le32(const uint8_t* p) { return p[0] | (p[1]<<8) | (p[2]<<16) | ((uint32_t)p[3]<<24); }
 uint16_t _le16(const uint8_t* p) { return p[0] | (p[1]<<8); }
+
+int _index(const char* base) {
+  for (int i = 0; i < SAMPLES_MAX; i++)
+    if (_ech[i].pret && !strcmp(_ech[i].nom, base)) return i;
+  return -1;
+}
+int _vide() {
+  for (int i = 0; i < SAMPLES_MAX; i++) if (!_ech[i].pret && !_ech[i].pcm) return i;
+  return -1;
+}
+// Sous le verrou. Tous les champs d'abord, `pret` en dernier : qui le voit voit le reste.
+void _publier(int i, const Echantillon& e) {
+  Echantillon& d = _ech[i];
+  d.pcm = e.pcm; d.trames = e.trames; d.octets = e.octets;
+  d.stereo = e.stereo; d.freq = e.freq;
+  memcpy(d.nom, e.nom, sizeof(d.nom));
+  __sync_synchronize();
+  d.pret = true;
+  _prets = _prets + 1;
+  _octets += e.octets;
+}
+// Sous le verrou. Plus trouve par son nom, plus lu ; le PCM reste jusqu'a liberer().
+void _retirer(int i) {
+  _ech[i].pret = false;
+  __sync_synchronize();
+  _prets = _prets - 1;
+}
+
+/* L'EN-TETE : parcours des chunks jusqu'a « data » ; `f` reste au debut des
+ * donnees. Le lecteur ne sait jouer que du PCM 16 bits, mono ou stereo. */
+bool _lireEntete(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& tailleData,
+                 String& raison) {
+  uint8_t e[12];
+  if (f.read(e, 12) != 12 || memcmp(e, "RIFF", 4) || memcmp(e + 8, "WAVE", 4)) {
+    raison = "pas un WAV"; return false;
+  }
+  uint16_t bits = 0;
+  canaux = 0; freq = 0; tailleData = 0;
+  while (f.available() >= 8) {
+    uint8_t en[8];
+    if (f.read(en, 8) != 8) break;
+    const uint32_t taille = _le32(en + 4);
+    if (!memcmp(en, "fmt ", 4)) {
+      uint8_t fmt[16];
+      if (f.read(fmt, 16) != 16) break;
+      canaux = _le16(fmt + 2); freq = _le32(fmt + 4); bits = _le16(fmt + 14);
+      if (taille > 16) f.seek(f.position() + (taille - 16));
+    } else if (!memcmp(en, "data", 4)) {
+      tailleData = taille;
+      break;
+    } else {
+      f.seek(f.position() + taille + (taille & 1));
+    }
+  }
+  if (bits != 16 || (canaux != 1 && canaux != 2) || !tailleData) {
+    raison = "PCM 16 bits mono ou stereo requis (recu " + String(bits) + " bits, "
+             + String(canaux) + " canaux)";
+    return false;
+  }
+  if ((size_t)f.available() < tailleData) {
+    raison = "fichier tronque : l'en-tete annonce " + String(tailleData)
+             + " o de donnees, il en porte " + String((unsigned)f.available());
+    return false;
+  }
+  return true;
+}
+
+/* Lit UN fichier dans `dest`, qui n'est encore visible de personne. */
+bool _lire(const char* nom, Echantillon& dest, String& raison) {
+  if (strlen(nom) >= NOM_MAX) {
+    raison = "nom trop long (" + String(NOM_MAX - 1) + " caracteres au plus)"; return false;
+  }
+  File f = LittleFS.open(_chemin(nom), FILE_READ);
+  if (!f) { raison = "fichier introuvable"; return false; }
+  uint16_t canaux; uint32_t freq, tailleData;
+  if (!_lireEntete(f, canaux, freq, tailleData, raison)) { f.close(); return false; }
+
+  // PSRAM : 8,25 Mo libres pendant que le tas interne se bat pour 14 ko.
+  int16_t* pcm = (int16_t*)heap_caps_malloc(tailleData, MALLOC_CAP_SPIRAM);
+  if (!pcm) {
+    raison = "PSRAM insuffisante pour " + String(tailleData) + " o";
+    f.close(); return false;
+  }
+  const size_t lus = f.read((uint8_t*)pcm, tailleData);
+  f.close();
+  if (lus != tailleData) { heap_caps_free(pcm); raison = "lecture incomplete"; return false; }
+
+  dest.pcm    = pcm;
+  dest.octets = tailleData;
+  dest.stereo = (canaux == 2);
+  dest.freq   = freq ? freq : 48000;
+  dest.trames = tailleData / (2 * canaux);
+  strlcpy(dest.nom, nom, sizeof(dest.nom));
+  Serial.printf("[samples] %s charge : %u trames, %u Hz, %s, %u o en PSRAM\n",
+                dest.nom, (unsigned)dest.trames, (unsigned)dest.freq,
+                dest.stereo ? "stereo" : "mono", (unsigned)tailleData);
+  return true;
+}
 
 }  // namespace
 
@@ -50,6 +186,8 @@ bool monter() {
     return false;
   }
   if (!LittleFS.exists(DOSSIER)) LittleFS.mkdir(DOSSIER);
+  // Un televersement coupe par un redemarrage : il n'a jamais ete un son.
+  if (LittleFS.exists(PROVISOIRE)) LittleFS.remove(PROVISOIRE);
   _monte = true;
   Serial.printf("[samples] mapfs monte — %u o utilises sur %u\n",
                 (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
@@ -70,8 +208,7 @@ String listerJson() {
       if (!f.isDirectory()) {
         if (!premier) out += ",";
         premier = false;
-        const char* n = strrchr(f.path(), '/');
-        out += "{\"name\":\"" + String(n ? n + 1 : f.name()) + "\",\"bytes\":" + String(f.size()) + "}";
+        out += "{\"name\":\"" + String(_base(f.path())) + "\",\"bytes\":" + String(f.size()) + "}";
       }
       f = d.openNextFile();
     }
@@ -80,24 +217,77 @@ String listerJson() {
   return out;
 }
 
-bool ecrireDebut(const char* nom) {
-  if (!monter()) return false;
-  if (_enCours) _enCours.close();
-  _enCours = LittleFS.open(_chemin(nom), FILE_WRITE);
-  return (bool)_enCours;
+bool ecrireDebut(const void* qui, const char* nom) {
+  String raison;
+  if (_proprietaire && _proprietaire != qui && millis() - _dernierMorceauMs < ABANDON_MS)
+    raison = "un autre televersement est en cours";
+  else if (!*_base(nom) || strlen(_base(nom)) >= NOM_MAX)
+    raison = "nom vide ou trop long (" + String(NOM_MAX - 1) + " caracteres au plus)";
+  else if (!monter())
+    raison = "mapfs non monte";
+  if (!raison.length()) {
+    if (_enCours) _enCours.close();
+    _enCours = LittleFS.open(PROVISOIRE, FILE_WRITE);
+    if (_enCours) {
+      _proprietaire = qui; _nomEnCours = _base(nom);
+      _dernierMorceauMs = millis(); _echecEcriture = false;
+      return true;
+    }
+    raison = "ouverture impossible dans mapfs";
+  }
+  _refuse = qui; _raisonRefus = raison;
+  return false;
 }
-bool ecrireMorceau(const uint8_t* d, size_t n) {
-  if (!_enCours) return false;
-  return _enCours.write(d, n) == n;
-}
-bool ecrireFin() {
-  if (!_enCours) return false;
-  _enCours.close();
-  Differe::noterFichiersModifies();
+
+bool ecrireMorceau(const void* qui, const uint8_t* d, size_t n) {
+  if (qui != _proprietaire || !_enCours) return false;
+  _dernierMorceauMs = millis();
+  if (_enCours.write(d, n) != n) { _echecEcriture = true; return false; }
   return true;
 }
-void ecrireAbandon() {
-  if (_enCours) { _enCours.close(); Differe::noterFichiersModifies(); }
+
+bool ecrireFin(const void* qui, String& raison) {
+  if (qui != _proprietaire) {
+    raison = (qui == _refuse && _raisonRefus.length()) ? _raisonRefus
+                                                       : String("aucun televersement ouvert");
+    return false;
+  }
+  _enCours.close();
+  _proprietaire = nullptr;
+  Differe::noterFichiersModifies();
+  bool bon = false;
+  if (_echecEcriture) {
+    raison = "ecriture incomplete (mapfs pleine ?)";
+  } else {
+    File f = LittleFS.open(PROVISOIRE, FILE_READ);
+    uint16_t c; uint32_t fr, t;
+    if (!f) raison = "fichier illisible";
+    else { bon = _lireEntete(f, c, fr, t, raison); f.close(); }
+  }
+  if (bon) {
+    // L'ancien, s'il y en a un, cede la place au dernier moment.
+    const String dest = _chemin(_nomEnCours.c_str());
+    if (!LittleFS.rename(PROVISOIRE, dest)) {
+      LittleFS.remove(dest);
+      bon = LittleFS.rename(PROVISOIRE, dest);
+      if (!bon) raison = "renommage impossible dans mapfs";
+    }
+  }
+  if (!bon) {
+    LittleFS.remove(PROVISOIRE);
+    Serial.printf("[samples] %s refuse : %s\n", _nomEnCours.c_str(), raison.c_str());
+  }
+  return bon;
+}
+
+void ecrireAbandon(const void* qui) {
+  if (qui != _proprietaire) return;
+  _enCours.close();
+  _proprietaire = nullptr;
+  LittleFS.remove(PROVISOIRE);
+  Differe::noterFichiersModifies();
+  Serial.printf("[samples] %s : televersement interrompu, rien n'est garde\n",
+                _nomEnCours.c_str());
 }
 
 bool supprimer(const char* nom) {
@@ -106,86 +296,25 @@ bool supprimer(const char* nom) {
   return LittleFS.remove(_chemin(nom));
 }
 
-
-
-/* Charge UN fichier dans l'emplacement `dest`. Le parseur d'en-tete WAV est
- * inchange — c'est le stockage qui devient multiple. */
-static bool _chargerDans(const char* nom, Echantillon& dest, String& raison) {
-  if (!monter()) { raison = "mapfs non monte"; return false; }
-  File f = LittleFS.open(_chemin(nom), FILE_READ);
-  if (!f) { raison = "fichier introuvable"; return false; }
-
-  uint8_t e[12];
-  if (f.read(e, 12) != 12 || memcmp(e, "RIFF", 4) || memcmp(e + 8, "WAVE", 4)) {
-    raison = "pas un WAV"; f.close(); return false;
-  }
-
-  uint16_t canaux = 0, bits = 0;
-  uint32_t freq = 0, tailleData = 0;
-  // Parcours des chunks jusqu'à « data ».
-  while (f.available() >= 8) {
-    uint8_t en[8];
-    if (f.read(en, 8) != 8) break;
-    const uint32_t taille = _le32(en + 4);
-    if (!memcmp(en, "fmt ", 4)) {
-      uint8_t fmt[16];
-      if (f.read(fmt, 16) != 16) break;
-      canaux = _le16(fmt + 2); freq = _le32(fmt + 4); bits = _le16(fmt + 14);
-      if (taille > 16) f.seek(f.position() + (taille - 16));
-    } else if (!memcmp(en, "data", 4)) {
-      tailleData = taille;
-      break;
-    } else {
-      f.seek(f.position() + taille + (taille & 1));
-    }
-  }
-
-  if (bits != 16 || (canaux != 1 && canaux != 2) || !tailleData) {
-    raison = "PCM 16 bits mono ou stereo requis (recu " + String(bits) + " bits, "
-             + String(canaux) + " canaux)";
-    f.close(); return false;
-  }
-
-  // PSRAM : 8,25 Mo libres pendant que le tas interne se bat pour 14 ko.
-  dest.pcm = (int16_t*)heap_caps_malloc(tailleData, MALLOC_CAP_SPIRAM);
-  if (!dest.pcm) {
-    raison = "PSRAM insuffisante pour " + String(tailleData) + " o";
-    f.close(); return false;
-  }
-  const size_t lus = f.read((uint8_t*)dest.pcm, tailleData);
-  f.close();
-  if (lus != tailleData) {
-    heap_caps_free(dest.pcm); dest.pcm = nullptr;
-    raison = "lecture incomplete"; return false;
-  }
-
-  dest.stereo = (canaux == 2);
-  dest.freq   = freq ? freq : 48000;
-  dest.trames = tailleData / (2 * canaux);
-  strncpy(dest.nom, nom, sizeof(dest.nom) - 1);
-  _octets += tailleData;
-  Serial.printf("[samples] %s charge : %u trames, %u Hz, %s, %u o en PSRAM\n",
-                dest.nom, (unsigned)dest.trames, (unsigned)dest.freq,
-                dest.stereo ? "stereo" : "mono", (unsigned)tailleData);
-  return true;
-}
-
-/* TOUT CHARGER, UNE FOIS. Appele au demarrage et apres chaque televersement ou
- * suppression. Un fichier refuse (mauvais format, PSRAM pleine) est DIT et
- * saute : un magasin qui echoue en silence est pire qu'un magasin vide. */
+/* TOUT CHARGER, UNE FOIS : au demarrage (restaurerAuBoot), ou au premier son
+ * demande. Un fichier refuse (mauvais format, PSRAM pleine) est DIT et saute :
+ * un magasin qui echoue en silence est pire qu'un magasin vide. */
 uint8_t chargerTout() {
-  oublierTout();
+  Verrou verrou;
+  if (_charge) return _prets;
+  _charge = true;
   if (!monter()) return 0;
   File d = LittleFS.open(DOSSIER);
   if (!d || !d.isDirectory()) return 0;
   File f = d.openNextFile();
-  while (f && _n < SAMPLES_MAX) {
+  int i;
+  while (f && (i = _vide()) >= 0) {
     if (!f.isDirectory()) {
-      const char* c = strrchr(f.path(), '/');
-      String nom = String(c ? c + 1 : f.name());
+      const String nom = _base(f.path());
       f.close();
+      Echantillon e;
       String raison;
-      if (_chargerDans(nom.c_str(), _ech[_n], raison)) _n++;
+      if (_lire(nom.c_str(), e, raison)) _publier(i, e);
       else Serial.printf("[samples] %s ignore : %s\n", nom.c_str(), raison.c_str());
     } else f.close();
     f = d.openNextFile();
@@ -193,33 +322,71 @@ uint8_t chargerTout() {
   if (f) { Serial.printf("[samples] au-dela de %u echantillons, le reste est ignore\n",
                          (unsigned)SAMPLES_MAX); f.close(); }
   Serial.printf("[samples] %u echantillons prets, %u o en PSRAM\n",
-                (unsigned)_n, (unsigned)_octets);
-  return _n;
+                (unsigned)_prets, (unsigned)_octets);
+  return _prets;
 }
 
-void oublierTout() {
-  for (uint8_t i = 0; i < _n; i++) {
-    if (_ech[i].pcm) heap_caps_free(_ech[i].pcm);
-    _ech[i] = Echantillon{};
+bool installer(const char* nom, String& raison, int& retire) {
+  retire = -1;
+  const char* base = _base(nom);
+  {
+    Verrou verrou;
+    if (!_charge) return true;         // chargerTout() le lira avec les autres
   }
-  _n = 0; _octets = 0;
+  /* Lu HORS du verrou : 30 a 70 ms de flash, pendant lesquelles une cue qui
+   * arme le lecteur (setSampler → chargerTout) ne doit pas attendre. */
+  Echantillon neuf;
+  if (!monter() || !_lire(base, neuf, raison)) {
+    if (!raison.length()) raison = "mapfs non monte";
+    return false;
+  }
+  Verrou verrou;
+  const int i = _vide();
+  if (i < 0) {
+    heap_caps_free(neuf.pcm);
+    raison = "plus de place en PSRAM avant le redemarrage ("
+             + String(SAMPLES_MAX) + " echantillons au plus)";
+    return false;
+  }
+  const int ancien = _index(base);
+  _publier(i, neuf);                   // le nouveau d'abord : jamais un instant sans son
+  if (ancien >= 0) _retirer(ancien);
+  retire = ancien;
+  return true;
 }
 
-uint8_t        nombreCharges()      { return _n; }
-const int16_t* donnees(uint8_t i)   { return (i < _n) ? _ech[i].pcm    : nullptr; }
-size_t         trames(uint8_t i)    { return (i < _n) ? _ech[i].trames : 0; }
-bool           stereo(uint8_t i)    { return (i < _n) ? _ech[i].stereo : false; }
-uint32_t       frequence(uint8_t i) { return (i < _n) ? _ech[i].freq   : 48000; }
-const char*    nom(uint8_t i)       { return (i < _n) ? _ech[i].nom    : ""; }
+int retirer(const char* nom) {
+  Verrou verrou;
+  const int i = _index(_base(nom));
+  if (i >= 0) _retirer(i);
+  return i;
+}
+
+void liberer(int i) {
+  if (i < 0 || i >= SAMPLES_MAX) return;
+  Verrou verrou;
+  Echantillon& e = _ech[i];
+  if (e.pret || !e.pcm) return;
+  int16_t* pcm = e.pcm;
+  _octets -= e.octets;
+  e.pcm = nullptr; e.trames = 0; e.octets = 0; e.stereo = false; e.freq = 48000;
+  e.nom[0] = 0;
+  __sync_synchronize();
+  heap_caps_free(pcm);
+}
+
+uint8_t        nombreCharges()      { return _prets; }
+bool           lisible(uint8_t i)   { return i < SAMPLES_MAX && _ech[i].pret; }
+const int16_t* donnees(uint8_t i)   { return lisible(i) ? _ech[i].pcm    : nullptr; }
+size_t         trames(uint8_t i)    { return lisible(i) ? _ech[i].trames : 0; }
+bool           stereo(uint8_t i)    { return (i < SAMPLES_MAX) ? _ech[i].stereo : false; }
+uint32_t       frequence(uint8_t i) { return (i < SAMPLES_MAX) ? _ech[i].freq   : 48000; }
 
 /* Retrouver un echantillon par son NOM — c'est ce que porte une ligne de cue.
- * On compare sur le nom de base : mapfs est un panier plat. */
+ * Seuls les lisibles : un son retire ne se declenche plus. */
 int indexDe(const char* n) {
   if (!n || !*n) return -1;
-  const char* base = strrchr(n, '/');
-  if (base) n = base + 1;
-  for (uint8_t i = 0; i < _n; i++) if (!strcmp(_ech[i].nom, n)) return i;
-  return -1;
+  return _index(_base(n));
 }
 size_t         octetsPsram() { return _octets; }
 
