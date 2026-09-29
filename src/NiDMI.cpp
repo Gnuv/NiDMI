@@ -325,14 +325,14 @@ struct PolitiqueWifi {
     bool autonome = false;                 // NVS "standalone"
     bool force = false;                    // jamais memorise
     bool autonomeTient = false;            // c'est l'autonomie qui a coupe la radio
-    bool autonomeAEcrire = false, prioAEcrire = false;
-    unsigned long autonomeChangeA = 0, prioChangeA = 0;
     unsigned long derniereRelanceScript = 0;
     bool sysInconnuDit = false;
-    // Ce que coute la memorisation d'une option (MESURES §155) : une ecriture
-    // NVS qui efface une page arrete les deux coeurs le temps de l'effacement.
-    uint32_t ecrituresNvs = 0, ecrituresLentes = 0, ecritureNvsPireUs = 0, ecritureNvsDerniereUs = 0;
 };
+// Les deux options, en NVS : lues au premier tour de wifiBoucle, memorisees
+// par les ecritures differees (MESURES §184).
+static const char* const NVS_OPTIONS_RESEAU = "nidmi";
+static const char* const NVS_CLE_PRIORITAIRE = "cable_prio";
+static const char* const NVS_CLE_AUTONOME = "standalone";
 static PolitiqueWifi g_politique;
 static volatile int8_t g_demandeAutonome = -1;   // -1 rien ; 0 retirer ; 1 activer
 static volatile int8_t g_demandeForce = -1;
@@ -347,8 +347,6 @@ static volatile int16_t g_cueDemandee = -1;      // index ; -1 = rien
 static volatile int8_t  g_boucleDemandee = -1;   // -1 rien ; 0 non ; 1 oui
 static volatile int8_t  g_auDemarrageDemande = -1;
 static char g_sysInconnuNom[16];                 // le premier, pour le dire
-static const unsigned long OPTION_MEMORISEE_APRES_MS = 3000;
-static const uint32_t ECRITURE_LENTE_US = 20000;      // le seuil de retard du moteur audio
 static const unsigned long RELANCE_SCRIPT_TOUS_MS = 10000;
 
 extern "C" void nidmi_demanderCablePrioritaire(bool actif){
@@ -369,7 +367,6 @@ String nidmi_cablePrioritaireJson(){
     const BasculeCable b = g_bascule;
     const PolitiqueWifi pol = g_politique;
     const unsigned long now = millis();
-    const uint32_t muette = AudioEngine::silenceDepuisMs();   // UINT32_MAX : pas de son
     const char* etat = pol.force         ? "force"
                      : pol.autonomeTient ? "autonome"
                      : b.tientLeWifi     ? "cable"
@@ -389,12 +386,11 @@ String nidmi_cablePrioritaireJson(){
     j += ",\"derniere_cause\":\"" + String(b.derniereCause) + "\"";
     j += ",\"radio_en_attente\":";
     j += b.radioEnAttente ? "true" : "false";
-    j += ",\"nvs\":{\"ecritures\":" + String(pol.ecrituresNvs)
-       + ",\"pire_us\":" + String(pol.ecritureNvsPireUs)
-       + ",\"derniere_us\":" + String(pol.ecritureNvsDerniereUs)
-       + ",\"lentes\":" + String(pol.ecrituresLentes)
-       + ",\"en_attente\":" + ((pol.prioAEcrire || pol.autonomeAEcrire) ? "true" : "false")
-       + ",\"sortie_muette_ms\":" + (muette == UINT32_MAX ? String("null") : String(muette)) + "}";
+    // Ce qu'elles coutent a ecrire : /api/diag/reservoirs, ecritures_differees.
+    const bool enAttente = Differe::nvsEnAttente(NVS_OPTIONS_RESEAU, NVS_CLE_PRIORITAIRE)
+                        || Differe::nvsEnAttente(NVS_OPTIONS_RESEAU, NVS_CLE_AUTONOME);
+    j += ",\"nvs\":{\"en_attente\":";
+    j += enAttente ? "true}" : "false}";
     j += ",\"confirmation_ms\":" + String(CABLE_CONFIRMATION_MS);
     j += ",\"silence_ms\":" + String(CABLE_SILENCE_MS) + "}";
     return j;
@@ -609,13 +605,15 @@ static void basculeCable(unsigned long now){
  *      sur un firmware sans lien reseau USB : on s'enfermerait dehors.
  *   3. CABLE PRIORITAIRE — la bascule ci-dessus.
  * Le demarrage allume TOUJOURS la radio (§142) : la regle coupe en marche.
- * Les deux options valent tout de suite. Elles se MEMORISENT 3 s apres leur
- * dernier changement — un bouton qui bascule vite n'use pas la flash — et
- * seulement quand la sortie audio est muette depuis 0,5 s : l'ecriture qui
- * efface une page NVS (une sur ~120) arrete les deux coeurs 43 a 45 ms, plus
- * que la marge du DMA (30 ms), et chacune a coute un bloc audio en retard
- * (MESURES §155). Un son qui ne s'arrete jamais retarde donc la memorisation,
- * jamais l'option ; coupee avant, la carte redemarre sur l'ancienne valeur.
+ * Les deux options valent tout de suite, et se MEMORISENT par les ecritures
+ * differees, comme les autres (MESURES §184) : 3 s apres leur dernier
+ * changement — un bouton qui bascule vite n'use pas la flash —, au premier
+ * silence du son et du MIDI — l'ecriture qui efface une page NVS arrete les
+ * deux coeurs 43 a 45 ms, plus que la marge du DMA (§155) —, et tout de suite
+ * avant un redemarrage demande. Elles avaient leur propre chemin, sans ce
+ * dernier point : changees puis la carte redemarree dans la foulee, elles
+ * revenaient a l'ancienne valeur. Une coupure de courant avant le silence la
+ * perd toujours : c'est le prix, et il est dit.
  * Un tour toutes les 250 ms. */
 
 extern "C" void nidmi_demanderAutonome(bool actif){
@@ -975,9 +973,10 @@ static void wifiBoucle(){
 
     if (!p.lu) {
         Preferences prefs;
-        prefs.begin("nidmi", true);
-        b.prioritaire = prefs.getBool("cable_prio", true);
-        p.autonome = prefs.getBool("standalone", false) && nidmi_usbnet::enabled();
+        prefs.begin(NVS_OPTIONS_RESEAU, true);
+        b.prioritaire = prefs.getBool(NVS_CLE_PRIORITAIRE, true);
+        // Sans lien reseau USB, jamais : la carte ne serait plus configurable.
+        p.autonome = prefs.getBool(NVS_CLE_AUTONOME, false) && nidmi_usbnet::enabled();
         prefs.end();
         p.lu = true;
         b.lu = true;
@@ -985,14 +984,13 @@ static void wifiBoucle(){
     }
 
     // Les demandes — de l'app ou d'un script. L'etat change tout de suite ; la
-    // memorisation attend que l'option se soit posee.
+    // memorisation passe par les ecritures differees (« LE WIFI : TROIS REGLES »).
     const int8_t dPrio = g_basculeDemande;
     if (dPrio >= 0) {
         g_basculeDemande = -1;
         if ((dPrio == 1) != b.prioritaire) {
             b.prioritaire = (dPrio == 1);
-            p.prioAEcrire = true;
-            p.prioChangeA = now;
+            Differe::nvsOctet(NVS_OPTIONS_RESEAU, NVS_CLE_PRIORITAIRE, b.prioritaire ? 1 : 0);
         }
     }
     const int8_t dAuto = g_demandeAutonome;
@@ -1001,8 +999,7 @@ static void wifiBoucle(){
         const bool voulu = (dAuto == 1) && nidmi_usbnet::enabled();
         if (voulu != p.autonome) {
             p.autonome = voulu;
-            p.autonomeAEcrire = true;
-            p.autonomeChangeA = now;
+            Differe::nvsOctet(NVS_OPTIONS_RESEAU, NVS_CLE_AUTONOME, p.autonome ? 1 : 0);
         }
     }
     const int8_t dForce = g_demandeForce;
@@ -1021,38 +1018,6 @@ static void wifiBoucle(){
         p.sysInconnuDit = true;
         NIDMI_WEB_LOG("[NiDMI] s(\"%s\") : la carte n'a pas cette fonction — elle connait "
                       VOCABULAIRE_SYS_COMMANDES, g_sysInconnuNom);
-    }
-    const bool prioMure = p.prioAEcrire && now - p.prioChangeA >= OPTION_MEMORISEE_APRES_MS;
-    const bool autoMure = p.autonomeAEcrire && now - p.autonomeChangeA >= OPTION_MEMORISEE_APRES_MS;
-    if ((prioMure || autoMure) && AudioEngine::silencePourLaFlash()) {
-        Preferences prefs;
-        prefs.begin("nidmi", false);
-        AudioEngine::ecritureFlashDebut();
-        const uint32_t t0 = micros();
-        bool ecrit = false;
-        if (prioMure) {
-            p.prioAEcrire = false;
-            if (prefs.getBool("cable_prio", true) != b.prioritaire) {
-                prefs.putBool("cable_prio", b.prioritaire);
-                ecrit = true;
-            }
-        }
-        if (autoMure) {
-            p.autonomeAEcrire = false;
-            if (prefs.getBool("standalone", false) != p.autonome) {
-                prefs.putBool("standalone", p.autonome);
-                ecrit = true;
-            }
-        }
-        const uint32_t dt = micros() - t0;
-        AudioEngine::ecritureFlashFin();
-        prefs.end();
-        if (ecrit) {
-            p.ecrituresNvs++;
-            p.ecritureNvsDerniereUs = dt;
-            if (dt > p.ecritureNvsPireUs) p.ecritureNvsPireUs = dt;
-            if (dt >= ECRITURE_LENTE_US) p.ecrituresLentes++;
-        }
     }
 
     /* LE SURVEILLANT DE L'AUDIO. Un bloc dure 2,5 ms et son aller-retour

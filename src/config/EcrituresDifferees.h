@@ -50,6 +50,8 @@ void visiterAttente(const char* prefixe,
 void nvsChaine(const char* espace, const char* cle, const String& valeur);
 void nvsOctet(const char* espace, const char* cle, uint8_t valeur);
 void nvsRetirer(const char* espace, const char* cle);
+// Cette valeur attend-elle encore la flash ? (Pour le dire a l'app.)
+bool nvsEnAttente(const char* espace, const char* cle);
 
 // ── La boucle ────────────────────────────────────────────────────────────
 void boucle();                 // nidmi_loop : ecrit ce qui attend, au silence

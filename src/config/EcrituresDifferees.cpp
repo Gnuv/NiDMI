@@ -318,6 +318,13 @@ void nvsOctet(const char* espace, const char* cle, uint8_t valeur) {
 void nvsRetirer(const char* espace, const char* cle) {
   poserNvs(espace, cle, TypeNvs::Retirer, nullptr, 0);
 }
+bool nvsEnAttente(const char* espace, const char* cle) {
+  if (!espace || !cle) return false;
+  Garde g;
+  for (auto& v : nvs)
+    if (v.actif && !strcmp(v.espace, espace) && !strcmp(v.cle, cle)) return true;
+  return false;
+}
 
 void boucle() {
   if (!enAttente()) return;

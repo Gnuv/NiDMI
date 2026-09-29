@@ -110,13 +110,15 @@ void setupNetworkAPI(AsyncWebServer& server) {
         nidmi_demanderCablePrioritaire(etat == "on");
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"prioritaire\":") + (etat == "on" ? "true" : "false") +
-            ",\"message\":\"applique dans la seconde, memorise au premier silence (3 s au moins)\"}");
+            ",\"message\":\"applique dans la seconde ; memorise au premier silence (3 s au moins), "
+            "ou tout de suite avant un redemarrage demande\"}");
     });
 
     /* INSTRUMENT AUTONOME (MESURES §155) : le WiFi coupe, cable branche ou
      * non — on ne branche l'instrument a l'ordinateur que pour le configurer.
      * Refuse sans lien reseau USB : la carte n'aurait plus aucun chemin de
-     * configuration. Memorise par nidmi_loop ; s("sys.standalone") fait de meme. */
+     * configuration. Memorise par les ecritures differees (MESURES §184) ;
+     * s("sys.standalone") fait de meme. */
     server.on("/api/reseau/autonome", HTTP_POST, [](AsyncWebServerRequest *request){
         const String etat = request->hasParam("etat", true)
                           ? request->getParam("etat", true)->value() : String("");
@@ -134,7 +136,8 @@ void setupNetworkAPI(AsyncWebServer& server) {
         nidmi_demanderAutonome(etat == "on");
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"autonome\":") + (etat == "on" ? "true" : "false") +
-            ",\"message\":\"applique dans la seconde, memorise au premier silence (3 s au moins)\"}");
+            ",\"message\":\"applique dans la seconde ; memorise au premier silence (3 s au moins), "
+            "ou tout de suite avant un redemarrage demande\"}");
     });
 
     /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand
