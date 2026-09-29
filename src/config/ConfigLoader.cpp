@@ -376,7 +376,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                         if (nomFichier.length()) {
                             strncpy(config->scriptNom, nomFichier.c_str(), sizeof(config->scriptNom) - 1);
                             config->scriptNom[sizeof(config->scriptNom) - 1] = '\0';
-                            if (!ScriptStore::lire(config->scriptNom, script)) {
+                            if (!ScriptStore::lire(ScriptStore::Lieu::Interface, config->scriptNom, script)) {
                                 /* Fichier absent : on le DIT et la broche reste muette,
                                  * plutot que d'executer un reste d'ancien script. */
                                 Serial.printf("[ConfigLoader] %s : script '%s' introuvable dans storage — "

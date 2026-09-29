@@ -2,6 +2,7 @@
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../audio/AudioEngine.h"
+#include "Repertoire.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -19,7 +20,7 @@ namespace {
  * .nms (les ecritures differees ne font qu'y reporter ce qu'ecrire() a pose).
  * Seules des taches y touchent. */
 constexpr int    kGardesMax = 32;
-constexpr size_t kNomMax    = 48;
+constexpr size_t kNomMax    = 160;         // un CHEMIN complet (§186), en PSRAM
 struct Garde { char nom[kNomMax]; char* texte; size_t n; };
 Garde* _gardes = nullptr;          // kGardesMax entrees, en PSRAM, prises au premier besoin
 int    _nGardes = 0;
@@ -80,18 +81,29 @@ constexpr size_t      TAILLE_MAX = 8192;       // un .nms tient tres largement d
 
 bool _monte = false;
 
-// Pas de traversee de chemin : on ne garde que le nom de base.
-String _chemin(const char* nom) {
-  String p = String(DOSSIER) + "/";
-  const char* base = strrchr(nom, '/');
-  p += (base ? base + 1 : nom);
-  return p;
+// Le dossier d'un lieu ; "" si c'est la composition et qu'aucune n'est ouverte.
+String _dossier(Lieu lieu) {
+  return lieu == Lieu::Interface ? String(DOSSIER_INTERFACE) : Repertoire::dossierOuvert();
 }
 
 }  // namespace
 
+// Pas de traversee de chemin : on ne garde que le nom de base.
+String chemin(Lieu lieu, const char* nom) {
+  const String d = _dossier(lieu);
+  if (!d.length() || !nom) return String();
+  const char* base = strrchr(nom, '/');
+  return d + "/" + (base ? base + 1 : nom);
+}
+
+namespace {
+String _chemin(Lieu lieu, const char* nom) { return chemin(lieu, nom); }
+}  // namespace
+
 bool estMonte() { return _monte; }
 
+/* Les dossiers se creent a la premiere ecriture (Differe, au silence) : monter
+ * n'ecrit rien. */
 bool monter() {
   if (_monte) return true;
   // storage est PARTAGEE avec les echantillons : si elle est deja montee,
@@ -100,7 +112,6 @@ bool monter() {
     Serial.println("[scripts] montage de storage impossible");
     return false;
   }
-  if (!LittleFS.exists(DOSSIER)) LittleFS.mkdir(DOSSIER);
   _monte = true;
   return true;
 }
@@ -118,21 +129,22 @@ void _ajouter(Liste& l, const String& nom, size_t octets) {
 }
 }  // namespace
 
-String listerJson() {
-  if (!monter()) return "[]";
+String listerJson(Lieu lieu) {
+  const String dossier = _dossier(lieu);
+  if (!monter() || !dossier.length()) return "[]";
   String out = "[", vus;
   bool premier = true;
   Liste l{ &out, &vus, &premier };
-  File d = LittleFS.open(DOSSIER);
+  File d = LittleFS.open(dossier);
   if (d && d.isDirectory()) {
     for (File f = d.openNextFile(); f; f = d.openNextFile()) {
       if (f.isDirectory()) continue;
       String n = String(f.name());
       const int slash = n.lastIndexOf('/');
       if (slash >= 0) n = n.substring(slash + 1);
-      if (n.endsWith(".tmp")) continue;            // une ecriture en cours
+      if (!n.endsWith(".nms")) continue;           // la composition porte aussi ses cues, sa source…
       std::shared_ptr<char> t; size_t na = 0; bool sup = false;
-      if (Differe::attente(_chemin(n.c_str()).c_str(), t, na, sup)) {
+      if (Differe::attente(_chemin(lieu, n.c_str()).c_str(), t, na, sup)) {
         if (!sup) _ajouter(l, n, na);
         else vus += "|" + n + "|";
         continue;
@@ -140,15 +152,17 @@ String listerJson() {
       _ajouter(l, n, f.size());
     }
   }
-  // Ce qui attend et que la flash n'a pas encore.
-  Differe::visiterAttente((String(DOSSIER) + "/").c_str(),
-    [](const char* chemin, size_t n, bool supprime, void* ctx) {
-      Liste& l = *(Liste*)ctx;
-      const char* base = strrchr(chemin, '/');
-      const String nom = base ? base + 1 : chemin;
-      if (supprime || l.vus->indexOf("|" + nom + "|") >= 0) return;
-      _ajouter(l, nom, n);
-    }, &l);
+  // Ce qui attend et que la flash n'a pas encore : les .nms de CE dossier.
+  struct Ctx { Liste* l; size_t lp; };
+  Ctx ctx{ &l, dossier.length() + 1 };
+  Differe::visiterAttente((dossier + "/").c_str(),
+    [](const char* chemin, size_t n, bool supprime, void* c) {
+      Ctx& x = *(Ctx*)c;
+      const String nom = chemin + x.lp;
+      if (supprime || nom.indexOf('/') >= 0 || !nom.endsWith(".nms")
+          || x.l->vus->indexOf("|" + nom + "|") >= 0) return;
+      _ajouter(*x.l, nom, n);
+    }, &ctx);
   out += "]";
   return out;
 }
@@ -167,26 +181,25 @@ Mesure   g_mesure;
 uint32_t g_mesureGeneration = 0;
 bool     g_mesureFaite = false;
 
+/* A TOUTE PROFONDEUR : le repertoire range une composition trois niveaux sous
+ * la racine (compositions/<nn>/<nom>/, §186). Borne a six niveaux — l'arbre
+ * n'en a pas plus, et une recursion sans borne sur une pile de tache non. */
+void parcourirPour(Mesure& m, const String& dossier, int profondeur) {
+  File d = LittleFS.open(dossier);
+  if (!d || !d.isDirectory()) return;
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    const String p = f.path();
+    if (f.isDirectory()) { if (profondeur < 6) parcourirPour(m, p, profondeur + 1); continue; }
+    m.fichiers++; m.contenu += f.size();
+    if (p.endsWith(".nms")) m.scripts++;
+  }
+}
+
 void mesurer(Mesure& m) {
   m = Mesure();
   m.total    = LittleFS.totalBytes();
   m.utilises = LittleFS.usedBytes();
-  /* Deux niveaux suffisent : la racine porte les echantillons et les cues,
-   * /scripts porte les .nms. Pas de recursion generale — il n'y a pas d'autre
-   * niveau, et en inventer un serait du code qu'aucun cas n'exerce. */
-  File racine = LittleFS.open("/");
-  if (!racine || !racine.isDirectory()) return;
-  for (File f = racine.openNextFile(); f; f = racine.openNextFile()) {
-    if (!f.isDirectory()) { m.fichiers++; m.contenu += f.size(); continue; }
-    File d = LittleFS.open(f.path());
-    if (!d || !d.isDirectory()) continue;
-    const bool estScripts = (String(f.path()) == DOSSIER);
-    for (File g = d.openNextFile(); g; g = d.openNextFile()) {
-      if (g.isDirectory()) continue;
-      m.fichiers++; m.contenu += g.size();
-      if (estScripts) m.scripts++;
-    }
-  }
+  parcourirPour(m, "/", 0);
 }
 }  // namespace
 
@@ -207,47 +220,76 @@ void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
   octetsTotal    = g_mesure.total;
 }
 
-bool existe(const char* nom) {
+bool existe(Lieu lieu, const char* nom) {
   if (!nom || !*nom || !monter()) return false;
+  const String c = _chemin(lieu, nom);
+  if (!c.length()) return false;
   std::shared_ptr<char> t; size_t n = 0; bool sup = false;
-  if (Differe::attente(_chemin(nom).c_str(), t, n, sup)) return !sup;
-  return LittleFS.exists(_chemin(nom));
+  if (Differe::attente(c.c_str(), t, n, sup)) return !sup;
+  return LittleFS.exists(c);
 }
 
 /* Recu tout de suite, ecrit en flash au premier silence (§157) : l'ecriture
  * qui efface arrete l'audio. lire() rend deja le nouveau contenu. */
-bool ecrire(const char* nom, const String& contenu) {
+bool ecrire(Lieu lieu, const char* nom, const String& contenu) {
   if (!nom || !*nom || !monter()) return false;
   if (contenu.length() > TAILLE_MAX) {
     Serial.printf("[scripts] %s refuse : %u o > %u\n",
                   nom, (unsigned)contenu.length(), (unsigned)TAILLE_MAX);
     return false;
   }
-  if (!Differe::poserFichierCopie(_chemin(nom).c_str(), contenu.c_str(), contenu.length()))
+  if (lieu == Lieu::Composition) {
+    String raison;
+    if (!Repertoire::assurerOuverte("", raison)) {
+      Serial.printf("[scripts] %s refuse : %s\n", nom, raison.c_str());
+      return false;
+    }
+  }
+  const String c = _chemin(lieu, nom);
+  if (!c.length() || !Differe::poserFichierCopie(c.c_str(), contenu.c_str(), contenu.length()))
     return false;
-  _garder(_chemin(nom).c_str(), contenu.c_str(), contenu.length());
+  _garder(c.c_str(), contenu.c_str(), contenu.length());
   Serial.printf("[scripts] %s recu (%u o, flash au premier silence)\n", nom, (unsigned)contenu.length());
   return true;
 }
 
-bool supprimer(const char* nom) {
-  if (!nom || !*nom || !monter() || !existe(nom)) return false;
-  _oublier(_chemin(nom).c_str());
-  return Differe::supprimerFichier(_chemin(nom).c_str());
+bool supprimer(Lieu lieu, const char* nom) {
+  if (!nom || !*nom || !monter() || !existe(lieu, nom)) return false;
+  const String c = _chemin(lieu, nom);
+  _oublier(c.c_str());
+  return Differe::supprimerFichier(c.c_str());
 }
 
-bool lire(const char* nom, String& contenu) {
+void oublierSous(const char* prefixe) {
+  const size_t lp = strlen(prefixe);
+  VerrouGardes v;
+  if (!_gardes) return;
+  for (int i = 0; i < _nGardes; ) {
+    if (strncmp(_gardes[i].nom, prefixe, lp)) { i++; continue; }
+    heap_caps_free(_gardes[i].texte);
+    _gardes[i] = _gardes[--_nGardes];          // la derniere prend sa place, et se relit
+  }
+}
+
+bool supprimerChemin(const String& c) {
+  if (!c.endsWith(".nms") || !monter()) return false;
+  _oublier(c.c_str());
+  return Differe::supprimerFichier(c.c_str());
+}
+
+bool lire(Lieu lieu, const char* nom, String& contenu) {
   contenu = "";
   if (!nom || !*nom || !monter()) return false;
+  const String chemin = _chemin(lieu, nom);
+  if (!chemin.length()) return false;
   {
     std::shared_ptr<char> t; size_t n = 0; bool sup = false;
-    if (Differe::attente(_chemin(nom).c_str(), t, n, sup)) {
+    if (Differe::attente(chemin.c_str(), t, n, sup)) {
       if (sup) return false;
       if (t && n) contenu.concat(t.get(), (unsigned)n);
       return true;
     }
   }
-  const String chemin = _chemin(nom);
   if (_relire(chemin.c_str(), contenu)) return true;     // deja lu : la PSRAM (§172)
   File f = LittleFS.open(chemin, FILE_READ);
   if (!f) return false;

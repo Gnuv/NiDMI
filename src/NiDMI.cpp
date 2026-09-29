@@ -17,6 +17,7 @@
 #include "audio/AudioEngine.h"
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
+#include "mapping/Repertoire.h"
 #include "config/EcrituresDifferees.h"
 #include "diag/SurveillantFlash.h"
 #include "diag/JournalAvant.h"
@@ -346,6 +347,10 @@ static uint32_t g_transportDemande = 0;          // __atomic_* : deux taches de 
 static volatile int16_t g_cueDemandee = -1;      // index ; -1 = rien
 static volatile int8_t  g_boucleDemandee = -1;   // -1 rien ; 0 non ; 1 oui
 static volatile int8_t  g_auDemarrageDemande = -1;
+/* Les demandes de COMPOSITION des scripts (§186) : un numero (sys.compo), ou
+ * un sens dans le repertoire (sys.nextcompo, sys.prevcompo). */
+static volatile int16_t g_compoDemandee = -1;    // -1 = rien
+static volatile int8_t  g_compoSens = 0;         // +1 / -1 ; 0 = rien
 static char g_sysInconnuNom[16];                 // le premier, pour le dire
 static const unsigned long RELANCE_SCRIPT_TOUS_MS = 10000;
 
@@ -659,7 +664,17 @@ extern "C" bool nidmi_regleTientLeWifiCoupe(){
  * par change() ou sel(). Des demandes entre deux tours de boucle n'en font
  * qu'une (un bit). r() relit sys.play, sys.pause, sys.cue (1 = la premiere),
  * sys.nextcue (0 = pas de suivante), sys.cueloop, sys.autoplay — publies par le
- * sequenceur a chaque changement (publierEtatsTransport). */
+ * sequenceur a chaque changement (publierEtatsTransport).
+ *
+ * LE REPERTOIRE (MESURES §186, CONVERGENCE §9.7) — changer de composition par
+ * un bouton :
+ *   sys.compo       = N : ouvre la composition n°N
+ *   sys.nextcompo   la suivante du repertoire (trous sautes ; apres la
+ *                   derniere, la premiere)
+ *   sys.prevcompo   la precedente
+ * Memes regles de geste. Ouvrir, c'est comme redemarrer dessus : la cue 1, et
+ * la lecture si « lecture au demarrage » est coche. r("sys.compo") relit le
+ * numero ouvert (0 : aucune). */
 static void demanderTransport(bool oui, uint32_t geste){
     if (oui) __atomic_fetch_or(&g_transportDemande, geste, __ATOMIC_SEQ_CST);
 }
@@ -683,6 +698,12 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
         const int16_t n = (int16_t)lroundf(valeur);
         if (n >= 1) g_cueDemandee = n - 1;     // chaque appel : un geste (§182)
     }
+    else if (!strcmp(nom, "sys.compo")) {
+        const int16_t n = (int16_t)lroundf(valeur);
+        if (n >= 1) g_compoDemandee = n;       // chaque appel : un geste (§182)
+    }
+    else if (!strcmp(nom, "sys.nextcompo"))    { if (oui) g_compoSens = 1; }
+    else if (!strcmp(nom, "sys.prevcompo"))    { if (oui) g_compoSens = -1; }
     else if (!strcmp(nom, "sys.cueloop"))      g_boucleDemandee = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.autoplay"))     g_auDemarrageDemande = oui ? 1 : 0;
     else if (!g_sysInconnu) {
@@ -770,6 +791,33 @@ static void publierEtatsTransport(const Cues::Etat& e){
     FluxRegistry::update("sys.autoplay", e.auDemarrage ? 1 : 0);
 }
 
+/* CHANGER DE COMPOSITION, C'EST COMME REDEMARRER DESSUS (CONVERGENCE §9.7,
+ * MESURES §186) : ce qui joue s'arrete, la source, la chaine et la liste de la
+ * nouvelle se relisent, la tete va sur la cue 1, et la lecture part si
+ * « lecture au demarrage » est coche. Les sons sont deja en memoire : seuls les
+ * petits fichiers de la composition se relisent. Appele par Repertoire::ouvrir. */
+static void rechargerComposition(){
+    Cues::arreter();
+    AudioEngine::arreterEchantillon();
+    Compo::recharger();
+    g_midiRouter.rechargerChaine();
+    Cues::recharger();
+    if (Cues::lectureAuDemarrage()) Cues::demarrer();
+}
+
+/* Les demandes de composition des scripts, AVANT le transport : « ouvre la 2 »
+ * puis « joue » tient en un tour. */
+static void executerRepertoire(){
+    int16_t n = g_compoDemandee;
+    if (n >= 0) g_compoDemandee = -1;
+    const int8_t sens = g_compoSens;
+    if (sens) { g_compoSens = 0; if (n < 0) n = Repertoire::voisine(sens); }
+    if (n <= 0) return;
+    String raison;
+    if (!Repertoire::ouvrir((uint8_t)n, raison))
+        NIDMI_WEB_LOG("[repertoire] s(\"sys.compo\") : %s", raison.c_str());
+}
+
 /* Les demandes de transport des scripts, executees ici — dans la boucle, qui
  * tient le sequenceur (§172) —, au tour qui suit la demande. L'ordre : l'arret,
  * puis ou aller, puis lire — « va a la cue 3 et joue » tient en un tour. */
@@ -804,6 +852,9 @@ static void publierEtatsSys(){
     if (c != cable)    { cable = c;    FluxRegistry::update("sys.cable", c); }
     if (a != autonome) { autonome = a; FluxRegistry::update("sys.standalone", a); }
     if (p != prio)     { prio = p;     FluxRegistry::update("sys.cablefirst", p); }
+    static int16_t compo = -1;                // le repertoire (§186)
+    const int16_t n = Repertoire::numeroOuvert();
+    if (n != compo)    { compo = n;    FluxRegistry::update("sys.compo", n); }
 }
 
 /* ── L'AUTOPSIE D'UN BLOC LENT (MESURES §161) ────────────────────────────
@@ -1300,6 +1351,9 @@ void nidmi_begin() {
 
     touchDiag("AVANT WiFi/serveur");
 
+    /* Le repertoire d'abord (MESURES §186) : il dit quelle composition est
+       ouverte, donc ou la source, les cues et la chaine se lisent. */
+    Repertoire::demarrer();
     // La composition que la carte garde pour l'app (MESURES §156) : lue en PSRAM
     // AVANT que le serveur ne reponde — une page chargee pendant le demarrage
     // recevrait sinon « aucune », et repartirait vide.
@@ -1332,9 +1386,10 @@ void nidmi_begin() {
     // Initialiser MidiRouter (qui initialisera USB MIDI si activé et supporté)
     g_midiRouter.begin();
 
-    /* Script .nms memorise : la carte se reconfigure SEULE au demarrage. C'est
-       la condition du headless — une carte deployee n'a pas de navigateur pour
-       lui redire quoi faire. Le NOM vient de la NVS, le CONTENU de storage. */
+    /* La chaine de la composition ouverte : la carte se reconfigure SEULE au
+       demarrage. C'est la condition du headless — une carte deployee n'a pas de
+       navigateur pour lui redire quoi faire. Tout vient de la composition :
+       chain.txt et ses scripts (MESURES §186). */
     g_midiRouter.restaurerScript();
     // La table CC -> parametre revient elle aussi de la NVS : sans elle, un
     // redemarrage rendait muets tous les potentiometres appris.
@@ -1425,6 +1480,7 @@ void nidmi_begin() {
        premier etat part a 3 s, avec la liste (elle se lit dans storage) — §181. */
     Cues::restaurerOptions();
     Cues::surChangement(publierEtatsTransport);
+    Repertoire::surOuverture(rechargerComposition);     // ouvrir = redemarrer dessus (§186)
 
     // Initialiser ComponentManager
     g_componentManager.begin(&g_midiRouter);
@@ -1521,6 +1577,7 @@ void nidmi_loop() {
     }
 
     uint32_t tc = nidmi_section("cues");
+    executerRepertoire();           // s("sys.compo")…, avant le transport (§186)
     executerTransport();            // ce que les scripts ont demandé (s("sys.nextcue")…, §181)
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
     nidmi_chrono("cues", tc); tc = nidmi_section("differe");

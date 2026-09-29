@@ -18,9 +18,23 @@ constexpr int MAX_NVS      = 24;
 constexpr unsigned long STABLE_MS  = 3000;    // une rafale de poses n'ecrit qu'une fois
 constexpr unsigned long REESSAI_MS = 30000;   // apres un echec d'ecriture
 
+/* LE CHEMIN EST EN PSRAM, a sa taille (MESURES §186). Il tenait dans 64 octets
+ * fixes, en memoire interne : « /compositions/01/<nom>/composition.json »
+ * depasse vite, et la file entiere pesait 2,3 Ko de .bss — la ressource la plus
+ * tendue de la carte (§150). Partage, il se copie sous le verrou sans allouer. */
+constexpr size_t CHEMIN_MAX = 160;
+std::shared_ptr<char> copiePsram(const char* s) {
+  const size_t n = strlen(s) + 1;
+  char* p = (char*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) return nullptr;
+  memcpy(p, s, n);
+  return std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); });
+}
+bool meme(const std::shared_ptr<char>& a, const char* b) { return a && !strcmp(a.get(), b); }
+
 struct Fichier {
   bool actif = false;
-  char chemin[64] = {0};
+  std::shared_ptr<char> chemin;              // en PSRAM
   std::shared_ptr<char> tampon;              // nullptr + supprime : effacer
   size_t n = 0;
   bool supprime = false;
@@ -78,11 +92,19 @@ bool ecrireFichier(const char* chemin, const char* data, size_t n) {
   const String tmp = String(chemin) + ".tmp";
   File f = LittleFS.open(tmp, FILE_WRITE);
   /* Un dossier que rien n'a encore cree (/config, a la premiere configuration
-   * deposee — MESURES §179) : on le cree, ici, au silence comme le reste. */
+   * deposee — MESURES §179 ; interface/scripts, §186) : on le cree, ici, au
+   * silence comme le reste — chaque niveau manquant, LittleFS n'en cree qu'un
+   * a la fois. */
   if (!f) {
-    const String dossier = String(chemin).substring(0, String(chemin).lastIndexOf('/'));
-    if (dossier.length() && !LittleFS.exists(dossier) && LittleFS.mkdir(dossier))
-      f = LittleFS.open(tmp, FILE_WRITE);
+    const String c = chemin;
+    const int fin = c.lastIndexOf('/');
+    bool ok = fin > 0;
+    for (int i = 1; ok && i <= fin; i++) {
+      if (i < fin && c[i] != '/') continue;
+      const String niveau = c.substring(0, i);
+      if (!LittleFS.exists(niveau) && !LittleFS.mkdir(niveau)) ok = false;
+    }
+    if (ok) f = LittleFS.open(tmp, FILE_WRITE);
   }
   if (!f) return false;
   const size_t e = f.write((const uint8_t*)data, n);
@@ -132,19 +154,18 @@ void noter(uint32_t dt, bool ok) {
 
 // Ecrire un fichier pris dans la file ; sans silence exige si `force`.
 bool traiterFichier(int i, unsigned long now, bool force) {
-  std::shared_ptr<char> t;
+  std::shared_ptr<char> t, c;
   size_t n = 0;
   bool supprime = false;
-  char chemin[64];
   {
     Garde g;
     Fichier& f = fichiers[i];
     if (!f.actif) return false;
     if (!force && (now - f.poseA < STABLE_MS || (f.echecA && now - f.echecA < REESSAI_MS)))
       return false;
-    t = f.tampon; n = f.n; supprime = f.supprime;
-    strlcpy(chemin, f.chemin, sizeof chemin);
+    t = f.tampon; n = f.n; supprime = f.supprime; c = f.chemin;
   }
+  const char* chemin = c.get();
   bool ok;
   uint32_t dt;
   {
@@ -159,7 +180,7 @@ bool traiterFichier(int i, unsigned long now, bool force) {
   Garde g;
   Fichier& f = fichiers[i];
   // Une pose plus recente a pu arriver pendant l'ecriture : elle garde sa place.
-  if (f.actif && f.tampon == t && f.supprime == supprime && !strcmp(f.chemin, chemin)) {
+  if (f.actif && f.tampon == t && f.supprime == supprime && f.chemin == c) {
     if (ok) { f.actif = false; f.tampon.reset(); f.n = 0; }
     else    f.echecA = now ? now : 1;
   }
@@ -235,16 +256,18 @@ void poserNvs(const char* espace, const char* cle, TypeNvs type, const String* c
 }  // namespace
 
 bool poserFichier(const char* chemin, std::shared_ptr<char> tampon, size_t n) {
-  if (!chemin || strlen(chemin) >= sizeof(Fichier::chemin) || !tampon) return false;
+  if (!chemin || strlen(chemin) >= CHEMIN_MAX || !tampon) return false;
+  auto c = copiePsram(chemin);                   // hors du verrou : il ne garde que des echanges
+  if (!c) return false;
   Garde g;
   Fichier* libre = nullptr;
   for (auto& f : fichiers) {
-    if (f.actif && !strcmp(f.chemin, chemin)) { libre = &f; break; }
+    if (f.actif && meme(f.chemin, chemin)) { libre = &f; break; }
     if (!f.actif && !libre) libre = &f;
   }
   if (!libre) { refus++; return false; }
   libre->actif = true;
-  strlcpy(libre->chemin, chemin, sizeof libre->chemin);
+  libre->chemin = c;
   libre->tampon = tampon;
   libre->n = n;
   libre->supprime = false;
@@ -261,16 +284,18 @@ bool poserFichierCopie(const char* chemin, const char* data, size_t n) {
 }
 
 bool supprimerFichier(const char* chemin) {
-  if (!chemin || strlen(chemin) >= sizeof(Fichier::chemin)) return false;
+  if (!chemin || strlen(chemin) >= CHEMIN_MAX) return false;
+  auto c = copiePsram(chemin);
+  if (!c) return false;
   Garde g;
   Fichier* libre = nullptr;
   for (auto& f : fichiers) {
-    if (f.actif && !strcmp(f.chemin, chemin)) { libre = &f; break; }
+    if (f.actif && meme(f.chemin, chemin)) { libre = &f; break; }
     if (!f.actif && !libre) libre = &f;
   }
   if (!libre) { refus++; return false; }
   libre->actif = true;
-  strlcpy(libre->chemin, chemin, sizeof libre->chemin);
+  libre->chemin = c;
   libre->tampon.reset();
   libre->n = 0;
   libre->supprime = true;
@@ -283,7 +308,7 @@ bool attente(const char* chemin, std::shared_ptr<char>& tampon, size_t& n, bool&
   if (!chemin) return false;
   Garde g;
   for (auto& f : fichiers) {
-    if (f.actif && !strcmp(f.chemin, chemin)) {
+    if (f.actif && meme(f.chemin, chemin)) {
       tampon = f.tampon; n = f.n; supprime = f.supprime;
       return true;
     }
@@ -294,20 +319,20 @@ bool attente(const char* chemin, std::shared_ptr<char>& tampon, size_t& n, bool&
 void visiterAttente(const char* prefixe,
                     void (*visiter)(const char* chemin, size_t n, bool supprime, void* ctx),
                     void* ctx) {
-  struct Vu { char chemin[64]; size_t n; bool supprime; };
+  struct Vu { std::shared_ptr<char> chemin; size_t n; bool supprime; };
   Vu vus[MAX_FICHIERS];
   int k = 0;
   const size_t lp = prefixe ? strlen(prefixe) : 0;
   {
     Garde g;
     for (auto& f : fichiers) {
-      if (!f.actif || (lp && strncmp(f.chemin, prefixe, lp))) continue;
-      strlcpy(vus[k].chemin, f.chemin, sizeof vus[k].chemin);
+      if (!f.actif || !f.chemin || (lp && strncmp(f.chemin.get(), prefixe, lp))) continue;
+      vus[k].chemin = f.chemin;
       vus[k].n = f.n; vus[k].supprime = f.supprime;
       k++;
     }
   }
-  for (int i = 0; i < k; i++) visiter(vus[i].chemin, vus[i].n, vus[i].supprime, ctx);
+  for (int i = 0; i < k; i++) visiter(vus[i].chemin.get(), vus[i].n, vus[i].supprime, ctx);
 }
 
 void nvsChaine(const char* espace, const char* cle, const String& valeur) {
@@ -335,6 +360,44 @@ void boucle() {
   // note peut arriver entre deux.
   for (int i = 0; i < MAX_FICHIERS; i++) if (traiterFichier(i, now, false)) return;
   for (int i = 0; i < MAX_NVS; i++)      if (traiterNvs(i, now, false)) return;
+}
+
+bool lire(const char* chemin, std::shared_ptr<char>& tampon, size_t& n) {
+  bool supprime = false;
+  if (attente(chemin, tampon, n, supprime)) return !supprime && tampon;
+  if (!monter()) return false;
+  File f = LittleFS.open(chemin, FILE_READ);
+  if (!f || f.isDirectory()) return false;
+  n = f.size();
+  char* p = (char*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!p) { f.close(); return false; }
+  const size_t lu = n ? f.read((uint8_t*)p, n) : 0;
+  f.close();
+  if (lu != n) { heap_caps_free(p); return false; }
+  tampon = std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); });
+  return true;
+}
+
+void ecrireSousMaintenant(const char* prefixe) {
+  const size_t lp = strlen(prefixe);
+  const unsigned long now = millis();
+  for (int i = 0; i < MAX_FICHIERS; i++) {
+    bool dessous;
+    {
+      Garde g;
+      dessous = fichiers[i].actif && fichiers[i].chemin && !strncmp(fichiers[i].chemin.get(), prefixe, lp);
+    }
+    if (dessous) traiterFichier(i, now, true);
+  }
+}
+
+void oublierSous(const char* prefixe) {
+  const size_t lp = strlen(prefixe);
+  Garde g;
+  for (auto& f : fichiers) {
+    if (!f.actif || !f.chemin || strncmp(f.chemin.get(), prefixe, lp)) continue;
+    f.actif = false; f.tampon.reset(); f.chemin.reset(); f.n = 0;
+  }
 }
 
 void toutEcrireMaintenant() {

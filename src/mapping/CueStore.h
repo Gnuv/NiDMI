@@ -5,7 +5,7 @@
 // appliquer a chaque cue ce qui la definit : un script .nms, et — si la carte
 // a de l'audio — un moteur et ses reglages.
 //
-// FORMAT (une cue par ligne, storage:/cues.txt) :
+// FORMAT (une cue par ligne, cues.txt de la composition OUVERTE — MESURES §186) :
 //     nom | duree_s | scripts | engine | params_audio | params_script | env
 //   duree 0        = attendre un GO (cue infinie)
 //   scripts        = les .nms de la CHAINE, separes par des virgules : la
@@ -43,9 +43,6 @@
 
 namespace Cues {
 
-// La liste de cues dans storage — declaree ici, lue par l'explorateur (FichiersAPI).
-constexpr const char* FICHIER = "/cues.txt";
-
 struct Cue {
   String  nom;
   float   duree   = 0.0f;    // secondes ; 0 = infinie (attend un GO)
@@ -61,6 +58,10 @@ struct Cue {
 
 // ── Magasin ───────────────────────────────────────────────────────────────
 bool   monter();
+/* La composition ouverte a change (Repertoire::ouvrir) : sa liste et « la liste
+ * boucle » se relisent, la tete revient sur la premiere cue. Le transport doit
+ * etre arrete avant (NiDMI.cpp s'en charge). */
+void   recharger();
 int    nombre();                       // compte les lignes utiles
 bool   lire(int index, Cue& sortie);   // decode la cue N (texte en PSRAM)
 bool   ecrireTout(const String& contenu);
@@ -96,8 +97,11 @@ bool  boucleActive();
  * la cause) et sur un demarrage a vide. */
 void  fixerLectureAuDemarrage(bool oui);
 bool  lectureAuDemarrage();
-/* Les deux vivent en NVS (« nidmi-cues ») ; elles valent tout de suite et se
- * memorisent au silence (Differe, §157). Lues une fois au demarrage. */
+/* Deux options, deux proprietaires (CONVERGENCE §9.7) : « la liste boucle »
+ * est la forme de la PIECE — elle vit dans la composition, options.txt ; « la
+ * lecture au demarrage » est le comportement de la CARTE — elle vit en NVS
+ * (« nidmi-cues »), dans l'interface. Elles valent tout de suite et se
+ * memorisent au silence (Differe, §157). Lues au demarrage. */
 void  restaurerOptions();
 
 /* L'ETAT DU TRANSPORT, pour r("sys.…") : le rappel est appele a CHAQUE

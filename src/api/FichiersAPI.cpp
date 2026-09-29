@@ -35,6 +35,7 @@
 #include "../mapping/CompoStore.h"
 #include "../midi/MidiRouter.h"
 #include "../config/EcrituresDifferees.h"
+#include "../mapping/Repertoire.h"
 
 namespace {
 
@@ -44,7 +45,7 @@ constexpr size_t      CONFIG_MAX     = 32 * 1024;   // une configuration exporte
 constexpr size_t      LISTE_MAX      = 32 * 1024;   // la reponse de /api/fichiers, en PSRAM
 constexpr int         USAGES_MAX     = 64;
 
-enum class Genre { Son, Script, Cues, Composition, Configuration, Autre };
+enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Texte, Configuration, Autre };
 
 const char* nomDuGenre(Genre g) {
   switch (g) {
@@ -52,6 +53,9 @@ const char* nomDuGenre(Genre g) {
     case Genre::Script:        return "script";
     case Genre::Cues:          return "cues";
     case Genre::Composition:   return "composition";
+    case Genre::Chaine:        return "chaine";
+    case Genre::Options:       return "options";
+    case Genre::Texte:         return "texte";
     case Genre::Configuration: return "configuration";
     default:                   return "autre";
   }
@@ -64,12 +68,22 @@ bool dans(const String& chemin, const char* dossier) {
          && chemin.indexOf('/', n + 1) < 0;
 }
 
+/* Le genre se lit au CHEMIN (§186) : les sons dans samples/, les scripts de
+ * broche dans interface/scripts/, et dans une composition — compositions/<nn>/
+ * <nom>/ — des noms generiques qui disent chacun ce qu'ils sont. */
 Genre genreDe(const String& chemin) {
-  if (dans(chemin, SampleStore::DOSSIER)) return Genre::Son;
-  if (dans(chemin, ScriptStore::DOSSIER)) return Genre::Script;
-  if (chemin == Cues::FICHIER)            return Genre::Cues;
-  if (chemin == Compo::FICHIER)           return Genre::Composition;
-  if (dans(chemin, DOSSIER_CONFIG))       return Genre::Configuration;
+  if (dans(chemin, SampleStore::DOSSIER))            return Genre::Son;
+  if (dans(chemin, ScriptStore::DOSSIER_INTERFACE))  return Genre::Script;
+  if (dans(chemin, DOSSIER_CONFIG))                  return Genre::Configuration;
+  uint8_t numero; String nom, fichier;
+  if (Repertoire::decouper(chemin, numero, nom, fichier) && fichier.indexOf('/') < 0) {
+    if (fichier == Repertoire::SOURCE)   return Genre::Composition;
+    if (fichier == Repertoire::CUES)     return Genre::Cues;
+    if (fichier == Repertoire::CHAINE)   return Genre::Chaine;
+    if (fichier == Repertoire::OPTIONS)  return Genre::Options;
+    if (fichier == Repertoire::LISEZMOI) return Genre::Texte;
+    if (fichier.endsWith(".nms"))        return Genre::Script;
+  }
   return Genre::Autre;
 }
 
@@ -81,15 +95,17 @@ Genre genreTeleverse(const String& nom) {
   return Genre::Autre;
 }
 
-/* La liste de cues et la composition viennent de l'app : les supprimer d'ici
- * laisserait la carte jouer ce que plus rien ne decrit. « Installer » les
- * remplace. */
-bool supprimable(Genre g) { return g != Genre::Cues && g != Genre::Composition; }
+/* La source, la liste de cues, la chaine et les options d'une composition
+ * viennent de l'app : les supprimer d'ici laisserait la carte jouer ce que plus
+ * rien ne decrit. « Installer » les remplace. */
+bool supprimable(Genre g) {
+  return g != Genre::Cues && g != Genre::Composition && g != Genre::Chaine && g != Genre::Options;
+}
 
 // Absolu, sans remontee, court, et pas une ecriture en cours (.tmp de Differe,
 // .part d'un televersement).
 bool cheminValide(const String& c) {
-  return c.length() > 1 && c.length() < 64 && c[0] == '/' && c.indexOf("..") < 0
+  return c.length() > 1 && c.length() < 160 && c[0] == '/' && c.indexOf("..") < 0
          && !c.endsWith(".tmp") && !c.endsWith(".part");
 }
 
@@ -222,9 +238,20 @@ const char* usageDe(const Usage* u, int n, const String& nom) {
 }
 
 // ── Parcourir storage ──────────────────────────────────────────────────────────
-// La racine et un niveau : il n'y en a pas d'autre. Corrige de ce qui attend le
+// A toute profondeur — une composition vit trois niveaux sous la racine (§186) —,
+// bornee a six niveaux : l'arbre n'en a pas plus. Corrige de ce qui attend le
 // silence pour s'ecrire (Differe) : la liste dit ce que la carte PORTE, pas ce
 // que la flash a deja recu — comme ScriptStore::listerJson.
+template <typename U> void parcourirDossier(const String& dossier, int profondeur, U& un) {
+  File d = LittleFS.open(dossier);
+  if (!d || !d.isDirectory()) return;
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    const String p = f.path();
+    if (f.isDirectory()) { if (profondeur < 6) parcourirDossier(p, profondeur + 1, un); continue; }
+    un(p, f.size());
+  }
+}
+
 template <typename F> void parcourir(F voir) {
   String vus;
   auto un = [&](const String& chemin, size_t octetsFlash) {
@@ -234,17 +261,7 @@ template <typename F> void parcourir(F voir) {
     if (Differe::attente(chemin.c_str(), t, na, sup)) { if (!sup) voir(chemin, na, true); return; }
     voir(chemin, octetsFlash, false);
   };
-  File racine = LittleFS.open("/");
-  if (racine && racine.isDirectory()) {
-    for (File f = racine.openNextFile(); f; f = racine.openNextFile()) {
-      const String p = f.path();
-      if (!f.isDirectory()) { un(p, f.size()); continue; }
-      File d = LittleFS.open(p);
-      if (!d || !d.isDirectory()) continue;
-      for (File g = d.openNextFile(); g; g = d.openNextFile())
-        if (!g.isDirectory()) un(String(g.path()), g.size());
-    }
-  }
+  parcourirDossier(String("/"), 0, un);
   struct Ctx { String* vus; F* voir; };
   Ctx ctx{ &vus, &voir };
   Differe::visiterAttente("/", [](const char* chemin, size_t n, bool supprime, void* c) {
@@ -285,6 +302,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
     e.ajouter("\"liste\":[");
     bool premier = true;
     int n = 0;
+    const String ouvert = Repertoire::dossierOuvert();
     parcourir([&](const String& chemin, size_t octets, bool enAttente) {
       const Genre g = genreDe(chemin);
       const String nom = baseDe(chemin);
@@ -299,7 +317,10 @@ void setupFichiersAPI(AsyncWebServer& server) {
       // charge, on ne sait pas — on se tait plutot que d'annoncer « injouable ».
       if (g == Genre::Son && charges)
         e.formater(",\"lisible\":%s", SampleStore::indexDe(nom.c_str()) >= 0 ? "true" : "false");
-      if (g == Genre::Son || g == Genre::Script) {
+      /* Qui s'en sert : un son, ou un script de la composition OUVERTE — les
+       * cues et la chaine qu'on releve sont les siennes. */
+      const bool ouverte = ouvert.length() && chemin.startsWith(ouvert + "/");
+      if (g == Genre::Son || (g == Genre::Script && ouverte)) {
         const char* par = usageDe(u, nu, nom);
         if (par) { e.ajouter(",\"utilise_par\":"); e.chaine(par); }
       }
@@ -410,7 +431,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
     const Genre g = genreDe(chemin);
     if (!supprimable(g)) {
-      repondre(request, 403, "la liste de cues et la composition viennent de l'app : Installer les remplace");
+      repondre(request, 403, "la source, les cues, la chaine et les options d'une composition "
+                             "viennent de l'app : Installer les remplace");
       return;
     }
     if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
@@ -422,7 +444,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
         ok = SampleStore::supprimer(nom.c_str());
         break;
       case Genre::Script:
-        ok = ScriptStore::supprimer(nom.c_str());
+        ok = ScriptStore::supprimerChemin(chemin);
         break;
       default: {
         std::shared_ptr<char> t; size_t n = 0; bool sup = false;

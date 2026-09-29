@@ -40,6 +40,18 @@ bool supprimerFichier(const char* chemin);
 // (`tampon`, `n`), soit une suppression (`supprime`). false : rien, lire la flash.
 bool attente(const char* chemin, std::shared_ptr<char>& tampon, size_t& n, bool& supprime);
 
+/* CE QUE LA CARTE PORTE a ce chemin : ce qui attend le silence, sinon la flash
+ * (lue d'un coup en PSRAM). false : rien — absent, ou supprime en attente.
+ * C'est ainsi qu'un magasin relit la composition qu'on vient d'ouvrir (§186). */
+bool lire(const char* chemin, std::shared_ptr<char>& tampon, size_t& n);
+
+/* Les ecritures en attente SOUS un dossier (`prefixe` finit par « / ») :
+ * ecrites maintenant — un dossier qu'on renomme ou deplace ne doit rien
+ * laisser derriere lui qui le recreerait au silence —, ou oubliees — un
+ * dossier qu'on supprime (§186). */
+void ecrireSousMaintenant(const char* prefixe);
+void oublierSous(const char* prefixe);
+
 // Visiter ce qui attend sous un dossier (pour lister ce que la flash n'a pas
 // encore) : `visiter(chemin, n, supprime, ctx)`.
 void visiterAttente(const char* prefixe,

@@ -185,8 +185,15 @@ public:
         return (e < emplacements.size()) ? emplacements[e]->nom : String();
     }
 
-    // Au boot : recharge le script memorise. Appele une fois depuis nidmi_setup.
+    /* Au boot : la chaine de la composition OUVERTE — sa longueur, sa zone
+     * MAIN, les scripts memorises —, lue dans son chain.txt (MESURES §186). Elle
+     * vivait en NVS, une seule pour toute la carte ; elle suit maintenant la
+     * composition. Appele une fois depuis nidmi_setup. */
     void restaurerScript();
+    /* La composition ouverte a change (Repertoire::ouvrir) : la chaine se vide
+     * — sans rien ecrire, l'ancienne composition garde la sienne — puis se
+     * relit dans la nouvelle. */
+    void rechargerChaine();
     String scriptMidi() const { return contenuEmplacement(0); }
 
     /* ── LE MIDI COMPTE AUSSI POUR LE SILENCE (MESURES §170) ───────────────
@@ -250,6 +257,10 @@ private:
     struct Emplacement {
         String contenu;        // "" = emplacement vide, ignore
         String nom;            // nom du fichier .nms, ou "(en ligne)"
+        /* Le nom MEMORISE pour ce maillon : ce que chain.txt garde, et ce que la
+         * carte recharge au demarrage (un maillon MAIN, un script pousse en
+         * ligne). Celui qu'une cue y charge n'en est pas : la cue le redonne. */
+        String nomMemorise;
         bool   initEnAttente = true;   // un loadbang() est du
         /* A quoi ce maillon peut repondre, et quand son horloge a quelque chose
          * a faire (MESURES §170) : on ne l'execute pas pour rien. Voir
@@ -272,6 +283,12 @@ private:
     void _reduireChaine(uint8_t n);
     /* Nomme un maillon apres coup, sous le verrou — s'il existe encore. */
     void _nommer(uint8_t e, const String& nom);
+    /* Le nom memorise d'un maillon (vide : plus rien), puis la chaine reecrite.
+     * Hors du verrou des scripts : il le prend lui-meme, le temps d'un echange. */
+    void _memoriser(uint8_t e, const String& nom);
+    /* chain.txt de la composition ouverte, reecrit en entier : quelques
+     * dizaines d'octets, au silence (Differe) — une rafale n'ecrit qu'une fois. */
+    void _ecrireChaine();
     bool rtpEnabled;
     bool oscEnabled;
     bool bluetoothEnabled;

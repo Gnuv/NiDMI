@@ -2,6 +2,8 @@
 #include "../config/EcrituresDifferees.h"
 #include "../mapping/MappingEngine.h"
 #include "../mapping/ScriptStore.h"
+#include "../mapping/Repertoire.h"
+#include <LittleFS.h>
 #include <Preferences.h>
 #include "CcMap.h"
 #include <Arduino.h>
@@ -430,7 +432,9 @@ void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
     }
 }
 
-// ── Script nomme : contenu dans LittleFS, nom en NVS ───────────────────────
+// ── Script nomme : contenu et nom dans la composition (chain.txt, §186) ─────
+/* Les anciennes cles NVS de la chaine — « nidmi-midi » : nmap, nperm, script,
+ * script1… — ne servent plus qu'a etre effacees, une fois, au demarrage. */
 namespace {
 constexpr const char* NVS_ESPACE_MIDI = "nidmi-midi";
 constexpr const char* NVS_CLE_SCRIPT  = "script";
@@ -499,18 +503,17 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
      * L'ecriture est evitee quand le code n'a pas change : l'app republie a
      * chaque enregistrement, et la flash n'a pas a payer une republication
      * identique. Hors du verrou : le script tourne deja. */
-    const String cle = cleNvsEmplacement(emplacement);
     if (!script.length()) {
-        Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
+        _memoriser(emplacement, String());
         Serial.printf("[MidiRouter] emplacement %u : vide\n", (unsigned)emplacement);
         return;
     }
 
     if (!memeCode || !dejaNomme) {
-        const bool ecrit = ScriptStore::ecrire(fichier.c_str(), script);
+        const bool ecrit = ScriptStore::ecrire(ScriptStore::Lieu::Composition, fichier.c_str(), script);
         _nommer(emplacement, ecrit ? fichier : String("(en ligne, NON persiste)"));
         if (ecrit) {
-            Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), fichier);   // au silence (§157)
+            _memoriser(emplacement, fichier);
         } else {
             /* storage pleine ou absente : le script TOURNE quand meme, mais il ne
              * survivra pas au redemarrage. On le DIT — un comportement qui
@@ -530,6 +533,35 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
 void MidiRouter::_nommer(uint8_t e, const String& nom) {
     MappingEngine::Verrou verrou;
     if (e < emplacements.size()) emplacements[e]->nom = nom;
+}
+
+void MidiRouter::_memoriser(uint8_t e, const String& nom) {
+    {
+        MappingEngine::Verrou verrou;
+        if (e >= emplacements.size() || emplacements[e]->nomMemorise == nom) return;
+        emplacements[e]->nomMemorise = nom;
+    }
+    _ecrireChaine();
+}
+
+void MidiRouter::_ecrireChaine() {
+    String t = "# la chaine de scripts de cette composition — ecrite par la carte (MESURES §186)\n";
+    {
+        MappingEngine::Verrou verrou;
+        t += "taille=" + String((unsigned)emplacements.size()) + "\n";
+        t += "permanents=" + String((unsigned)_nPermanents) + "\n";
+        for (uint8_t e = 0; e < emplacements.size(); e++)
+            if (emplacements[e]->nomMemorise.length())
+                t += String((unsigned)e) + "=" + emplacements[e]->nomMemorise + "\n";
+    }
+    /* Une chaine appartient a une composition : sur un repertoire vide, la
+     * premiere se cree (l'app dimensionne la chaine avant d'envoyer ses cues). */
+    String raison;
+    if (!Repertoire::assurerOuverte("", raison)) {
+        Serial.printf("[MidiRouter] chaine non memorisee : %s\n", raison.c_str());
+        return;
+    }
+    Differe::poserFichierCopie(Repertoire::chemin(Repertoire::CHAINE).c_str(), t.c_str(), t.length());
 }
 
 /* La chaine des scripts map appliquee a une note — pendant de chaineScriptsCc,
@@ -622,11 +654,8 @@ MidiRouter::Emplacement* MidiRouter::_assurerEmplacement(uint8_t e) {
 
 void MidiRouter::_reduireChaine(uint8_t n) {
     if (emplacements.size() <= n) return;
-    /* ET LEURS NOMS EN NVS. Sans ca, raccourcir la chaine laissait « script1 »,
-     * « script2 »... derriere elle : des cles orphelines dans le reservoir le
-     * plus tendu de la carte (630 entrees pour TOUT, §101). Vu au compteur —
-     * 114 entrees avant l'essai, 129 apres, et elles ne redescendaient pas.
-     * Une seule ouverture de NVS pour toute la reduction. */
+    /* Leurs noms memorises partent avec eux : chain.txt est reecrit par
+     * dimensionnerChaine, hors du verrou. */
     while (emplacements.size() > n) {
         Emplacement* em = emplacements.back();
         /* Les reprises retiennent un pointeur sur le texte : les purger AVANT
@@ -634,7 +663,6 @@ void MidiRouter::_reduireChaine(uint8_t n) {
         MappingEngine::viderDifferes(em->contenu.c_str());
         delete em;
         emplacements.pop_back();
-        Differe::nvsRetirer(NVS_ESPACE_MIDI, cleNvsEmplacement((uint8_t)emplacements.size()).c_str());
     }
 }
 
@@ -645,7 +673,7 @@ void MidiRouter::fixerMaillonsPermanents(uint8_t n) {
     if (n > emplacements.size()) n = (uint8_t)emplacements.size();
     if (n == _nPermanents) return;
     _nPermanents = n;
-    Differe::nvsOctet(NVS_ESPACE_MIDI, "nperm", n);   // au silence (§157)
+    _ecrireChaine();                                   // au silence (§157)
     Serial.printf("[MidiRouter] %u maillon(s) permanent(s) — les cues n'y touchent pas\n",
                   (unsigned)n);
 }
@@ -665,10 +693,10 @@ uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
     /* Une chaine raccourcie sous la zone MAIN ne peut plus en tenir autant :
        la frontiere suit, sinon elle designerait des maillons disparus. */
     if (_nPermanents > obtenu) fixerMaillonsPermanents(obtenu);
-    /* La longueur va en NVS avec les noms : sans elle, une carte redemarree
-     * retrouverait ses scripts mais pas sa chaine, et les emplacements au-dela
-     * du premier seraient muets sans rien dire. */
-    Differe::nvsOctet(NVS_ESPACE_MIDI, "nmap", obtenu);   // au silence ; identique : rien (§157)
+    /* La longueur va dans chain.txt avec les noms : sans elle, une carte
+     * redemarree retrouverait ses scripts mais pas sa chaine, et les
+     * emplacements au-dela du premier seraient muets sans rien dire. */
+    _ecrireChaine();                                    // au silence (§157)
     Serial.printf("[MidiRouter] chaine dimensionnee a %u emplacement(s)%s\n",
                   (unsigned)obtenu, (obtenu < n) ? " — memoire insuffisante" : "");
     return obtenu;
@@ -679,13 +707,11 @@ uint8_t MidiRouter::dimensionnerChaine(uint8_t n) {
  * « script1 », « script2 »... */
 
 bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emplacement) {
-    const String cle = cleNvsEmplacement(emplacement);
-
     /* LE FICHIER SE LIT AVANT LE VERROU (§170) : le verrou ne tient qu'un
      * echange de textes, jamais une lecture de la flash. */
     String contenu;
     const bool aucun = (!nom || !*nom);        // "" = plus de script du tout
-    if (!aucun && !ScriptStore::lire(nom, contenu)) {
+    if (!aucun && !ScriptStore::lire(ScriptStore::Lieu::Composition, nom, contenu)) {
         Serial.printf("[MidiRouter] script '%s' introuvable dans storage\n", nom);
         return false;
     }
@@ -705,45 +731,86 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
         for (int i = 0; i < MappingEngine::MAX_PIPELINES_SCRIPT; i++) em.etats[i].reinitialiser();
     }
     if (aucun) {
-        if (persister) {
-            Differe::nvsRetirer(NVS_ESPACE_MIDI, cle.c_str());   // au silence (§157)
-        }
+        if (persister) _memoriser(emplacement, String());      // au silence (§157)
         Serial.printf("[MidiRouter] emplacement %u : aucun script\n", (unsigned)emplacement);
         return true;
     }
-    if (persister) {
-        Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), String(nom));   // au silence (§157)
-    }
+    if (persister) _memoriser(emplacement, String(nom));       // au silence (§157)
     Serial.printf("[MidiRouter] emplacement %u : '%s' charge (%u o)%s\n",
                   (unsigned)emplacement, nom, taille, persister ? " et memorise" : "");
     return true;
 }
 
-void MidiRouter::restaurerScript() {
-    Preferences p;
-    if (!p.begin(NVS_ESPACE_MIDI, true)) return;
-    /* LA LONGUEUR DE LA CHAINE d'abord : c'est elle qui dit combien de noms
-     * lire. Sans elle on scannerait le plafond entier — 64 lectures NVS a
-     * chaque demarrage pour retrouver, le plus souvent, zero script. */
-    const uint8_t nmap  = p.getUChar("nmap", 0);
-    const uint8_t nperm = p.getUChar("nperm", 0);
-    std::vector<String> noms(nmap);
-    for (uint8_t e = 0; e < nmap; e++)
-        noms[e] = p.getString(cleNvsEmplacement(e).c_str(), "");
-    p.end();
+void MidiRouter::rechargerChaine() {
     {
         MappingEngine::Verrou verrou;
-        if (nmap) _assurerEmplacement((uint8_t)(nmap - 1));
-        _nPermanents = (nperm <= emplacements.size()) ? nperm : (uint8_t)emplacements.size();
+        _reduireChaine(0);                // chaque maillon purge ses reprises (§101)
+        _nPermanents = 0;
+    }
+    restaurerScript();
+}
+
+void MidiRouter::restaurerScript() {
+    /* LES ANCIENNES CLES DE LA CHAINE, EFFACEES (§186) : elle vivait en NVS
+     * jusqu'ici. Une fois, au silence — rien ne les relit. */
+    {
+        Preferences p;
+        if (p.begin(NVS_ESPACE_MIDI, true)) {
+            const bool anciennes = p.isKey("nmap");
+            const uint8_t nmap = p.getUChar("nmap", 0);
+            p.end();
+            if (anciennes) {
+                for (uint8_t e = 0; e < nmap; e++) Differe::nvsRetirer(NVS_ESPACE_MIDI, cleNvsEmplacement(e).c_str());
+                Differe::nvsRetirer(NVS_ESPACE_MIDI, "nperm");
+                Differe::nvsRetirer(NVS_ESPACE_MIDI, "nmap");
+            }
+        }
+    }
+    const String fichier = Repertoire::chemin(Repertoire::CHAINE);
+    std::shared_ptr<char> brut; size_t nb = 0;
+    if (!fichier.length() || !Differe::lire(fichier.c_str(), brut, nb)) {
+        Serial.println("[MidiRouter] aucune chaine a restaurer");
+        return;
+    }
+    String texte;
+    texte.concat(brut.get(), (unsigned)nb);
+    /* « taille=N », « permanents=P », puis « e=nom.nms » par maillon memorise.
+     * La LONGUEUR d'abord : c'est elle qui dit combien de maillons allouer. */
+    uint8_t taille = 0, permanents = 0;
+    std::vector<String> noms;
+    int d = 0;
+    while (d < (int)texte.length()) {
+        int e = texte.indexOf('\n', d); if (e < 0) e = texte.length();
+        String l = texte.substring(d, e); l.trim();
+        d = e + 1;
+        const int eq = l.indexOf('=');
+        if (!l.length() || l[0] == '#' || eq <= 0) continue;
+        const String cle = l.substring(0, eq), val = l.substring(eq + 1);
+        if (cle == "taille")          taille = (uint8_t)val.toInt();
+        else if (cle == "permanents") permanents = (uint8_t)val.toInt();
+        else if (isDigit(cle[0])) {
+            const int k = cle.toInt();
+            if (k >= 0 && k < PLAFOND_SCRIPTS_MAP) {
+                if ((int)noms.size() <= k) noms.resize(k + 1);
+                noms[k] = val;
+            }
+        }
+    }
+    if (taille > PLAFOND_SCRIPTS_MAP) taille = PLAFOND_SCRIPTS_MAP;
+    {
+        MappingEngine::Verrou verrou;
+        if (taille) _assurerEmplacement((uint8_t)(taille - 1));
+        _nPermanents = (permanents <= emplacements.size()) ? permanents : (uint8_t)emplacements.size();
+        for (uint8_t e = 0; e < emplacements.size() && e < noms.size(); e++)
+            emplacements[e]->nomMemorise = noms[e];
     }
     Serial.printf("[MidiRouter] chaine restauree : %u emplacement(s), dont %u permanent(s)\n",
                   (unsigned)emplacements.size(), (unsigned)_nPermanents);
-    for (uint8_t e = 0; e < nmap; e++) {
+    for (uint8_t e = 0; e < noms.size() && e < emplacements.size(); e++) {
         if (!noms[e].length()) continue;
         if (!chargerScriptNomme(noms[e].c_str(), false, e)) {
-            // Le fichier a disparu (storage efface, script supprime). On ne bloque
-            // rien : l'emplacement reste vide plutot qu'a moitie configure, et le
-            // nom reste en NVS au cas ou le fichier revienne.
+            // Le fichier a disparu. On ne bloque rien : le maillon reste vide
+            // plutot qu'a moitie configure, et son nom reste memorise.
             Serial.printf("[MidiRouter] emplacement %u : '%s' absent — laisse vide\n",
                           (unsigned)e, noms[e].c_str());
         }

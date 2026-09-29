@@ -20,21 +20,25 @@
 
 namespace Compo {
 
-// La composition dans storage — declaree ici, lue par l'explorateur (FichiersAPI).
-constexpr const char* FICHIER = "/compo.json";
+/* OU ELLE VIT : `composition.json`, dans le dossier de la composition OUVERTE
+ * du repertoire (Repertoire::chemin, MESURES §186). */
 
 constexpr size_t MAX_OCTETS = 256 * 1024;   // plafond d'une composition
 
-void demarrer();                   // lit /compo.json de storage, s'il existe
+void demarrer();                   // lit la source de la composition ouverte, s'il y en a une
+/* La composition ouverte a change (Repertoire::ouvrir) : sa source se relit —
+ * ce qui attend le silence d'abord, la flash sinon. Aucune : plus de source. */
+void recharger();
 
 // La composition la plus recente — nullptr si la carte n'en a pas. Le tampon
 // partage reste valide tant qu'on le tient, meme si une autre arrive.
 std::shared_ptr<char> courante(size_t& octets);
 
 // Adopter une composition recue (tampon PSRAM, JSON). Rendue tout de suite ;
-// ecrite en flash au premier silence, 3 s au moins apres la derniere. false :
-// la file des ecritures differees est pleine — rien n'a change.
-bool adopter(std::shared_ptr<char> tampon, size_t octets);
+// ecrite en flash au premier silence, 3 s au moins apres la derniere. Sur un
+// repertoire vide, elle en cree la premiere composition, nommee d'apres son
+// titre (« meta.name »). false : `raison` dit pourquoi — rien n'a change.
+bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison);
 
 String etatJson();                 // octets, en attente
 

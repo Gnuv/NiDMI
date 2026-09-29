@@ -12,6 +12,25 @@
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../mapping/CompoStore.h"
+#include "../mapping/Repertoire.h"
+
+/* LE SUIVI S'ADRESSE A UNE COMPOSITION (CONVERGENCE §9.7, MESURES §186). Un
+ * onglet qui ecrit dit laquelle il croit ouverte (`compo=N`) ; si un bouton ou
+ * un autre onglet en a ouvert une autre entre-temps, la carte REFUSE — sinon
+ * ses modifications iraient dans la nouvelle. Sans `compo` : la composition
+ * ouverte (les outils, les bancs). */
+static bool compositionAttendue(AsyncWebServerRequest* r) {
+    String v;
+    if (r->hasParam("compo", true)) v = r->getParam("compo", true)->value();
+    else if (r->hasParam("compo"))  v = r->getParam("compo")->value();
+    else return true;
+    const uint8_t ouverte = Repertoire::numeroOuvert();
+    if (v.toInt() == (long)ouverte) return true;
+    r->send(409, "application/json",
+            "{\"status\":\"error\",\"message\":\"la composition ouverte a change : n°"
+            + String((unsigned)ouverte) + "\",\"ouverte\":" + String((unsigned)ouverte) + "}");
+    return false;
+}
 #include "../config/EcrituresDifferees.h"
 #include "../audio/SampleStore.h"
 #include "../diag/JournalAvant.h"
@@ -503,6 +522,7 @@ void setupAudioAPI(AsyncWebServer& server) {
      * memorisent au silence. AVANT « /api/cues » : le serveur fait correspondre
      * par prefixe, le generique avalerait la route. */
     server.on("/api/cues/options", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         auto oui = [&](const char* n) { return request->getParam(n, true)->value() != "0"; };
         if (request->hasParam("boucle", true))       Cues::fixerBoucle(oui("boucle"));
         if (request->hasParam("au_demarrage", true)) Cues::fixerLectureAuDemarrage(oui("au_demarrage"));
@@ -538,6 +558,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json", j);
     });
     server.on("/api/cues", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         /* `cues` ABSENT = on NE TOUCHE PAS a la liste.
          *
          * L'absence valait chaine vide, donc EFFACAIT tout : une requete mal
@@ -573,6 +594,7 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
     server.on("/api/compo", HTTP_POST,
         [](AsyncWebServerRequest *request){
+            if (!compositionAttendue(request)) return;   // le tampon sera libere avec la requete
             char* p = (char*)request->_tempObject;
             const size_t n = request->contentLength();
             if (!p || !n) {
@@ -589,9 +611,11 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
             request->_tempObject = nullptr;   // la carte le garde : le serveur ne le liberera pas
-            if (!Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n)) {
+            String raison;
+            if (!Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n, raison)) {
+                raison.replace("\"", "'");
                 request->send(503, "application/json",
-                    "{\"status\":\"error\",\"message\":\"file des ecritures differees pleine : reessayer\"}");
+                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
                 return;
             }
             request->send(200, "application/json",
@@ -608,7 +632,69 @@ void setupAudioAPI(AsyncWebServer& server) {
                 memcpy((char*)request->_tempObject + index, data, len);
         });
 
-server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
+/* LE LIEU D'UN SCRIPT (MESURES §186) : `lieu=interface` pour ceux des broches
+     * (interface/scripts/), la composition ouverte sinon — celle des cues et de
+     * la chaine, ce que l'app envoie a l'installation. */
+    auto lieuDe = [](AsyncWebServerRequest* r, bool corps) {
+        return (r->hasParam("lieu", corps) && r->getParam("lieu", corps)->value() == "interface")
+               ? ScriptStore::Lieu::Interface : ScriptStore::Lieu::Composition;
+    };
+
+    /* LE REPERTOIRE DES COMPOSITIONS (CONVERGENCE §9.7, MESURES §186).
+     * Les gestes d'abord — le serveur fait correspondre par prefixe —, puis la
+     * liste. Chacun repond la liste a jour, ou 409 avec la raison. */
+    auto parametre = [](AsyncWebServerRequest* r, const char* n) -> String {
+        if (r->hasParam(n, true)) return r->getParam(n, true)->value();
+        if (r->hasParam(n))       return r->getParam(n)->value();
+        return String();
+    };
+    auto repondreRepertoire = [](AsyncWebServerRequest* r, bool ok, const String& raison) {
+        if (ok) { r->send(200, "application/json", Repertoire::listerJson()); return; }
+        String m = raison; m.replace("\"", "'");
+        r->send(409, "application/json", "{\"status\":\"error\",\"message\":\"" + m + "\"}");
+    };
+    server.on("/api/compositions/ouvrir", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison;
+        const bool ok = Repertoire::ouvrir((uint8_t)parametre(request, "numero").toInt(), raison);
+        repondreRepertoire(request, ok, raison);
+    });
+    server.on("/api/compositions/nouvelle", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison; uint8_t obtenu = 0;
+        const bool ok = Repertoire::nouvelle(parametre(request, "nom"),
+                                             (uint8_t)parametre(request, "numero").toInt(), raison, obtenu);
+        repondreRepertoire(request, ok, raison);
+    });
+    server.on("/api/compositions/enregistrer-sous", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison; uint8_t obtenu = 0;
+        const bool ok = Repertoire::enregistrerSous(parametre(request, "nom"),
+                                                    (uint8_t)parametre(request, "numero").toInt(), raison, obtenu);
+        repondreRepertoire(request, ok, raison);
+    });
+    server.on("/api/compositions/renommer", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison;
+        const bool ok = Repertoire::renommer((uint8_t)parametre(request, "numero").toInt(),
+                                             parametre(request, "nom"), raison);
+        repondreRepertoire(request, ok, raison);
+    });
+    server.on("/api/compositions/numero", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison;
+        const bool ok = Repertoire::changerNumero((uint8_t)parametre(request, "de").toInt(),
+                                                  (uint8_t)parametre(request, "vers").toInt(), raison);
+        repondreRepertoire(request, ok, raison);
+    });
+    server.on("/api/compositions/supprimer", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison;
+        const bool ok = Repertoire::supprimer((uint8_t)parametre(request, "numero").toInt(), raison);
+        repondreRepertoire(request, ok, raison);
+    });
+    /* La liste : leurs numeros et leurs noms, et laquelle est ouverte. Ce sont
+     * les dossiers : la carte la lit a chaque appel — un geste, jamais un
+     * sondage. */
+    server.on("/api/compositions", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", Repertoire::listerJson());
+    });
+
+server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request){
         /* `actif` : le nom de l'emplacement 0 — conserve pour ne pas casser
          * les clients existants. `emplacements` dit ce que TOUS portent, ce
          * qu'un seul nom ne pouvait pas exprimer. */
@@ -626,7 +712,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
                       + ",\"n\":" + String((unsigned)g_midiRouter.nEmplacements())
                       + ",\"plafond\":" + String((unsigned)MidiRouter::PLAFOND_SCRIPTS_MAP)
                       + ",\"permanents\":" + String((unsigned)g_midiRouter.nMaillonsPermanents())
-                      + ",\"fichiers\":" + ScriptStore::listerJson() + "}");
+                      + ",\"fichiers\":" + ScriptStore::listerJson(lieuDe(request, false)) + "}");
     });
 
     /* LA LONGUEUR DE LA CHAINE, dictee par la COMPOSITION.
@@ -634,6 +720,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * REND ce qu'elle a obtenu. Si la memoire a manque, c'est elle qui le dit —
      * l'app n'a pas a le deviner, ni a porter une copie de la limite. */
     server.on("/api/midi/chaine/taille", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         if (!request->hasParam("n", true)) {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"parametre n requis\"}");
@@ -693,13 +780,13 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      * PREFIXE, si bien que la route etait avalee par le GET de la liste — elle
      * rendait le JSON de l'inventaire au lieu du fichier, sans erreur. Un nom
      * qui ne prefixe rien. */
-    server.on("/api/midi/fichier", HTTP_GET, [](AsyncWebServerRequest *request){
+    server.on("/api/midi/fichier", HTTP_GET, [lieuDe](AsyncWebServerRequest *request){
         if (!request->hasParam("name")) {
             request->send(400, "text/plain; charset=utf-8", "parametre name requis");
             return;
         }
         String contenu;
-        if (!ScriptStore::lire(request->getParam("name")->value().c_str(), contenu)) {
+        if (!ScriptStore::lire(lieuDe(request, false), request->getParam("name")->value().c_str(), contenu)) {
             request->send(404, "text/plain; charset=utf-8", "introuvable dans storage");
             return;
         }
@@ -707,7 +794,8 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     });
 
     /* Depose un script dans storage. name = nom du fichier, script = contenu. */
-    server.on("/api/midi/scripts", HTTP_POST, [](AsyncWebServerRequest *request){
+    server.on("/api/midi/scripts", HTTP_POST, [lieuDe](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         if (!request->hasParam("name", true)) {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
@@ -716,25 +804,28 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         const String nom = request->getParam("name", true)->value();
         String contenu;
         if (request->hasParam("script", true)) contenu = request->getParam("script", true)->value();
-        if (!ScriptStore::ecrire(nom.c_str(), contenu)) {
+        const ScriptStore::Lieu lieu = lieuDe(request, true);
+        if (!ScriptStore::ecrire(lieu, nom.c_str(), contenu)) {
             request->send(507, "application/json",
                           "{\"status\":\"error\",\"message\":\"ecriture impossible\"}");
             return;
         }
         // Si c'est le script ACTIF qu'on vient de reecrire, on le recharge.
-        if (g_midiRouter.nomScript() == nom) g_midiRouter.chargerScriptNomme(nom.c_str(), false);
+        if (lieu == ScriptStore::Lieu::Composition && g_midiRouter.nomScript() == nom)
+            g_midiRouter.chargerScriptNomme(nom.c_str(), false);
         request->send(200, "application/json",
                       "{\"status\":\"ok\",\"name\":\"" + nom + "\"}");
     });
 
-    server.on("/api/midi/scripts", HTTP_DELETE, [](AsyncWebServerRequest *request){
+    server.on("/api/midi/scripts", HTTP_DELETE, [lieuDe](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         if (!request->hasParam("name")) {
             request->send(400, "application/json",
                           "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
             return;
         }
         const String nom = request->getParam("name")->value();
-        request->send(ScriptStore::supprimer(nom.c_str()) ? 200 : 404, "application/json",
+        request->send(ScriptStore::supprimer(lieuDe(request, false), nom.c_str()) ? 200 : 404, "application/json",
                       "{\"status\":\"ok\"}");
     });
 
@@ -757,6 +848,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     });
 
     server.on("/api/midi/script/select", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         const String nom = request->hasParam("name", true)
                          ? request->getParam("name", true)->value() : String("");
         const bool persister = request->hasParam("persist", true)
@@ -770,6 +862,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     });
 
     server.on("/api/midi/script", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         // `script` ABSENT = on ne touche pas au code. Auparavant l'absence
         // valait chaine vide et EFFACAIT le script : impossible d'envoyer les
         // seuls reglages. Or un tour de potentiometre en produit une douzaine,

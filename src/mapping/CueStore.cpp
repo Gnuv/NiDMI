@@ -6,6 +6,7 @@
 #include "../audio/AudioEngine.h"
 #include "../server/ServerCore.h"     // nidmi_ws_pousser : la carte ANNONCE son etat
 #include "../config/EcrituresDifferees.h"
+#include "Repertoire.h"
 #include <LittleFS.h>
 #include <memory>
 #include <esp_heap_caps.h>
@@ -417,22 +418,49 @@ void _pourChaqueLigne(const char* d, size_t n, F f) {
 
 }  // namespace
 
+/* « la liste boucle », lue dans options.txt de la composition ouverte
+ * (« boucle=1 ») — absent : elle s'arrete a la derniere cue. */
+static void _annoncer();          // plus bas : l'etat du transport, a qui l'ecoute
+
+static bool _boucleDeLaComposition() {
+  const String fichier = Repertoire::chemin(Repertoire::OPTIONS);
+  std::shared_ptr<char> t; size_t n = 0;
+  if (!fichier.length() || !Differe::lire(fichier.c_str(), t, n)) return false;
+  String texte;
+  texte.concat(t.get(), (unsigned)n);
+  return texte.indexOf("boucle=1") >= 0;
+}
+
+/* La liste de la composition ouverte, en PSRAM : ce qui attend le silence
+ * d'abord, la flash sinon. Aucune composition, ou pas de liste : vide. */
+static void _lireLaListe() {
+  std::shared_ptr<char> t; size_t n = 0;
+  const String fichier = Repertoire::chemin(Repertoire::CUES);
+  if (!fichier.length() || !Differe::lire(fichier.c_str(), t, n)) { t = _tamponPsram(0); n = 0; }
+  if (t) _adopterTexte(t, n);
+}
+
 bool monter() {
   if (_monte) return true;
   if (!LittleFS.begin(true, BASE, 10, PARTITION)) return false;
   if (!_verrouTexte) _verrouTexte = xSemaphoreCreateMutex();
-  // La liste de la flash, une fois, en PSRAM.
-  if (LittleFS.exists(FICHIER)) {
-    File f = LittleFS.open(FICHIER, FILE_READ);
-    if (f) {
-      const size_t n = f.size();
-      auto t = _tamponPsram(n);
-      if (t && f.read((uint8_t*)t.get(), n) == n) _adopterTexte(t, n);
-      f.close();
-    }
-  }
+  _lireLaListe();                 // une fois, en PSRAM
   _monte = true;
   return true;
+}
+
+void recharger() {
+  if (!monter()) return;
+  _lireLaListe();
+  const bool b = _boucleDeLaComposition();
+  VerrouSeq verrou;
+  _boucle = b;
+  _index = 0;
+  _enPause = false;
+  _lecture = false;
+  _dureeCourante = 0.0f;
+  _oublierCourbes();
+  _annoncer();
 }
 
 int nombre() {
@@ -483,8 +511,15 @@ bool ecrireTout(const String& contenuTexte) {
   auto t = _tamponPsram(n);
   if (!t) return false;
   if (n) memcpy(t.get(), contenuTexte.c_str(), n);
+  /* Une liste va dans une composition : sur un repertoire vide, la premiere
+   * se cree (MESURES §186). */
+  String raison;
+  if (!Repertoire::assurerOuverte("", raison)) {
+    Serial.printf("[cues] liste refusee : %s\n", raison.c_str());
+    return false;
+  }
   // Rendue tout de suite ; en flash au premier silence.
-  if (!Differe::poserFichier(FICHIER, t, n)) return false;
+  if (!Differe::poserFichier(Repertoire::chemin(Repertoire::CUES).c_str(), t, n)) return false;
   _adopterTexte(t, n);
   /* UNE LISTE PLUS COURTE NE LAISSE PAS LA TETE DEHORS. L'index memorise
    * pouvait depasser la nouvelle fin — installer une composition plus courte
@@ -738,8 +773,8 @@ float restantSec() {
   return reste > 0 ? reste : 0.0f;
 }
 
-// ── Options du transport (MESURES §181) ──────────────────────────────────────
-// Elles valent tout de suite ; la NVS suit au silence (Differe, §157).
+// ── Options du transport (MESURES §181, §186) ────────────────────────────────
+// Elles valent tout de suite ; la flash suit au silence (Differe, §157).
 void fixerBoucle(bool oui) {
   {
     VerrouSeq verrou;
@@ -747,7 +782,12 @@ void fixerBoucle(bool oui) {
     _boucle = oui;
     _annoncer();
   }
-  Differe::nvsOctet(NVS_OPTIONS, "boucle", oui ? 1 : 0);
+  // La forme de la piece : dans SA composition (options.txt), pas dans la carte.
+  String raison;
+  if (Repertoire::assurerOuverte("", raison)) {
+    const char* texte = oui ? "boucle=1\n" : "boucle=0\n";
+    Differe::poserFichierCopie(Repertoire::chemin(Repertoire::OPTIONS).c_str(), texte, strlen(texte));
+  }
   Serial.printf("[cues] la liste %s\n", oui ? "boucle" : "s'arrete a la derniere cue");
 }
 bool boucleActive() { VerrouSeq verrou; return _boucle; }
@@ -765,11 +805,19 @@ void fixerLectureAuDemarrage(bool oui) {
 bool lectureAuDemarrage() { VerrouSeq verrou; return _auDemarrage; }
 
 void restaurerOptions() {
-  Preferences p;
-  if (!p.begin(NVS_OPTIONS, true)) return;      // jamais ecrites : les defauts
-  const bool b = p.getUChar("boucle", 0) != 0;
-  const bool a = p.getUChar("auto", 0) != 0;
-  p.end();
+  bool a = false, ancienneBoucle = false;
+  {
+    Preferences p;
+    if (p.begin(NVS_OPTIONS, true)) {           // jamais ecrites : les defauts
+      a = p.getUChar("auto", 0) != 0;
+      ancienneBoucle = p.isKey("boucle");
+      p.end();
+    }
+  }
+  /* « boucle » vivait ici jusqu'au §186 : la cle orpheline s'efface, au silence. */
+  if (ancienneBoucle) Differe::nvsRetirer(NVS_OPTIONS, "boucle");
+  monter();
+  const bool b = _boucleDeLaComposition();
   VerrouSeq verrou;
   _boucle = b; _auDemarrage = a;
 }
