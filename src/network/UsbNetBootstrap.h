@@ -71,8 +71,10 @@ bool sonder();
 /** Refait l'enumeration USB (deconnexion puis reconnexion 500 ms plus tard) :
  *  quand l'hote laisse le cable « inactive » sans jamais le reactiver
  *  (MESURES §153). Coupe AUSSI le MIDI USB une a deux secondes — un geste
- *  manuel (panneau Carte → Reseau), jamais automatique. A appeler depuis
- *  nidmi_loop(). Faux sans le variant, ou si une relance est en cours. */
+ *  manuel (panneau Carte → Reseau, s("sys.reconnect")), et automatique au
+ *  seul demarrage, sans MIDI passe (relanceAuDemarrage, NiDMI.cpp, §183).
+ *  A appeler depuis nidmi_loop(). Faux sans le variant, ou si une relance
+ *  est en cours. */
 bool relancer();
 
 /** L'ordinateur utilise le reseau du cable (interface de donnees activee).

@@ -125,6 +125,17 @@ public:
     static void statsEntree(StatsEntree& s);
     static void reinitStatsEntree();
 
+    /** Un geste TENU est-il passe par l'USB, dans un sens ou dans l'autre,
+     *  depuis le demarrage ? Jamais remis a zero. Tenu : ce dont la perte
+     *  laisse un etat bloque — une note (son note-off perdu, la note sonne
+     *  pour toujours), le pitch bend (son retour au centre), une pedale
+     *  (CC 64 a 69 : maintien, sostenuto...). Un CC continu, un program
+     *  change, une pression n'y comptent pas : le suivant corrige le perdu —
+     *  un potentiometre qui gresille en envoie dix par seconde, et bloquait
+     *  la relance pour rien. C'est ce qui autorise la relance du cable au
+     *  demarrage (MESURES §183), qui coupe le MIDI USB une a deux secondes. */
+    static bool tenuDepuisDemarrage();
+
     /** Banc (POST /api/diag/midi-rafale) : un accord de `notes` notes, toutes
      *  les note-on puis toutes les note-off, d'un seul coup. `direct` rejoue
      *  l'ANCIEN chemin — ecriture directe dans la file de TinyUSB, retour

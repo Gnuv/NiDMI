@@ -491,6 +491,52 @@ static void surveillerLienCable(unsigned long now){
 #endif
 }
 
+/* ── LA RELANCE DU CABLE AU DEMARRAGE (MESURES §183) ─────────────────────
+ * Demandee par l'usager le 29/09, apres un allumage ou le cable n'est jamais
+ * revenu. macOS « remonte » parfois l'interface du cable avant de connaitre le
+ * lien, et la desactive pour de bon (§153, §162) : bus USB monte, reseau
+ * jamais active, rien recu. Il fallait passer par le WiFi et « Relancer le
+ * cable ». La carte le fait maintenant elle-meme, et SEULEMENT :
+ *   - dans la premiere minute et demie de sa vie — apres, c'est un geste ;
+ *   - 10 s apres que le bus est monte sans que l'hote active le reseau (il le
+ *     fait d'ordinaire en une a deux secondes) ;
+ *   - deux fois au plus, a 15 s d'ecart ;
+ *   - si AUCUN geste TENU n'est passe par l'USB depuis le demarrage — une
+ *     note, un pitch bend, une pedale : la relance coupe le MIDI USB une a
+ *     deux secondes, et un note-off perdu est une note bloquee. Des qu'il en
+ *     est passe, elle y renonce, et le dit. Les CC continus n'y comptent pas :
+ *     le suivant corrige le perdu (UsbMidiManager::tenuDepuisDemarrage).
+ * Un hote sans reseau USB (Windows sans pilote, un synthe) verrait donc
+ * l'instrument disparaitre et revenir deux fois dans sa premiere minute, sans
+ * MIDI perdu : c'est le prix, dit. */
+static void relanceAuDemarrage(unsigned long now){
+    static uint8_t essais = 0;
+    static bool fini = false;
+    static unsigned long monteDepuis = 0, derniere = 0;
+    if (fini) return;
+    if (now > 90000 || essais >= 2) { fini = true; return; }
+    const bool monte = nidmi_usbnet::linkUp() && !nidmi_usbnet::suspendu();
+    if (!monte) { monteDepuis = 0; return; }
+    if (!monteDepuis) monteDepuis = now ? now : 1;
+    uint32_t rx = 0, txExp = 0;
+    nidmi_usbnet::compteurs(rx, txExp);
+    if (nidmi_usbnet::reseauActif() || rx > 0) { fini = true; return; }   // le cable vit
+    if (now - monteDepuis < 10000) return;
+    if (derniere && now - derniere < 15000) return;
+    if (UsbMidiManager::tenuDepuisDemarrage()) {
+        fini = true;
+        NIDMI_WEB_LOG("[usbnet] le cable n'est pas actif, mais des notes sont passees par l'USB : "
+                      "pas de relance automatique (Carte > Reseau > Relancer le cable)");
+        return;
+    }
+    if (!nidmi_usbnet::relancer()) return;           // une relance deja en cours
+    essais++;
+    derniere = now;
+    monteDepuis = 0;
+    NIDMI_WEB_LOG("[usbnet] l'ordinateur n'a pas active le reseau du cable : relance au demarrage (%u/2)",
+                  (unsigned)essais);
+}
+
 /* Pour /api/reseau/liens : la derniere mort du lien, et l'etat photographie. */
 String nidmi_lienMortJson(){
     if (!g_lien.morts) return String("null");
@@ -1092,6 +1138,7 @@ static void wifiBoucle(){
         g_sectionNom = "-";
     }
     surveillerLienCable(now);
+    relanceAuDemarrage(now);        // le cable jamais active apres un demarrage (§183)
     const bool essai = g_essai.enCours || g_essaiDemande;
     // Une remise en marche qui a manque de memoire se retente — si la radio
     // est encore voulue : l'instrument autonome l'annule.

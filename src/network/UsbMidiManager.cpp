@@ -80,6 +80,13 @@ uint32_t s_chezHote[16][4];               // la pompe seule y touche
 std::atomic<bool> s_aReconcilier{false};
 
 std::atomic<uint32_t> s_envoyes{0}, s_attentes{0}, s_debordes{0}, s_sansHote{0}, s_relaches{0}, s_fileMax{0};
+// Un geste TENU est passe par l'USB depuis le demarrage (§183) — jamais remis a zero.
+std::atomic<bool> s_tenuDepuisDemarrage{false};
+// Tenu : une note, le pitch bend, une pedale (CC 64..69) — voir le .h.
+inline bool estTenu(uint8_t statut, uint8_t d1) {
+    const uint8_t t = statut & 0xF0;
+    return t == 0x80 || t == 0x90 || t == 0xE0 || (t == 0xB0 && d1 >= 64 && d1 <= 69);
+}
 
 // Un paquet USB-MIDI (4 octets : entete = cable<<4 | CIN, statut, d1, d2) tient
 // dans un mot ; l'ordre des octets en memoire est celui du paquet.
@@ -202,6 +209,7 @@ void pompe(void*) {
 // Depot par un emetteur, quel qu'il soit (capteurs, MIDI, scripts, web) : ne
 // bloque jamais.
 void deposer(uint8_t cin, uint8_t statut, uint8_t d1, uint8_t d2) {
+    if (statut < 0xF0 && estTenu(statut, d1)) s_tenuDepuisDemarrage.store(true);   // §183
     const uint32_t p = emballer(cin, statut, d1, d2);
     noterIntention(p);   // AVANT la file : la reconciliation voit aussi ce qui deborde
     if (s_file == nullptr || xQueueSend(s_file, &p, 0) != pdTRUE) {
@@ -469,6 +477,7 @@ bool UsbMidiManager::traiterEntree(TickType_t attente) {
             uint8_t o[4];
             memcpy(o, &e.paquet, 4);
             const uint8_t cin   = o[0] & 0x0F;
+            if (cin >= 0x8 && cin <= 0xE && estTenu(o[1], o[2])) s_tenuDepuisDemarrage.store(true);   // §183
             const uint8_t canal = (uint8_t)((o[1] & 0x0F) + 1);   // 1..16
             switch (cin) {
                 case 0x9:
@@ -637,6 +646,14 @@ void UsbMidiManager::statsSortie(StatsSortie& s) {
     s.relaches = s_relaches;
     s.fileMax = (uint16_t)s_fileMax.load();
     s.capacite = (uint16_t)s_capacite;
+#endif
+}
+
+bool UsbMidiManager::tenuDepuisDemarrage() {
+#if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
+    return s_tenuDepuisDemarrage.load();
+#else
+    return false;
 #endif
 }
 
