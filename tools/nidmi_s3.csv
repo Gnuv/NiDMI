@@ -1,0 +1,14 @@
+# NiDMI — ESP32-S3, flash de 8 Mo, sans mise à jour par le réseau : un seul
+# emplacement de firmware, deux fois plus grand. Mêmes noms que
+# nidmi_s3_ota.csv (CONVERGENCE_NIDMI.md §9.2 ; MESURES §185).
+#
+# nvs      les réglages, clé → valeur : l'interface.
+# otadata  lequel des emplacements de firmware démarre (un seul ici).
+# app0     le firmware.
+# storage  les fichiers (LittleFS) : compositions/, interface/, samples/.
+#
+# Name,   Type, SubType,  Offset,    Size,
+nvs,      data, nvs,      0x9000,    0x5000,
+otadata,  data, ota,      0xe000,    0x2000,
+app0,     app,  ota_0,    0x10000,   0x660000,
+storage,  data, littlefs, 0x670000,  0x190000,

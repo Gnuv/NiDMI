@@ -3,8 +3,8 @@
  *
  * Deux mémoires, deux rôles, et c'est le point du fichier :
  *
- *  - LittleFS sur la partition « mapfs » (1 Mo, déjà partitionnée mais JAMAIS
- *    MONTÉE jusqu'ici — §12.5 de CONVERGENCE_NIDMI.md). C'est la persistance :
+ *  - LittleFS sur la partition de fichiers, `storage` (1,56 Mo ; « mapfs »,
+ *    1 Mo, jusqu'au §185 des mesures). C'est la persistance :
  *    ce qu'on téléverse survit au redémarrage et à l'OTA.
  *
  *  - PSRAM pour la lecture. La carte en a 8,37 Mo entièrement inutilisés,
@@ -25,10 +25,10 @@
 
 namespace SampleStore {
 
-// Le dossier des sons dans mapfs — declare ici, lu par l'explorateur (FichiersAPI).
+// Le dossier des sons dans storage — declare ici, lu par l'explorateur (FichiersAPI).
 constexpr const char* DOSSIER = "/samples";
 
-// Montage paresseux de mapfs (formatage si vierge). Sûr à appeler souvent.
+// Montage paresseux de storage (formatage si vierge). Sûr à appeler souvent.
 bool monter();
 bool estMonte();
 
@@ -68,9 +68,9 @@ bool supprimer(const char* nom);
 // après le release » existe pour libérer une ressource RARE. Ici elle n'a rien
 // à libérer, et la mesure le dit sans appel :
 //
-//     mapfs plafonne à 1 048 576 o — c'est TOUT ce que la carte peut stocker
-//     PSRAM libre                   8 249 372 o
-//     donc le pire cas absolu tient dans 12,7 % de la PSRAM
+//     storage plafonne à 1 638 400 o — c'est TOUT ce que la carte peut stocker
+//     PSRAM libre                     8 249 372 o
+//     donc le pire cas absolu tient dans 19,9 % de la PSRAM
 //
 // Décharger ne rend donc rien qui manque, et recharger coûte 32 à 72 ms par
 // échantillon (mesuré) — une latence à chaque changement de cue, pour rien.
@@ -79,10 +79,10 @@ bool supprimer(const char* nom);
 // téléversé après ce chargement restait « absent » jusqu'au redémarrage, un
 // son remplacé gardait l'ancien.
 #ifndef SAMPLES_MAX
-#define SAMPLES_MAX 24        // mapfs n'en tiendra jamais beaucoup plus
+#define SAMPLES_MAX 24        // storage n'en tiendra jamais beaucoup plus
 #endif
 
-// Charge tout ce que mapfs contient, la première fois ; les appels suivants
+// Charge tout ce que storage contient, la première fois ; les appels suivants
 // ne relisent rien. Retourne le nombre d'échantillons prêts.
 uint8_t chargerTout();
 bool    charge();                      // chargerTout() est passé : lisible() dit vrai

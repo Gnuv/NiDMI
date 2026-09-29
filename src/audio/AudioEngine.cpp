@@ -527,7 +527,7 @@ void boucleAudio(void*) {
 }  // namespace
 
 // ── Persistance du choix de moteur ─────────────────────────────────────────
-// Le fichier d'echantillon survit au redemarrage (il est sur mapfs), mais le
+// Le fichier d'echantillon survit au redemarrage (il est sur storage), mais le
 // CHOIX ne survivait pas : apres un reboot on retombait sur le sinus, et
 // l'echantillon telebverse semblait avoir disparu. C'est de la configuration de
 // carte au sens du §11 de CONVERGENCE_NIDMI.md — « la carte detient la config
@@ -1108,7 +1108,7 @@ bool setSampler(const char* nom, String& raison, bool persister) {
   libererPlaits();                       // on ne tient jamais les deux à la fois
   SampleStore::chargerTout();            // la premiere fois ; ensuite, rien a relire
   if (nom && *nom && SampleStore::indexDe(nom) < 0) {
-    raison = "echantillon « " + String(nom) + " » absent de mapfs";
+    raison = "echantillon « " + String(nom) + " » absent de storage";
     return false;
   }
   if (nom) strncpy(echantillonClavier, nom, sizeof(echantillonClavier) - 1);
@@ -1122,7 +1122,7 @@ void arreterSampler(bool persister) {
   if (etaitArme) { moteurCourant = -1; if (persister) memoriser("-1"); }
   arreterEchantillon();
   /* ON NE LIBERE PAS LA PSRAM. Les echantillons restent charges tant que
-   * leur fichier est dans mapfs (voir SampleStore.h — le pire cas absolu tient
+   * leur fichier est dans storage (voir SampleStore.h — le pire cas absolu tient
    * dans 12,7 % de la PSRAM) : pas de rechargement de 32 a 72 ms a chaque cue.
    * Seuls un remplacement ou une suppression rendent la memoire d'UN son, et
    * a l'abri de la tache audio (echantillonArrive / echantillonParti). */

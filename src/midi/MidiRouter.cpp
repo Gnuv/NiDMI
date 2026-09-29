@@ -512,7 +512,7 @@ void MidiRouter::setScriptMidi(const String& script, uint8_t emplacement) {
         if (ecrit) {
             Differe::nvsChaine(NVS_ESPACE_MIDI, cle.c_str(), fichier);   // au silence (§157)
         } else {
-            /* mapfs pleine ou absente : le script TOURNE quand meme, mais il ne
+            /* storage pleine ou absente : le script TOURNE quand meme, mais il ne
              * survivra pas au redemarrage. On le DIT — un comportement qui
              * s'evapore sans message est ce qu'on passe la session a supprimer. */
             Serial.printf("[MidiRouter] emplacement %u : ecriture de '%s' impossible — "
@@ -686,7 +686,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
     String contenu;
     const bool aucun = (!nom || !*nom);        // "" = plus de script du tout
     if (!aucun && !ScriptStore::lire(nom, contenu)) {
-        Serial.printf("[MidiRouter] script '%s' introuvable dans mapfs\n", nom);
+        Serial.printf("[MidiRouter] script '%s' introuvable dans storage\n", nom);
         return false;
     }
     const unsigned taille = contenu.length();
@@ -741,7 +741,7 @@ void MidiRouter::restaurerScript() {
     for (uint8_t e = 0; e < nmap; e++) {
         if (!noms[e].length()) continue;
         if (!chargerScriptNomme(noms[e].c_str(), false, e)) {
-            // Le fichier a disparu (mapfs efface, script supprime). On ne bloque
+            // Le fichier a disparu (storage efface, script supprime). On ne bloque
             // rien : l'emplacement reste vide plutot qu'a moitie configure, et le
             // nom reste en NVS au cas ou le fichier revienne.
             Serial.printf("[MidiRouter] emplacement %u : '%s' absent — laisse vide\n",

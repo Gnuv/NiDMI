@@ -98,7 +98,7 @@ struct ComponentConfig {
     const char* mappingScript;   // jamais nul
     char*       scriptPossede;   // tampon possede, ou nullptr
 
-    /* Le NOM du fichier .nms qui porte ce script, dans mapfs.
+    /* Le NOM du fichier .nms qui porte ce script, dans storage.
      *
      * Regle du projet, ecrite en tete de ScriptStore.h et reprise au §9.3 :
      * le CONTENU des scripts va au systeme de fichiers (ce sont des fichiers,

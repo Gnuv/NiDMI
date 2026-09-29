@@ -282,8 +282,9 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
 
     /* ── Échantillons ────────────────────────────────────────────────────
-     * mapfs (1 Mo) était partitionnée mais jamais montée — §12.5 de
-     * CONVERGENCE_NIDMI.md. Elle sert enfin. Le fichier persiste en flash ; la
+     * La partition de fichiers (« mapfs », 1 Mo, aujourd'hui `storage`) était
+     * partitionnée mais jamais montée — §12.5 de CONVERGENCE_NIDMI.md. Elle
+     * sert enfin. Le fichier persiste en flash ; la
      * lecture se fait depuis la PSRAM, inutilisée jusqu'ici (8,37 Mo) pendant
      * que le tas interne se bat pour 13 ko. */
 
@@ -410,13 +411,13 @@ void setupAudioAPI(AsyncWebServer& server) {
     /* Script .nms applique au MIDI ENTRANT, par la CARTE. Le navigateur ne fait
      * que POUSSER le script — il ne l'execute jamais (regle du headless : tout
      * est fait dans la carte). Corps = le script, vide = passage direct. */
-    /* Les scripts .nms vivent dans mapfs — la partition prevue pour eux
+    /* Les scripts .nms vivent dans storage — la partition prevue pour eux
      * (« scripts de mapping », table de partitions). Le moteur de script est le
      * COEUR du boitier : une carte peut n'avoir que des .nms et des cues, sans
      * aucun audio. Ces routes sont donc de l'image de base, pas un accessoire. */
         /* ── CUES SUR LA CARTE ──────────────────────────────────────────────
      * Une carte deployee n'a pas de navigateur pour lui dire quelle cue jouer.
-     * Elle tient sa liste (mapfs:/cues.txt), la parcourt et applique elle-meme
+     * Elle tient sa liste (storage:/cues.txt), la parcourt et applique elle-meme
      * ce que chaque cue decrit. L'app devient un outil d'ECRITURE de cette
      * liste, pas un maillon de son execution.
      *
@@ -662,7 +663,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
     });
 
     /* ── CE QUE LA CARTE EXECUTE VRAIMENT ─────────────────────────────────
-     * Le CONTENU d'un maillon, et celui d'un fichier de mapfs. Il n'y avait
+     * Le CONTENU d'un maillon, et celui d'un fichier de storage. Il n'y avait
      * aucun moyen de les lire : on poussait un script, on observait un
      * comportement, et quand les deux ne s'accordaient pas il ne restait qu'a
      * deviner lequel des deux mentait.
@@ -685,7 +686,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "text/plain; charset=utf-8", g_midiRouter.contenuEmplacement(emp));
     });
 
-    /* Le contenu d'un FICHIER de mapfs. Pendant du precedent : l'un dit ce qui
+    /* Le contenu d'un FICHIER de storage. Pendant du precedent : l'un dit ce qui
      * TOURNE, l'autre ce qui est RANGE — et c'est en les comparant qu'on voit
      * qu'une cue n'a pas charge ce qu'on croyait. */
     /* ⚠ PAS « /api/midi/scripts/lire » : le serveur fait correspondre par
@@ -699,13 +700,13 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
         }
         String contenu;
         if (!ScriptStore::lire(request->getParam("name")->value().c_str(), contenu)) {
-            request->send(404, "text/plain; charset=utf-8", "introuvable dans mapfs");
+            request->send(404, "text/plain; charset=utf-8", "introuvable dans storage");
             return;
         }
         request->send(200, "text/plain; charset=utf-8", contenu);
     });
 
-    /* Depose un script dans mapfs. name = nom du fichier, script = contenu. */
+    /* Depose un script dans storage. name = nom du fichier, script = contenu. */
     server.on("/api/midi/scripts", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!request->hasParam("name", true)) {
             request->send(400, "application/json",
@@ -1192,7 +1193,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
      *              carte accepte 1 900 o par broche et en tient 32 : trois fois
      *              la partition. La borne par broche est verifiee, le TOTAL ne
      *              l'etait nulle part.
-     *   mapfs    — 1 Mo, mais alloue par bloc : un script de 30 octets en occupe
+     *   storage  — 1,56 Mo, mais alloue par bloc : un script de 30 octets en occupe
      *              plusieurs milliers. Un pourcentage d'octets rassure a tort ;
      *              c'est le NOMBRE DE FICHIERS qui bute en premier. D'ou les
      *              deux mesures cote a cote — l'ecart EST le surcout.
@@ -1263,7 +1264,7 @@ server.on("/api/midi/scripts", HTTP_GET, [](AsyncWebServerRequest *request){
 
         size_t nf = 0, ns = 0, oc = 0, ou_ = 0, ot = 0;
         ScriptStore::infos(nf, ns, oc, ou_, ot);
-        json += ",\"mapfs\":{\"fichiers\":" + String((unsigned)nf);
+        json += ",\"storage\":{\"fichiers\":" + String((unsigned)nf);
         json += ",\"scripts\":"        + String((unsigned)ns);
         json += ",\"octets_contenu\":" + String((unsigned)oc);
         json += ",\"octets_utilises\":"+ String((unsigned)ou_);

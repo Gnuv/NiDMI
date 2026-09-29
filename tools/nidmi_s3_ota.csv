@@ -1,0 +1,22 @@
+# NiDMI — ESP32-S3, flash de 8 Mo, mises à jour par le réseau (OTA).
+# CONVERGENCE_NIDMI.md §9.2 ; MESURES §185.
+#
+# nvs      les réglages, clé → valeur : l'interface (broches, réseau, options).
+#          La partition NVS par défaut d'ESP-IDF — le pilote WiFi s'en sert aussi.
+# otadata  lequel des deux emplacements de firmware démarre.
+# app0     le firmware, emplacement 0.
+# app1     le firmware, emplacement 1. Une mise à jour s'écrit dans l'emplacement
+#          qui ne tourne pas, puis la carte bascule dessus.
+# storage  les fichiers (LittleFS) : compositions/, interface/, samples/.
+#          Elle remplace seqfs (jamais lue), mapfs (1 Mo) et coredump (plus
+#          écrite depuis le §163) : 1,56 Mo.
+#
+# Changer cette table demande un flash par USB : elle vit à 0x8000, hors des
+# emplacements qu'une mise à jour réécrit.
+#
+# Name,   Type, SubType,  Offset,    Size,
+nvs,      data, nvs,      0x9000,    0x5000,
+otadata,  data, ota,      0xe000,    0x2000,
+app0,     app,  ota_0,    0x10000,   0x330000,
+app1,     app,  ota_1,    0x340000,  0x330000,
+storage,  data, littlefs, 0x670000,  0x190000,

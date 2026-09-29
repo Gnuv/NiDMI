@@ -4,7 +4,7 @@
 // La colonne « Fichiers » du panneau Carte avait ete dessinee pour une API de
 // fichiers generique que le firmware n'a jamais servie : sur une vraie carte,
 // elle ne montrait qu'« echec ». Et l'arborescence qu'elle imaginait
-// (/compositions, /sequences, /presets) n'etait pas celle de mapfs.
+// (/compositions, /sequences, /presets) n'etait pas celle de la carte.
 //
 // Ici, la carte DIT ce qu'elle porte et ce que chaque fichier permet ; l'app
 // n'a pas a connaitre l'arborescence ni les regles :
@@ -19,12 +19,13 @@
 // l'app (« Installer ») : elles se telechargent, elles ne se suppriment pas
 // d'ici.
 //
-// LES SUPPORTS (§180). Tout ce qui precede vit sur la memoire interne — mapfs,
-// LittleFS. Une carte SD viendra : chaque fichier dit donc sur QUEL support il
+// LES SUPPORTS (§180). Tout ce qui precede vit sur la memoire interne —
+// `storage`, LittleFS. Une carte SD viendra : chaque fichier dit donc sur QUEL support il
 // est (`volume`), la liste declare les supports et leur etat, et les routes
-// prennent `volume=` (mapfs par defaut). Ce firmware declare la SD pour dire
+// prennent `volume=` (`storage` par defaut). Ce firmware declare la SD pour dire
 // qu'il ne la lit pas encore — l'app n'a pas a l'inventer.
 #include "APICommon.h"
+#include "../config/Stockage.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "../audio/AudioEngine.h"
@@ -38,7 +39,7 @@
 namespace {
 
 constexpr const char* DOSSIER_CONFIG = "/config";
-constexpr const char* VOLUME_INTERNE = "mapfs";     // LittleFS, la memoire interne
+constexpr const char* VOLUME_INTERNE = Stockage::PARTITION;   // LittleFS, la memoire interne
 constexpr size_t      CONFIG_MAX     = 32 * 1024;   // une configuration exportee pese quelques ko
 constexpr size_t      LISTE_MAX      = 32 * 1024;   // la reponse de /api/fichiers, en PSRAM
 constexpr int         USAGES_MAX     = 64;
@@ -100,7 +101,7 @@ const char* typeDe(const String& chemin) {
   return "text/plain; charset=utf-8";
 }
 
-/* Le support vise par la requete ; mapfs si rien n'est dit. Un autre : refuse
+/* Le support vise par la requete ; storage si rien n'est dit. Un autre : refuse
  * (501) — la SD n'est pas encore lue par ce firmware. */
 bool volumeInterne(AsyncWebServerRequest* r) {
   return !r->hasParam("volume") || r->getParam("volume")->value() == VOLUME_INTERNE;
@@ -220,7 +221,7 @@ const char* usageDe(const Usage* u, int n, const String& nom) {
   return nullptr;
 }
 
-// ── Parcourir mapfs ──────────────────────────────────────────────────────────
+// ── Parcourir storage ──────────────────────────────────────────────────────────
 // La racine et un niveau : il n'y en a pas d'autre. Corrige de ce qui attend le
 // silence pour s'ecrire (Differe) : la liste dit ce que la carte PORTE, pas ce
 // que la flash a deja recu — comme ScriptStore::listerJson.
@@ -258,11 +259,11 @@ template <typename F> void parcourir(F voir) {
 
 void setupFichiersAPI(AsyncWebServer& server) {
 
-  /* LA LISTE. Parcourt mapfs a chaque appel : c'est un GESTE (ouvrir la colonne,
+  /* LA LISTE. Parcourt storage a chaque appel : c'est un GESTE (ouvrir la colonne,
    * apres un televersement), jamais un sondage — la regle du §161. L'occupation,
    * elle, est celle que la carte garde et remesure au silence (ScriptStore). */
   server.on("/api/fichiers", HTTP_GET, [](AsyncWebServerRequest* request) {
-    if (!SampleStore::monter()) { repondre(request, 503, "mapfs non monte"); return; }
+    if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     Ecrit e;
     e.cap = LISTE_MAX;
     e.t = nidmi_tampon_reponse(e.cap);
@@ -316,7 +317,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
     if (!volumeInterne(request)) { repondre(request, 501, "ce firmware ne lit pas encore de carte SD"); return; }
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
-    if (!SampleStore::monter()) { repondre(request, 503, "mapfs non monte"); return; }
+    if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     std::shared_ptr<char> t; size_t n = 0; bool sup = false;
     if (Differe::attente(chemin.c_str(), t, n, sup)) {
       if (sup || !t) { repondre(request, 404, "introuvable"); return; }
@@ -412,7 +413,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
       repondre(request, 403, "la liste de cues et la composition viennent de l'app : Installer les remplace");
       return;
     }
-    if (!SampleStore::monter()) { repondre(request, 503, "mapfs non monte"); return; }
+    if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     const String nom = baseDe(chemin);
     bool ok = false;
     switch (g) {

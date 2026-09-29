@@ -1334,7 +1334,7 @@ void nidmi_begin() {
 
     /* Script .nms memorise : la carte se reconfigure SEULE au demarrage. C'est
        la condition du headless — une carte deployee n'a pas de navigateur pour
-       lui redire quoi faire. Le NOM vient de la NVS, le CONTENU de mapfs. */
+       lui redire quoi faire. Le NOM vient de la NVS, le CONTENU de storage. */
     g_midiRouter.restaurerScript();
     // La table CC -> parametre revient elle aussi de la NVS : sans elle, un
     // redemarrage rendait muets tous les potentiometres appris.
@@ -1422,7 +1422,7 @@ void nidmi_begin() {
     // changer les valeurs (NiDMI.cpp, « LES FONCTIONS DE LA CARTE »).
     publierEtatsSys();
     /* Le transport : ses options (NVS, une lecture) et qui publie son etat. Le
-       premier etat part a 3 s, avec la liste (elle se lit dans mapfs) — §181. */
+       premier etat part a 3 s, avec la liste (elle se lit dans storage) — §181. */
     Cues::restaurerOptions();
     Cues::surChangement(publierEtatsTransport);
 

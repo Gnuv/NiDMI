@@ -116,9 +116,9 @@ PAGINATION_MODE=true
 # Partition C3 sans SPIFFS (app ~4 Mo). Par défaut activée pour C3 uniquement (évite 97% flash).
 LARGE_APP=false
 NO_LARGE_APP=false
-# Partition split-fs (2x LittleFS dédiés: seqfs + mapfs)
+# Partition split-fs : une partition de fichiers dédiée (storage)
 SPLIT_FS=false
-# Partition OTA (S3) : 2 slots app (app0/app1) + seqfs + mapfs -> permet la MAJ firmware par Wi-Fi
+# Partition OTA (S3) : 2 slots app (app0/app1) + storage -> permet la MAJ firmware par Wi-Fi
 OTA_MODE=false
 # Variante de firmware (off|on) : force le mode USB-MIDI au build sans éditer le header.
 #   off -> USB-MIDI désactivé, S3 en usb_mode=1 (HW CDC/JTAG, série stable)
@@ -333,8 +333,8 @@ show_help() {
     echo "                    Nécessite jq installé (brew install jq sur macOS)"
     echo "  --large-app     - [C3] Forcer la partition sans SPIFFS (app ~4 Mo)"
     echo "  --no-large-app  - [C3] Désactiver la partition agrandie (défaut: activée pour C3)"
-    echo "  --split-fs      - [C3/S3] 2 partitions LittleFS dédiées (seqfs + mapfs)"
-    echo "  --ota           - [S3] Partition OTA (app0/app1 + seqfs + mapfs) : MAJ firmware par Wi-Fi"
+    echo "  --split-fs      - [C3/S3] une partition de fichiers dédiée (storage)"
+    echo "  --ota           - [S3] Partition OTA (app0/app1 + storage) : MAJ firmware par Wi-Fi"
     echo "  --variant V     - [S3] Force la variante USB-MIDI au build (off|on) sans éditer le header :"
     echo "                    off = USB-MIDI désactivé, série stable (HW CDC/JTAG) ; on = MIDI USB (OTG)"
     echo "  --board BOARD - Type de carte ESP32 (c3|s3, défaut: s3)"
@@ -354,7 +354,7 @@ show_help() {
     echo ""
     echo "  Pagination : activée par défaut (C3 et S3). Évite la troncature du JSON des définitions."
     echo "  Partition C3 : --large-app est activé par défaut pour C3 (partition ~4 Mo). Utiliser --no-large-app pour désactiver."
-    echo "  Split FS : optionnel via --split-fs (remplace la partition standard par app0 + seqfs + mapfs)."
+    echo "  Split FS : optionnel via --split-fs (remplace la partition standard par app0 + storage)."
     echo ""
     echo "Sketches disponibles:"
     echo "  nidmi_basic (défaut)"
@@ -365,8 +365,8 @@ show_help() {
     echo "  ./scripts/nidmi.sh sync --lang en          # Synchroniser en anglais"
     echo "  ./scripts/nidmi.sh compile --board c3      # C3 : pagination + partition 4 Mo par défaut"
     echo "  ./scripts/nidmi.sh compile --board c3 --no-large-app   # C3 sans partition agrandie"
-    echo "  ./scripts/nidmi.sh compile --board c3 --split-fs       # C3 avec seqfs 128KB + mapfs 128KB"
-    echo "  ./scripts/nidmi.sh compile --board s3 --split-fs       # S3 avec seqfs 512KB + mapfs 1MB"
+    echo "  ./scripts/nidmi.sh compile --board c3 --split-fs       # C3 avec storage 320KB"
+    echo "  ./scripts/nidmi.sh compile --board s3 --split-fs       # S3 avec storage 1,56MB"
     echo "  ./scripts/nidmi.sh compile --board s3      # Compiler pour ESP32-S3"
     echo "  ./scripts/nidmi.sh upload --board s3       # Uploader sur ESP32-S3"
     echo "  ./scripts/nidmi.sh upload --usb-net        # S3 : UI accessible par le câble USB"
@@ -591,12 +591,12 @@ setup_c3_large_app_partition() {
     install_partition_csv "$REPO_DIR/tools/nidmi_c3_no_spiffs.csv" "nidmi_c3_no_spiffs.csv"
 }
 
-# Copie les partitions split-fs (2x LittleFS dédiés) pour C3/S3
+# Copie les tables à partition de fichiers dédiée (storage) pour C3/S3
 setup_split_fs_partition() {
     if [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
-        install_partition_csv "$REPO_DIR/tools/nidmi_c3_dual_littlefs.csv" "nidmi_c3_dual_littlefs.csv"
+        install_partition_csv "$REPO_DIR/tools/nidmi_c3.csv" "nidmi_c3.csv"
     elif [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-        install_partition_csv "$REPO_DIR/tools/nidmi_s3_dual_littlefs.csv" "nidmi_s3_dual_littlefs.csv"
+        install_partition_csv "$REPO_DIR/tools/nidmi_s3.csv" "nidmi_s3.csv"
     else
         echo "   ⚠️  --split-fs non supporté pour ce board: $BOARD"
         return 1
@@ -604,10 +604,10 @@ setup_split_fs_partition() {
     return 0
 }
 
-# Copie la partition OTA S3 (2 slots app + seqfs + mapfs) pour la MAJ firmware par Wi-Fi
+# Copie la table OTA S3 (2 emplacements de firmware + storage) pour la MAJ firmware par Wi-Fi
 setup_ota_partition() {
     if [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-        install_partition_csv "$REPO_DIR/tools/nidmi_s3_ota_dual_littlefs.csv" "nidmi_s3_ota_dual_littlefs.csv"
+        install_partition_csv "$REPO_DIR/tools/nidmi_s3_ota.csv" "nidmi_s3_ota.csv"
     else
         echo "   ⚠️  --ota non supporté pour ce board: $BOARD (OTA prévu pour S3 8 Mo ; le C3 n'a pas l'USB et est trop serré en 4 Mo)"
         return 1
@@ -751,10 +751,10 @@ compile_sketch() {
     fi
     
     if [ "$OTA_MODE" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-        echo "   🔁 Mode OTA activé (S3: app0/app1 + seqfs + mapfs ; MAJ firmware par Wi-Fi)"
+        echo "   🔁 Mode OTA activé (S3: app0/app1 + storage ; MAJ firmware par Wi-Fi)"
         setup_ota_partition || true
     elif [ "$SPLIT_FS" = true ]; then
-        echo "   💾 Mode SPLIT-FS activé (seqfs + mapfs en LittleFS dédiés)"
+        echo "   💾 Mode SPLIT-FS activé (storage, partition de fichiers dédiée)"
         setup_split_fs_partition || true
     elif [ "$LARGE_APP" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
         echo "   📦 Mode LARGE-APP activé (partition C3 sans SPIFFS, app ~4 Mo)"
@@ -838,13 +838,13 @@ compile_sketch() {
             BUILD_PROPS+=(--build-property "compiler.cpp.extra_flags=${EXTRA_FLAGS_ARRAY[*]}")
         fi
         if [ "$OTA_MODE" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_ota_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_ota")
             BUILD_PROPS+=(--build-property "upload.maximum_size=3342336")
         elif [ "$SPLIT_FS" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3")
             BUILD_PROPS+=(--build-property "upload.maximum_size=3801088")
         elif [ "$SPLIT_FS" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3")
             BUILD_PROPS+=(--build-property "upload.maximum_size=6684672")
         elif [ "$LARGE_APP" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
             BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3_no_spiffs")
@@ -883,10 +883,10 @@ build_binary() {
         echo "   Utilisation d'arduino-cli..."
         
         if [ "$OTA_MODE" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-            echo "   🔁 Mode OTA activé (S3: app0/app1 + seqfs + mapfs ; MAJ firmware par Wi-Fi)"
+            echo "   🔁 Mode OTA activé (S3: app0/app1 + storage ; MAJ firmware par Wi-Fi)"
             setup_ota_partition || true
         elif [ "$SPLIT_FS" = true ]; then
-            echo "   💾 Mode SPLIT-FS activé (seqfs + mapfs en LittleFS dédiés)"
+            echo "   💾 Mode SPLIT-FS activé (storage, partition de fichiers dédiée)"
             setup_split_fs_partition || true
         elif [ "$LARGE_APP" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
             echo "   📦 Mode LARGE-APP activé (partition C3 sans SPIFFS)"
@@ -963,13 +963,13 @@ build_binary() {
             BUILD_PROPS+=(--build-property "compiler.cpp.extra_flags=${EXTRA_FLAGS_ARRAY[*]}")
         fi
         if [ "$OTA_MODE" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_ota_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_ota")
             BUILD_PROPS+=(--build-property "upload.maximum_size=3342336")
         elif [ "$SPLIT_FS" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3")
             BUILD_PROPS+=(--build-property "upload.maximum_size=3801088")
         elif [ "$SPLIT_FS" = true ] && [[ "$BOARD" == *"XIAO_ESP32S3"* ]]; then
-            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3_dual_littlefs")
+            BUILD_PROPS+=(--build-property "build.partitions=nidmi_s3")
             BUILD_PROPS+=(--build-property "upload.maximum_size=6684672")
         elif [ "$LARGE_APP" = true ] && [[ "$BOARD" == *"XIAO_ESP32C3"* ]]; then
             BUILD_PROPS+=(--build-property "build.partitions=nidmi_c3_no_spiffs")

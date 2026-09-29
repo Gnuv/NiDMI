@@ -639,7 +639,7 @@ void setupPinAPI(AsyncWebServer& server) {
             }
         }
         addParamEx("mappingScript", /*forcerChaine=*/true);
-        addParam("scriptNom");   // le script vient d'un fichier de mapfs (§9.3)
+        addParam("scriptNom");   // le script vient d'un fichier de storage (§9.3)
         /* Mode MIDI: RTP vs Mapping Script */
         addParam("midiMode");
         /* Pour composants avec axes (joystick, IMU), sauvegarder les types MIDI par axe */

@@ -5,7 +5,7 @@
 // appliquer a chaque cue ce qui la definit : un script .nms, et — si la carte
 // a de l'audio — un moteur et ses reglages.
 //
-// FORMAT (une cue par ligne, mapfs:/cues.txt) :
+// FORMAT (une cue par ligne, storage:/cues.txt) :
 //     nom | duree_s | scripts | engine | params_audio | params_script | env
 //   duree 0        = attendre un GO (cue infinie)
 //   scripts        = les .nms de la CHAINE, separes par des virgules : la
@@ -33,7 +33,7 @@
 // intermediaire.
 //
 // LA LISTE VIT EN PSRAM (MESURES §157), pas dans le tas interne — dont le
-// budget interdisait de la garder, et qui la faisait relire de mapfs a chaque
+// budget interdisait de la garder, et qui la faisait relire de storage a chaque
 // changement de cue. Le texte entier y est tenu, lu de la memoire a chaque GO ;
 // ecrireTout() le rend aussitot et ne l'ecrit en flash qu'au premier silence
 // (src/config/EcrituresDifferees.h) : l'ecriture qui efface arrete l'audio.
@@ -43,7 +43,7 @@
 
 namespace Cues {
 
-// La liste de cues dans mapfs — declaree ici, lue par l'explorateur (FichiersAPI).
+// La liste de cues dans storage — declaree ici, lue par l'explorateur (FichiersAPI).
 constexpr const char* FICHIER = "/cues.txt";
 
 struct Cue {

@@ -366,7 +366,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                          *
                          * La borne restante est celle de la NVS (1900 octets par
                          * broche), verifiee a l'ecriture par PinAPI. Le remede de fond
-                         * — le script devient un fichier de mapfs et la configuration
+                         * — le script devient un fichier de storage et la configuration
                          * n'en garde que le nom — est le point 2 du §9.3. */
                         /* Le NOM d'abord : s'il est renseigne, le contenu vient
                          * du fichier et l'inline eventuel est ignore. Un seul
@@ -379,7 +379,7 @@ void ConfigLoader::loadFromNVS(ComponentManager& manager) {
                             if (!ScriptStore::lire(config->scriptNom, script)) {
                                 /* Fichier absent : on le DIT et la broche reste muette,
                                  * plutot que d'executer un reste d'ancien script. */
-                                Serial.printf("[ConfigLoader] %s : script '%s' introuvable dans mapfs — "
+                                Serial.printf("[ConfigLoader] %s : script '%s' introuvable dans storage — "
                                               "la broche ne fera rien\n", pinLabelCStr, config->scriptNom);
                                 script = "";
                             }

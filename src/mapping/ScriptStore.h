@@ -1,8 +1,9 @@
-// ScriptStore — les scripts .nms sur la partition mapfs.
+// ScriptStore — les scripts .nms sur la partition de fichiers (`storage`).
 //
-// La partition s'appelle « mapfs » et la table la decrit comme « scripts de
-// mapping (1MB) » : c'est sa raison d'etre. Elle n'avait servi jusqu'ici qu'aux
-// echantillons audio, ce qui inversait la hierarchie du systeme.
+// La partition s'appelait « mapfs », « scripts de mapping (1MB) » dans la
+// table : c'etait sa raison d'etre. Elle n'avait d'abord servi qu'aux
+// echantillons audio, ce qui inversait la hierarchie du systeme. Elle porte
+// tous les fichiers de la carte, et s'appelle `storage` (config/Stockage.h).
 //
 // Le moteur de script est le COEUR du boitier, pas un accessoire de l'audio :
 // une carte peut etre configuree uniquement en .nms + cues, pour piloter des
@@ -19,7 +20,7 @@
 
 namespace ScriptStore {
 
-// Le dossier des .nms dans mapfs — declare ici, lu par l'explorateur (FichiersAPI).
+// Le dossier des .nms dans storage — declare ici, lu par l'explorateur (FichiersAPI).
 constexpr const char* DOSSIER = "/scripts";
 
 bool   monter();

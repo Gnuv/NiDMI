@@ -1,4 +1,5 @@
 #include "ScriptStore.h"
+#include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../audio/AudioEngine.h"
 #include <LittleFS.h>
@@ -73,8 +74,8 @@ bool _relire(const char* nom, String& contenu) {
   return true;
 }
 
-constexpr const char* PARTITION = "mapfs";     // meme partition que les echantillons
-constexpr const char* BASE      = "/mapfs";
+constexpr const char* PARTITION = Stockage::PARTITION;
+constexpr const char* BASE      = Stockage::BASE;
 constexpr size_t      TAILLE_MAX = 8192;       // un .nms tient tres largement dedans
 
 bool _monte = false;
@@ -93,10 +94,10 @@ bool estMonte() { return _monte; }
 
 bool monter() {
   if (_monte) return true;
-  // mapfs est PARTAGEE avec les echantillons : si elle est deja montee,
+  // storage est PARTAGEE avec les echantillons : si elle est deja montee,
   // LittleFS.begin le voit et n'y touche pas.
   if (!LittleFS.begin(true, BASE, 10, PARTITION)) {
-    Serial.println("[scripts] montage de mapfs impossible");
+    Serial.println("[scripts] montage de storage impossible");
     return false;
   }
   if (!LittleFS.exists(DOSSIER)) LittleFS.mkdir(DOSSIER);

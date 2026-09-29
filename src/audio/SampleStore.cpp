@@ -1,4 +1,5 @@
 #include "SampleStore.h"
+#include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -8,8 +9,8 @@
 namespace SampleStore {
 namespace {
 
-constexpr const char* PARTITION = "mapfs";        // 1 Mo, table nidmi_s3_ota_dual_littlefs
-constexpr const char* BASE      = "/mapfs";
+constexpr const char* PARTITION = Stockage::PARTITION;
+constexpr const char* BASE      = Stockage::BASE;
 /* Le televersement s'ecrit A COTE, et ne prend son nom qu'une fois verifie
  * (§177) : ouvrir le fichier definitif le tronquait d'emblee — un remplacement
  * interrompu ou refuse emportait l'ancien son, et un fichier a moitie ecrit
@@ -65,7 +66,7 @@ struct Verrou {
   ~Verrou() { if (_verrou) xSemaphoreGiveRecursive(_verrou); }
 };
 
-// Pas de traversée : on ne garde que le nom de base. mapfs est un panier plat.
+// Pas de traversée : on ne garde que le nom de base. storage est un panier plat.
 const char* _base(const char* nom) {
   const char* b = strrchr(nom, '/');
   return b ? b + 1 : nom;
@@ -181,14 +182,14 @@ bool monter() {
   if (_monte) return true;
   // formatOnFail : la partition n'a jamais servi, elle est vierge.
   if (!LittleFS.begin(true, BASE, 10, PARTITION)) {
-    Serial.println("[samples] montage de mapfs impossible");
+    Serial.println("[samples] montage de storage impossible");
     return false;
   }
   if (!LittleFS.exists(DOSSIER)) LittleFS.mkdir(DOSSIER);
   // Un televersement coupe par un redemarrage : il n'a jamais ete un son.
   if (LittleFS.exists(PROVISOIRE)) LittleFS.remove(PROVISOIRE);
   _monte = true;
-  Serial.printf("[samples] mapfs monte — %u o utilises sur %u\n",
+  Serial.printf("[samples] storage monte — %u o utilises sur %u\n",
                 (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
   return true;
 }
@@ -238,7 +239,7 @@ bool ecrireDebut(const void* qui, const char* nom) {
     raison = "un autre televersement est en cours";
   else if (!nomValide(nom, raison)) {}
   else if (!monter())
-    raison = "mapfs non monte";
+    raison = "storage non monte";
   if (!raison.length()) {
     if (_enCours) _enCours.close();
     _enCours = LittleFS.open(PROVISOIRE, FILE_WRITE);
@@ -247,7 +248,7 @@ bool ecrireDebut(const void* qui, const char* nom) {
       _dernierMorceauMs = millis(); _echecEcriture = false;
       return true;
     }
-    raison = "ouverture impossible dans mapfs";
+    raison = "ouverture impossible dans storage";
   }
   _refuse = qui; _raisonRefus = raison;
   return false;
@@ -271,7 +272,7 @@ bool ecrireFin(const void* qui, String& raison) {
   Differe::noterFichiersModifies();
   bool bon = false;
   if (_echecEcriture) {
-    raison = "ecriture incomplete (mapfs pleine ?)";
+    raison = "ecriture incomplete (storage pleine ?)";
   } else {
     File f = LittleFS.open(PROVISOIRE, FILE_READ);
     uint16_t c; uint32_t fr, t;
@@ -284,7 +285,7 @@ bool ecrireFin(const void* qui, String& raison) {
     if (!LittleFS.rename(PROVISOIRE, dest)) {
       LittleFS.remove(dest);
       bon = LittleFS.rename(PROVISOIRE, dest);
-      if (!bon) raison = "renommage impossible dans mapfs";
+      if (!bon) raison = "renommage impossible dans storage";
     }
   }
   if (!bon) {
@@ -351,7 +352,7 @@ bool installer(const char* nom, String& raison, int& retire) {
    * arme le lecteur (setSampler → chargerTout) ne doit pas attendre. */
   Echantillon neuf;
   if (!monter() || !_lire(base, neuf, raison)) {
-    if (!raison.length()) raison = "mapfs non monte";
+    if (!raison.length()) raison = "storage non monte";
     return false;
   }
   Verrou verrou;

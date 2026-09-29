@@ -1,4 +1,5 @@
 #include "CueStore.h"
+#include "../config/Stockage.h"
 #include "ScriptStore.h"
 #include "../midi/MidiRouter.h"
 #include "../Globals.h"
@@ -30,8 +31,8 @@ struct VerrouSeq {
   ~VerrouSeq() { if (_verrouSeq) xSemaphoreGiveRecursive(_verrouSeq); }
 };
 
-constexpr const char* PARTITION = "mapfs";
-constexpr const char* BASE      = "/mapfs";
+constexpr const char* PARTITION = Stockage::PARTITION;
+constexpr const char* BASE      = Stockage::BASE;
 
 bool  _monte    = false;
 bool  _lecture  = false;
@@ -202,7 +203,7 @@ void _appliquer(const Cue& c) {
   /* 2 bis. L'ECHANTILLON. `engine = -2` veut dire « lecteur d'echantillons » —
    * l'equivalent embarque de trig-wav. Le fichier voyage dans les params, sous
    * `sample=<nom>` : pas de champ nouveau dans la ligne de cue, et le nom est
-   * celui de mapfs (le panier de la carte), pas le chemin du poste.
+   * celui de storage (le panier de la carte), pas le chemin du poste.
    *
    * C'ETAIT LE MAILLON MANQUANT. Le lecteur existait et marchait ; rien ne lui
    * disait quoi jouer depuis une composition. Un bloc trig-wav laissait donc la
@@ -302,7 +303,7 @@ void _appliquer(const Cue& c) {
         if (nom.length() && surCue) {
           if (!AudioEngine::declencherEchantillon(nom.c_str(), derniereBoucle, dernierGain,
                                                   0.0f, bloc))
-            Serial.printf("[cues] echantillon « %s » absent de mapfs\n", nom.c_str());
+            Serial.printf("[cues] echantillon « %s » absent de storage\n", nom.c_str());
         }
         dn = fn + 1; rang++;
       }
@@ -363,7 +364,7 @@ void _appliquer(const Cue& c) {
 namespace {
 
 /* ── LA LISTE EN PSRAM (MESURES §157) ──────────────────────────────────────
- * Elle ne vivait que dans mapfs, relue a chaque changement de cue — par budget :
+ * Elle ne vivait que dans storage, relue a chaque changement de cue — par budget :
  * le tas INTERNE ne pouvait pas la porter. La PSRAM, si (8 Mo, §152). Lue de la
  * memoire a chaque GO, ecrite en flash au premier silence (Differe) : cinq
  * reecritures de cues.txt pendant le jeu avaient coute un bloc audio de 26 ms. */

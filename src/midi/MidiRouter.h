@@ -161,7 +161,7 @@ public:
     // silencieux alors que le script etait bien charge.
     void setParamsScript(const String& params);
 
-    // Charge un script PAR NOM depuis mapfs. persister = memoriser ce nom en
+    // Charge un script PAR NOM depuis storage. persister = memoriser ce nom en
     // NVS pour qu'il revienne au demarrage : la carte redevient autonome, sans
     // qu'un navigateur ait a la reconfigurer. Seul le NOM va en NVS — le
     // contenu vit dans LittleFS, et l'y ecrire a chaque cue ferait payer une
@@ -233,7 +233,7 @@ private:
      *
      * Il n'y en avait qu'un (`scriptEntrant`), si bien qu'une composition a deux
      * pistes map ne pouvait pas exister en headless. La limite n'etait pas dans
-     * le stockage — mapfs tient les fichiers depuis toujours — mais dans le
+     * le stockage — storage tient les fichiers depuis toujours — mais dans le
      * runtime, qui n'en tenait qu'un.
      *
      * SEMANTIQUE : une chaine, pas un parallele. C'est deja ce que le code

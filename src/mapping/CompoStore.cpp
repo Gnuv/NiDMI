@@ -1,4 +1,5 @@
 #include "CompoStore.h"
+#include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -8,8 +9,8 @@
 namespace Compo {
 namespace {
 
-constexpr const char* PARTITION = "mapfs";   // meme partition que cues.txt et les echantillons
-constexpr const char* BASE      = "/mapfs";
+constexpr const char* PARTITION = Stockage::PARTITION;
+constexpr const char* BASE      = Stockage::BASE;
 
 /* La composition la plus recente, rendue par GET. L'ecriture en flash, elle,
  * passe par Differe (au silence) — qui partage ce meme tampon, sans copie. */
@@ -27,7 +28,7 @@ std::shared_ptr<char> tamponPsram(size_t n) {
 
 void demarrer() {
   if (!verrou) verrou = xSemaphoreCreateMutex();
-  // mapfs est partagee : deja montee, LittleFS.begin le voit et n'y touche pas.
+  // storage est partagee : deja montee, LittleFS.begin le voit et n'y touche pas.
   if (!LittleFS.begin(true, BASE, 10, PARTITION) || !LittleFS.exists(FICHIER)) return;
   File f = LittleFS.open(FICHIER, FILE_READ);
   if (!f) return;

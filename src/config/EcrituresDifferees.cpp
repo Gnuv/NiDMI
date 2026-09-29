@@ -1,4 +1,5 @@
 #include "EcrituresDifferees.h"
+#include "Stockage.h"
 #include <atomic>
 #include "../audio/AudioEngine.h"
 #include <LittleFS.h>
@@ -10,8 +11,8 @@
 namespace Differe {
 namespace {
 
-constexpr const char* PARTITION = "mapfs";
-constexpr const char* BASE      = "/mapfs";
+constexpr const char* PARTITION = Stockage::PARTITION;
+constexpr const char* BASE      = Stockage::BASE;
 constexpr int MAX_FICHIERS = 24;
 constexpr int MAX_NVS      = 24;
 constexpr unsigned long STABLE_MS  = 3000;    // une rafale de poses n'ecrit qu'une fois
@@ -65,7 +66,7 @@ struct GardeEcriture {
 };
 
 bool monter() {
-  // mapfs est partagee : deja montee, LittleFS.begin le voit et n'y touche pas.
+  // storage est partagee : deja montee, LittleFS.begin le voit et n'y touche pas.
   return LittleFS.begin(true, BASE, 10, PARTITION);
 }
 

@@ -186,7 +186,7 @@ bool setSampler(const char* nom, String& raison, bool persister = false);
 // effaçait le choix mémorisé (constaté au test de redémarrage).
 void arreterSampler(bool persister = false);
 bool samplerActif();
-/* Un fichier vient d'arriver dans mapfs (televersement), ou d'en partir : le
+/* Un fichier vient d'arriver dans storage (televersement), ou d'en partir : le
  * magasin en PSRAM suit, sans rien couper d'autre que ce son-la (§177). */
 bool echantillonArrive(const char* nom, String& raison);
 void echantillonParti(const char* nom);

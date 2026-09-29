@@ -9,7 +9,7 @@
 // vaut tout de suite en memoire, seule sa memorisation est differee.
 //
 // Ici, un seul mecanisme pour tous :
-//   - des FICHIERS de mapfs : le contenu le plus recent, en PSRAM, est rendu
+//   - des FICHIERS de storage : le contenu le plus recent, en PSRAM, est rendu
 //     aux lecteurs (qui demandent d'abord ce qui attend), ecrit a cote puis
 //     renomme ;
 //   - des valeurs NVS : la derniere par (espace, cle) gagne.
@@ -28,7 +28,7 @@
 
 namespace Differe {
 
-// ── Fichiers de mapfs ────────────────────────────────────────────────────
+// ── Fichiers de storage ────────────────────────────────────────────────────
 // Adopter un contenu (tampon PSRAM partage, sans copie) pour `chemin`.
 // false : plus de place dans la file d'attente — l'appelant ecrit lui-meme.
 bool poserFichier(const char* chemin, std::shared_ptr<char> tampon, size_t n);
@@ -58,7 +58,7 @@ void boucle();                 // nidmi_loop : ecrit ce qui attend, au silence
 void toutEcrireMaintenant();   // avant un redemarrage voulu
 bool enAttente();
 
-/** Les fichiers de mapfs ont change — ecrits ou supprimes, ici ou par un
+/** Les fichiers de storage ont change — ecrits ou supprimes, ici ou par un
  *  televersement. Ce qu'on mesurait de leur occupation est a refaire (et se
  *  refait au silence : ScriptStore::infos, MESURES §161). */
 void noterFichiersModifies();

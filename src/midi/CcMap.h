@@ -18,7 +18,7 @@
 // dire laquelle, et un futur parametre de script ne demande aucun code ici.
 //
 // PERSISTANCE : la table vit en NVS, pas en LittleFS. C'est le meme partage que
-// le script — le CONTENU d'un .nms est gros et va dans mapfs, la CONFIGURATION
+// le script — le CONTENU d'un .nms est gros et va dans storage, la CONFIGURATION
 // est minuscule et va en NVS, pour que la carte se retrouve entiere au
 // demarrage sans monter de systeme de fichiers. Douze affectations tiennent
 // dans quelques centaines d'octets.

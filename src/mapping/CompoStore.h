@@ -20,12 +20,12 @@
 
 namespace Compo {
 
-// La composition dans mapfs — declaree ici, lue par l'explorateur (FichiersAPI).
+// La composition dans storage — declaree ici, lue par l'explorateur (FichiersAPI).
 constexpr const char* FICHIER = "/compo.json";
 
 constexpr size_t MAX_OCTETS = 256 * 1024;   // plafond d'une composition
 
-void demarrer();                   // lit /compo.json de mapfs, s'il existe
+void demarrer();                   // lit /compo.json de storage, s'il existe
 
 // La composition la plus recente — nullptr si la carte n'en a pas. Le tampon
 // partage reste valide tant qu'on le tient, meme si une autre arrive.
