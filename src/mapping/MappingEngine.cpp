@@ -914,7 +914,10 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
          * la carte qui y publie l'ETAT, que r("sys.<nom>") relit. Sur le poste
          * (banc de conformite), une variable ordinaire : il n'y a pas de carte. */
         if (nom.startsWith("sys.")) {
-            nidmi_sys_recevoir(nom.c_str(), courant);
+            /* SAUF A BLANC (MESURES §183) : un appel horsLigne SIMULE, il ne
+             * pilote pas la carte — l'essai d'un script qui fait s("sys.wifi")
+             * forcait pourtant la radio, et s("sys.nextcue") faisait GO. */
+            if (!(ctx && ctx->horsLigne)) nidmi_sys_recevoir(nom.c_str(), courant);
             return true;
         }
 #endif
