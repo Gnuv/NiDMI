@@ -20,6 +20,9 @@
 
 namespace Compo {
 
+// La composition dans mapfs — declaree ici, lue par l'explorateur (FichiersAPI).
+constexpr const char* FICHIER = "/compo.json";
+
 constexpr size_t MAX_OCTETS = 256 * 1024;   // plafond d'une composition
 
 void demarrer();                   // lit /compo.json de mapfs, s'il existe

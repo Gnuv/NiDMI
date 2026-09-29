@@ -10,7 +10,6 @@ namespace {
 
 constexpr const char* PARTITION = "mapfs";        // 1 Mo, table nidmi_s3_ota_dual_littlefs
 constexpr const char* BASE      = "/mapfs";
-constexpr const char* DOSSIER   = "/samples";
 /* Le televersement s'ecrit A COTE, et ne prend son nom qu'une fois verifie
  * (§177) : ouvrir le fichier definitif le tronquait d'emblee — un remplacement
  * interrompu ou refuse emportait l'ancien son, et un fichier a moitie ecrit
@@ -217,12 +216,27 @@ String listerJson() {
   return out;
 }
 
+bool nomValide(const char* nom, String& raison) {
+  const size_t n = nom ? strlen(nom) : 0;
+  if (!n) { raison = "nom vide"; return false; }
+  if (n >= NOM_MAX) {
+    raison = "nom trop long (" + String(NOM_MAX - 1) + " caracteres au plus)"; return false;
+  }
+  for (const char* c = nom; *c; c++) {
+    if ((uint8_t)*c < 0x20 || strchr("|;,=/\\\"", *c)) {
+      raison = String("caractere interdit dans un nom : « ") + *c
+               + " » (il separe les champs d'une cue, un chemin ou du JSON)";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ecrireDebut(const void* qui, const char* nom) {
   String raison;
   if (_proprietaire && _proprietaire != qui && millis() - _dernierMorceauMs < ABANDON_MS)
     raison = "un autre televersement est en cours";
-  else if (!*_base(nom) || strlen(_base(nom)) >= NOM_MAX)
-    raison = "nom vide ou trop long (" + String(NOM_MAX - 1) + " caracteres au plus)";
+  else if (!nomValide(nom, raison)) {}
   else if (!monter())
     raison = "mapfs non monte";
   if (!raison.length()) {
@@ -375,6 +389,7 @@ void liberer(int i) {
   heap_caps_free(pcm);
 }
 
+bool           charge()             { Verrou verrou; return _charge; }
 uint8_t        nombreCharges()      { return _prets; }
 bool           lisible(uint8_t i)   { return i < SAMPLES_MAX && _ech[i].pret; }
 const int16_t* donnees(uint8_t i)   { return lisible(i) ? _ech[i].pcm    : nullptr; }

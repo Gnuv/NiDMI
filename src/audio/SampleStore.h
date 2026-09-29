@@ -25,6 +25,9 @@
 
 namespace SampleStore {
 
+// Le dossier des sons dans mapfs — declare ici, lu par l'explorateur (FichiersAPI).
+constexpr const char* DOSSIER = "/samples";
+
 // Montage paresseux de mapfs (formatage si vierge). Sûr à appeler souvent.
 bool monter();
 bool estMonte();
@@ -43,6 +46,12 @@ String listerJson();
 // ne sonnait jamais (MESURES §177). ecrireAbandon() : la requête est partie
 // avant la fin, le fichier à moitié écrit s'en va avec elle.
 constexpr size_t NOM_MAX = 48;          // nul final compris
+/* UN NOM QU'UNE CUE PEUT PORTER (§179). La ligne de cue sépare ses champs par
+ * `|`, ses réglages par `;` et `=`, ses sons par `,` : un son nommé « a,b.wav »
+ * se téléversait, et aucune cue n'aurait jamais pu le jouer. Refusés aussi : ce
+ * qui casserait un chemin ou du JSON (`/`, `\`, `"`), les caractères de
+ * contrôle, le vide, et au-delà de NOM_MAX - 1. */
+bool nomValide(const char* nom, String& raison);
 bool ecrireDebut(const void* qui, const char* nom);
 bool ecrireMorceau(const void* qui, const uint8_t* donnees, size_t taille);
 bool ecrireFin(const void* qui, String& raison);
@@ -76,6 +85,7 @@ bool supprimer(const char* nom);
 // Charge tout ce que mapfs contient, la première fois ; les appels suivants
 // ne relisent rien. Retourne le nombre d'échantillons prêts.
 uint8_t chargerTout();
+bool    charge();                      // chargerTout() est passé : lisible() dit vrai
 
 // ── Changer le magasin pendant que la tâche audio le lit ───────────────────
 //

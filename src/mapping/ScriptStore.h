@@ -19,6 +19,9 @@
 
 namespace ScriptStore {
 
+// Le dossier des .nms dans mapfs — declare ici, lu par l'explorateur (FichiersAPI).
+constexpr const char* DOSSIER = "/scripts";
+
 bool   monter();
 bool   estMonte();
 

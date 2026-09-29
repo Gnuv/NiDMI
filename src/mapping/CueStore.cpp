@@ -31,7 +31,6 @@ struct VerrouSeq {
 
 constexpr const char* PARTITION = "mapfs";
 constexpr const char* BASE      = "/mapfs";
-constexpr const char* FICHIER   = "/cues.txt";
 
 bool  _monte    = false;
 bool  _lecture  = false;

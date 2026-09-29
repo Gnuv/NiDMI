@@ -75,7 +75,6 @@ bool _relire(const char* nom, String& contenu) {
 
 constexpr const char* PARTITION = "mapfs";     // meme partition que les echantillons
 constexpr const char* BASE      = "/mapfs";
-constexpr const char* DOSSIER   = "/scripts";
 constexpr size_t      TAILLE_MAX = 8192;       // un .nms tient tres largement dedans
 
 bool _monte = false;

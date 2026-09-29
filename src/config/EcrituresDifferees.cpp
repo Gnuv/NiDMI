@@ -76,6 +76,13 @@ bool ecrireFichier(const char* chemin, const char* data, size_t n) {
   if (!monter()) return false;
   const String tmp = String(chemin) + ".tmp";
   File f = LittleFS.open(tmp, FILE_WRITE);
+  /* Un dossier que rien n'a encore cree (/config, a la premiere configuration
+   * deposee — MESURES §179) : on le cree, ici, au silence comme le reste. */
+  if (!f) {
+    const String dossier = String(chemin).substring(0, String(chemin).lastIndexOf('/'));
+    if (dossier.length() && !LittleFS.exists(dossier) && LittleFS.mkdir(dossier))
+      f = LittleFS.open(tmp, FILE_WRITE);
+  }
   if (!f) return false;
   const size_t e = f.write((const uint8_t*)data, n);
   f.close();

@@ -43,6 +43,9 @@
 
 namespace Cues {
 
+// La liste de cues dans mapfs — declaree ici, lue par l'explorateur (FichiersAPI).
+constexpr const char* FICHIER = "/cues.txt";
+
 struct Cue {
   String  nom;
   float   duree   = 0.0f;    // secondes ; 0 = infinie (attend un GO)

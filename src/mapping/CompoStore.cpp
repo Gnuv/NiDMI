@@ -10,7 +10,6 @@ namespace {
 
 constexpr const char* PARTITION = "mapfs";   // meme partition que cues.txt et les echantillons
 constexpr const char* BASE      = "/mapfs";
-constexpr const char* FICHIER   = "/compo.json";
 
 /* La composition la plus recente, rendue par GET. L'ecriture en flash, elle,
  * passe par Differe (au silence) — qui partage ce meme tampon, sans copie. */
