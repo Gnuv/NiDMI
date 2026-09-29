@@ -592,28 +592,32 @@ extern "C" bool nidmi_regleTientLeWifiCoupe(){
  *   sys.wifi        force la radio allumee ; 0 rend la main a la regle
  *   sys.standalone  l'option « Instrument autonome »
  *   sys.cablefirst  l'option « Cable prioritaire »
- *   sys.reconnect   front montant : relancer le cable (au plus toutes les 10 s)
+ *   sys.reconnect   relancer le cable (au plus toutes les 10 s)
  * Et r() relit l'etat : ces noms-la, plus sys.cable (1 si l'ordinateur utilise
  * le reseau du cable) — publies dans le bus par nidmi_loop.
  *
- * LE TRANSPORT (MESURES §181) — pour brancher des boutons sur la lecture :
- *   sys.play        front montant : lecture (reprend apres une pause)
- *   sys.stop        front montant : arret
- *   sys.pause       front montant : pause en lecture, lecture sinon — UN bouton
- *   sys.nextcue     front montant : cue suivante (GO ; la premiere si la liste boucle)
- *   sys.prevcue     front montant : cue precedente
- *   sys.firstcue    front montant : la premiere cue
- *   sys.cue         = N : la cue N (1 = la premiere), quand N change ; 0 rearme
+ * LE TRANSPORT (MESURES §181-182) — pour brancher des boutons sur la lecture :
+ *   sys.play        lecture (reprend apres une pause ; deja en lecture : rien)
+ *   sys.stop        arret
+ *   sys.pause       pause en lecture, lecture sinon — UN bouton
+ *   sys.nextcue     cue suivante (GO ; la premiere si la liste boucle)
+ *   sys.prevcue     cue precedente
+ *   sys.firstcue    la premiere cue
+ *   sys.cue         = N : la cue N (1 = la premiere)
  *   sys.cueloop     l'option « la liste boucle »
  *   sys.autoplay    l'option « lecture au demarrage »
- * Front montant : la valeur passe de 0 a > 0 — un appui, un geste, quelle que
- * soit sa duree. r() relit sys.play, sys.pause, sys.cue (1 = la premiere),
+ * CHAQUE VALEUR > 0 EST UN GESTE, 0 ne fait rien (§182). Le §181 attendait un
+ * FRONT MONTANT — un retour a 0 entre deux gestes — et le script naturel d'un
+ * bouton, « in() : sel(1) : s("sys.nextcue") », n'envoie jamais le 0 : sel(1)
+ * ne laisse passer que l'appui. Le premier appui passait, plus aucun ensuite.
+ * Un bouton brut (1 a l'appui, 0 au relachement) fait donc un geste par appui ;
+ * une source CONTINUE (potentiometre) en ferait un par valeur : la faire passer
+ * par change() ou sel(). Des demandes entre deux tours de boucle n'en font
+ * qu'une (un bit). r() relit sys.play, sys.pause, sys.cue (1 = la premiere),
  * sys.nextcue (0 = pas de suivante), sys.cueloop, sys.autoplay — publies par le
  * sequenceur a chaque changement (publierEtatsTransport). */
-static void frontTransport(uint8_t i, bool oui, uint32_t geste){
-    static bool avant[6] = {false};
-    if (oui && !avant[i]) __atomic_fetch_or(&g_transportDemande, geste, __ATOMIC_SEQ_CST);
-    avant[i] = oui;
+static void demanderTransport(bool oui, uint32_t geste){
+    if (oui) __atomic_fetch_or(&g_transportDemande, geste, __ATOMIC_SEQ_CST);
 }
 
 extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
@@ -622,21 +626,18 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     else if (!strcmp(nom, "sys.standalone"))   g_demandeAutonome = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.cablefirst"))   g_basculeDemande = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.reconnect")) {
-        static bool avant = false;             // front montant : une relance par appui
-        if (oui && !avant) g_relanceDemandeScript = true;
-        avant = oui;
+        // Une relance par geste (> 0) ; la boucle les espace de 10 s au moins.
+        if (oui) g_relanceDemandeScript = true;
     }
-    else if (!strcmp(nom, "sys.play"))         frontTransport(0, oui, T_PLAY);
-    else if (!strcmp(nom, "sys.stop"))         frontTransport(1, oui, T_STOP);
-    else if (!strcmp(nom, "sys.pause"))        frontTransport(2, oui, T_PAUSE);
-    else if (!strcmp(nom, "sys.nextcue"))      frontTransport(3, oui, T_NEXT);
-    else if (!strcmp(nom, "sys.prevcue"))      frontTransport(4, oui, T_PREV);
-    else if (!strcmp(nom, "sys.firstcue"))     frontTransport(5, oui, T_FIRST);
+    else if (!strcmp(nom, "sys.play"))         demanderTransport(oui, T_PLAY);
+    else if (!strcmp(nom, "sys.stop"))         demanderTransport(oui, T_STOP);
+    else if (!strcmp(nom, "sys.pause"))        demanderTransport(oui, T_PAUSE);
+    else if (!strcmp(nom, "sys.nextcue"))      demanderTransport(oui, T_NEXT);
+    else if (!strcmp(nom, "sys.prevcue"))      demanderTransport(oui, T_PREV);
+    else if (!strcmp(nom, "sys.firstcue"))     demanderTransport(oui, T_FIRST);
     else if (!strcmp(nom, "sys.cue")) {
-        static int16_t avant = 0;              // sur CHANGEMENT : un potard ne rejoue pas la cue
         const int16_t n = (int16_t)lroundf(valeur);
-        if (n != avant && n >= 1) g_cueDemandee = n - 1;
-        avant = n;
+        if (n >= 1) g_cueDemandee = n - 1;     // chaque appel : un geste (§182)
     }
     else if (!strcmp(nom, "sys.cueloop"))      g_boucleDemandee = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.autoplay"))     g_auDemarrageDemande = oui ? 1 : 0;
@@ -743,7 +744,9 @@ static void executerTransport(){
     if (d & T_PREV)  Cues::precedent();
     if (d & T_NEXT)  Cues::suivant();
     if (d & T_PAUSE) { if (Cues::enLecture()) Cues::pauser(); else Cues::demarrer(); }
-    if (d & T_PLAY)  Cues::demarrer();
+    /* Deja en lecture : rien. demarrer() relancerait la cue — un bouton PLAY
+     * appuye pendant le jeu ne doit pas la reprendre du debut (§182). */
+    if ((d & T_PLAY) && !Cues::enLecture()) Cues::demarrer();
 }
 
 // Les etats, lus par r("sys.<nom>"). Publies a chaque changement seulement.
