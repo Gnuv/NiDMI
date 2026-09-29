@@ -485,6 +485,31 @@ void setupAudioAPI(AsyncWebServer& server) {
     server.on("/api/cues/texte", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "text/plain; charset=utf-8", Cues::contenu());
     });
+    /* LA CUE PRECEDENTE (§181) — le pendant de /api/cues/go. C'est la CARTE
+     * qui decide ou elle mene : la derniere si la liste boucle, rien a la
+     * premiere sinon. L'app calculait l'index elle-meme et ne pouvait pas
+     * savoir. AVANT « /api/cues » (prefixe). */
+    server.on("/api/cues/prev", HTTP_POST, [](AsyncWebServerRequest *request){
+        Cues::precedent();
+        request->send(200, "application/json", String("{\"status\":\"ok\",\"index\":") + Cues::indexCourant()
+                      + ",\"lecture\":" + String(Cues::enLecture() ? "true" : "false")
+                      + ",\"restant\":" + String(Cues::restantSec(), 2)
+                      + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}");
+    });
+    /* LES OPTIONS DU TRANSPORT (MESURES §181) : `boucle` (apres la derniere cue,
+     * la suivante est la premiere) et `au_demarrage` (la carte lance la cue 1 a
+     * chaque allumage). L'une, l'autre ou les deux ; valent tout de suite, se
+     * memorisent au silence. AVANT « /api/cues » : le serveur fait correspondre
+     * par prefixe, le generique avalerait la route. */
+    server.on("/api/cues/options", HTTP_POST, [](AsyncWebServerRequest *request){
+        auto oui = [&](const char* n) { return request->getParam(n, true)->value() != "0"; };
+        if (request->hasParam("boucle", true))       Cues::fixerBoucle(oui("boucle"));
+        if (request->hasParam("au_demarrage", true)) Cues::fixerLectureAuDemarrage(oui("au_demarrage"));
+        request->send(200, "application/json",
+            String("{\"status\":\"ok\",\"boucle\":") + (Cues::boucleActive() ? "true" : "false")
+            + ",\"au_demarrage\":" + (Cues::lectureAuDemarrage() ? "true" : "false")
+            + ",\"message\":\"applique tout de suite, memorise au premier silence\"}");
+    });
     server.on("/api/cues", HTTP_GET, [](AsyncWebServerRequest *request){
         String j = "{\"n\":" + String(Cues::nombre())
                  + ",\"index\":" + String(Cues::indexCourant())
@@ -505,7 +530,10 @@ void setupAudioAPI(AsyncWebServer& server) {
                   * pause — ce qui sonnait sonne encore — alors qu'un arret la
                   * ferme. Le deduire d'un decompte non nul etait faux pour une
                   * cue infinie, qui ne decompte rien. */
-                 + ",\"pause\":" + String(Cues::enPause() ? "true" : "false") + "}";
+                 + ",\"pause\":" + String(Cues::enPause() ? "true" : "false")
+                 // Les options du transport (§181).
+                 + ",\"boucle\":" + String(Cues::boucleActive() ? "true" : "false")
+                 + ",\"au_demarrage\":" + String(Cues::lectureAuDemarrage() ? "true" : "false") + "}";
         request->send(200, "application/json", j);
     });
     server.on("/api/cues", HTTP_POST, [](AsyncWebServerRequest *request){

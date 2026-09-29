@@ -83,8 +83,10 @@ def dans_l_ordre(motif, texte):
 def fonctions_de_la_carte(source):
     envoi   = corps_de(source, "void nidmi_sys_recevoir(")
     lecture = corps_de(source, "static void publierEtatsSys(")
+    # Le transport publie son etat a part, a chaque changement (MESURES §181).
+    transport = corps_de(source, "static void publierEtatsTransport(") or ""
     if envoi is None or lecture is None: return None
-    return dans_l_ordre(FORME_SYS_ENVOI, envoi), dans_l_ordre(FORME_SYS_LECTURE, lecture)
+    return dans_l_ordre(FORME_SYS_ENVOI, envoi), dans_l_ordre(FORME_SYS_LECTURE, lecture + transport)
 
 def echappe(n):
     return n.replace('\\', '\\\\').replace('"', '\\"')

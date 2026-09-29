@@ -11,6 +11,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include "../diag/Chronos.h"     // le retard des cues minutees, et ce que coute une cue (§172)
+#include <Preferences.h>          // les options du transport (§181)
 
 namespace Cues {
 namespace {
@@ -35,6 +36,11 @@ constexpr const char* BASE      = "/mapfs";
 bool  _monte    = false;
 bool  _lecture  = false;
 int   _index    = 0;
+/* Les options du transport (§181) et qui veut connaitre son etat. */
+bool  _boucle       = false;
+bool  _auDemarrage  = false;
+void (*_rappelEtat)(const Etat&) = nullptr;
+constexpr const char* NVS_OPTIONS = "nidmi-cues";
 uint32_t _debutMs = 0;      // instant d'activation de la cue courante
 /* ── LA PAUSE APPARTIENT A LA CARTE, ELLE AUSSI ─────────────────────────────
  * L'app avait la sienne, purement locale : appuyer sur STOP en lecture la
@@ -364,12 +370,20 @@ namespace {
 SemaphoreHandle_t _verrouTexte = nullptr;
 std::shared_ptr<char> _texte;
 size_t _octets = 0;
+/* LE COMPTE DES CUES, GARDE (§181). nombre() parcourait toute la liste — une
+ * String par ligne — et il est appele a chaque GO, et desormais a chaque
+ * annonce de l'etat du transport. Garde par generation du texte : une liste
+ * adoptee pendant un comptage ne laisse jamais un compte perime. */
+uint32_t _generationTexte = 0;
+uint32_t _generationCompte = 0;
+int      _compte = -1;
 
-std::shared_ptr<char> _texteCourant(size_t& n) {
+std::shared_ptr<char> _texteCourant(size_t& n, uint32_t* generation = nullptr) {
   if (!_verrouTexte) { n = 0; return nullptr; }
   xSemaphoreTake(_verrouTexte, portMAX_DELAY);
   auto t = _texte;
   n = _octets;
+  if (generation) *generation = _generationTexte;
   xSemaphoreGive(_verrouTexte);
   return t;
 }
@@ -377,6 +391,7 @@ void _adopterTexte(std::shared_ptr<char> t, size_t n) {
   xSemaphoreTake(_verrouTexte, portMAX_DELAY);
   _texte = t;
   _octets = n;
+  _generationTexte++;
   xSemaphoreGive(_verrouTexte);
 }
 std::shared_ptr<char> _tamponPsram(size_t n) {
@@ -422,10 +437,18 @@ bool monter() {
 int nombre() {
   if (!monter()) return 0;
   size_t n = 0;
-  auto t = _texteCourant(n);
+  uint32_t g = 0;
+  auto t = _texteCourant(n, &g);
   if (!t) return 0;
+  xSemaphoreTake(_verrouTexte, portMAX_DELAY);
+  const int garde = (_compte >= 0 && _generationCompte == g) ? _compte : -1;
+  xSemaphoreGive(_verrouTexte);
+  if (garde >= 0) return garde;
   int k = 0;
   _pourChaqueLigne(t.get(), n, [&](const String& l) { if (_ligneUtile(l)) k++; return true; });
+  xSemaphoreTake(_verrouTexte, portMAX_DELAY);
+  if (g == _generationTexte) { _compte = k; _generationCompte = g; }
+  xSemaphoreGive(_verrouTexte);
   return k;
 }
 
@@ -473,6 +496,7 @@ bool ecrireTout(const String& contenuTexte) {
     if (_index >= total) _index = (total > 0) ? total - 1 : 0;
   }
   Serial.printf("[cues] liste recue : %u o, %d cues (flash au premier silence)\n", (unsigned)n, total);
+  annoncerEtat();                 // le compte et la cue suivante ont pu changer (§181)
   return true;
 }
 
@@ -503,12 +527,22 @@ String contenu() {
  * Appele sous le verrou du sequenceur, depuis la boucle ou le serveur web :
  * `nidmi_ws_pousser` ne fait qu'empiler dans une file, loopTask envoie. */
 static void _annoncer() {
+  const int n = nombre();
+  /* L'ETAT POUR LE BUS (§181), TOUJOURS : un bouton lit r("sys.cue") qu'un
+   * onglet ecoute ou non. */
+  if (_rappelEtat) {
+    Etat e;
+    e.lecture = _lecture; e.pause = _enPause; e.boucle = _boucle; e.auDemarrage = _auDemarrage;
+    e.index = _index; e.nombre = n;
+    e.suivante = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
+    _rappelEtat(e);
+  }
   if (!nidmi_ws_quelqu_un_ecoute()) return;   // personne n'ecoute : rien a dire
   char trame[80];
   /* CINQ CHAMPS : le dernier dit GELEE. Ajoute en queue — l'app destructure,
    * une trame a quatre champs reste donc lisible par une app a jour. */
   snprintf(trame, sizeof trame, "NIDMI_CUE:%d\x1f%s\x1f%.2f\x1f%d\x1f%s",
-           _index, _lecture ? "1" : "0", restantSec(), nombre(),
+           _index, _lecture ? "1" : "0", restantSec(), n,
            _enPause ? "1" : "0");
   nidmi_ws_pousser(trame);
 }
@@ -608,13 +642,45 @@ void arreter() {
   Serial.println("[cues] arret");
 }
 
+/* LA CUE SUIVANTE. Rend vrai si une cue a ete (re)appliquee. En fin de liste
+ * (§181) : la premiere si la liste boucle ; sinon, un GO a la main ne fait
+ * RIEN — il n'y a pas de suivante, et l'arret a son propre bouton —, et la fin
+ * d'une derniere cue minutee ARRETE, comme toujours : la liste est jouee. */
+static bool _avancer(bool aLaMain) {
+  const int n = nombre();
+  if (n <= 0) return false;
+  int suiv = _index + 1;
+  if (suiv >= n) {
+    if (!_boucle) {
+      Serial.println(aLaMain ? "[cues] fin de liste : pas de suivante" : "[cues] fin de liste");
+      if (!aLaMain) arreter();
+      return false;
+    }
+    suiv = 0;
+    Serial.println("[cues] fin de liste : retour a la premiere (la liste boucle)");
+  }
+  aller(suiv);
+  if (_lecture) AudioEngine::ouvrirSon();
+  return true;
+}
+
 void suivant() {
+  VerrouSeq verrou;
+  _avancer(/*aLaMain=*/true);
+}
+
+/* La cue precedente. A la premiere : la derniere si la liste boucle, rien sinon
+ * — revenir « avant le debut » n'a pas de sens. */
+void precedent() {
   VerrouSeq verrou;
   const int n = nombre();
   if (n <= 0) return;
-  const int suiv = _index + 1;
-  if (suiv >= n) { Serial.println("[cues] fin de liste"); arreter(); return; }
-  aller(suiv);
+  int prec = _index - 1;
+  if (prec < 0) {
+    if (!_boucle) return;
+    prec = n - 1;
+  }
+  aller(prec);
   if (_lecture) AudioEngine::ouvrirSon();
 }
 
@@ -641,13 +707,14 @@ void boucle() {
     const uint32_t echeance = _debutMs + duree;
     const uint32_t retard = maintenant - echeance;
     Chronos::retardCue.noter(retard * 1000u);
-    const int avant = _index;
-    suivant();
+    const bool avance = _avancer(/*aLaMain=*/false);
     /* SANS DERIVE : la cue suivante part de l'ECHEANCE, pas de l'instant ou la
      * boucle l'a vue — sinon chaque retard s'ajoutait aux suivants et une
      * liste minutee derivait. Au-dela d'un quart de seconde (la carte etait
-     * arretee), on repart de maintenant : rattraper enchainerait des cues. */
-    if (_lecture && _index != avant && retard < 250) _debutMs = echeance;
+     * arretee), on repart de maintenant : rattraper enchainerait des cues.
+     * `avance` et non « l'index a change » : une liste d'UNE cue qui boucle
+     * se rejoue sur elle-meme (§181). */
+    if (_lecture && avance && retard < 250) _debutMs = echeance;
   }
 }
 
@@ -669,5 +736,44 @@ float restantSec() {
   const float reste = _dureeCourante - (ecoule / 1000.0f);
   return reste > 0 ? reste : 0.0f;
 }
+
+// ── Options du transport (MESURES §181) ──────────────────────────────────────
+// Elles valent tout de suite ; la NVS suit au silence (Differe, §157).
+void fixerBoucle(bool oui) {
+  {
+    VerrouSeq verrou;
+    if (_boucle == oui) return;
+    _boucle = oui;
+    _annoncer();
+  }
+  Differe::nvsOctet(NVS_OPTIONS, "boucle", oui ? 1 : 0);
+  Serial.printf("[cues] la liste %s\n", oui ? "boucle" : "s'arrete a la derniere cue");
+}
+bool boucleActive() { VerrouSeq verrou; return _boucle; }
+
+void fixerLectureAuDemarrage(bool oui) {
+  {
+    VerrouSeq verrou;
+    if (_auDemarrage == oui) return;
+    _auDemarrage = oui;
+    _annoncer();
+  }
+  Differe::nvsOctet(NVS_OPTIONS, "auto", oui ? 1 : 0);
+  Serial.printf("[cues] lecture au demarrage : %s\n", oui ? "oui" : "non");
+}
+bool lectureAuDemarrage() { VerrouSeq verrou; return _auDemarrage; }
+
+void restaurerOptions() {
+  Preferences p;
+  if (!p.begin(NVS_OPTIONS, true)) return;      // jamais ecrites : les defauts
+  const bool b = p.getUChar("boucle", 0) != 0;
+  const bool a = p.getUChar("auto", 0) != 0;
+  p.end();
+  VerrouSeq verrou;
+  _boucle = b; _auDemarrage = a;
+}
+
+void surChangement(void (*rappel)(const Etat&)) { VerrouSeq verrou; _rappelEtat = rappel; }
+void annoncerEtat() { VerrouSeq verrou; _annoncer(); }
 
 }  // namespace Cues

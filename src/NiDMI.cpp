@@ -338,6 +338,14 @@ static volatile int8_t g_demandeAutonome = -1;   // -1 rien ; 0 retirer ; 1 acti
 static volatile int8_t g_demandeForce = -1;
 static volatile bool g_relanceDemandeScript = false;
 static volatile bool g_sysInconnu = false;
+/* Les demandes de TRANSPORT des scripts (MESURES §181) : posees par la tache du
+ * script, executees par nidmi_loop au tour suivant. Un mot de bits pour les
+ * gestes (front montant), un index pour sys.cue, deux options. */
+enum : uint32_t { T_PLAY = 1, T_STOP = 2, T_PAUSE = 4, T_NEXT = 8, T_PREV = 16, T_FIRST = 32 };
+static uint32_t g_transportDemande = 0;          // __atomic_* : deux taches de scripts
+static volatile int16_t g_cueDemandee = -1;      // index ; -1 = rien
+static volatile int8_t  g_boucleDemandee = -1;   // -1 rien ; 0 non ; 1 oui
+static volatile int8_t  g_auDemarrageDemande = -1;
 static char g_sysInconnuNom[16];                 // le premier, pour le dire
 static const unsigned long OPTION_MEMORISEE_APRES_MS = 3000;
 static const uint32_t ECRITURE_LENTE_US = 20000;      // le seuil de retard du moteur audio
@@ -586,7 +594,28 @@ extern "C" bool nidmi_regleTientLeWifiCoupe(){
  *   sys.cablefirst  l'option « Cable prioritaire »
  *   sys.reconnect   front montant : relancer le cable (au plus toutes les 10 s)
  * Et r() relit l'etat : ces noms-la, plus sys.cable (1 si l'ordinateur utilise
- * le reseau du cable) — publies dans le bus par nidmi_loop. */
+ * le reseau du cable) — publies dans le bus par nidmi_loop.
+ *
+ * LE TRANSPORT (MESURES §181) — pour brancher des boutons sur la lecture :
+ *   sys.play        front montant : lecture (reprend apres une pause)
+ *   sys.stop        front montant : arret
+ *   sys.pause       front montant : pause en lecture, lecture sinon — UN bouton
+ *   sys.nextcue     front montant : cue suivante (GO ; la premiere si la liste boucle)
+ *   sys.prevcue     front montant : cue precedente
+ *   sys.firstcue    front montant : la premiere cue
+ *   sys.cue         = N : la cue N (1 = la premiere), quand N change ; 0 rearme
+ *   sys.cueloop     l'option « la liste boucle »
+ *   sys.autoplay    l'option « lecture au demarrage »
+ * Front montant : la valeur passe de 0 a > 0 — un appui, un geste, quelle que
+ * soit sa duree. r() relit sys.play, sys.pause, sys.cue (1 = la premiere),
+ * sys.nextcue (0 = pas de suivante), sys.cueloop, sys.autoplay — publies par le
+ * sequenceur a chaque changement (publierEtatsTransport). */
+static void frontTransport(uint8_t i, bool oui, uint32_t geste){
+    static bool avant[6] = {false};
+    if (oui && !avant[i]) __atomic_fetch_or(&g_transportDemande, geste, __ATOMIC_SEQ_CST);
+    avant[i] = oui;
+}
+
 extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     const bool oui = valeur > 0.0f;
     if (!strcmp(nom, "sys.wifi"))              g_demandeForce = oui ? 1 : 0;
@@ -596,7 +625,22 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
         static bool avant = false;             // front montant : une relance par appui
         if (oui && !avant) g_relanceDemandeScript = true;
         avant = oui;
-    } else if (!g_sysInconnu) {
+    }
+    else if (!strcmp(nom, "sys.play"))         frontTransport(0, oui, T_PLAY);
+    else if (!strcmp(nom, "sys.stop"))         frontTransport(1, oui, T_STOP);
+    else if (!strcmp(nom, "sys.pause"))        frontTransport(2, oui, T_PAUSE);
+    else if (!strcmp(nom, "sys.nextcue"))      frontTransport(3, oui, T_NEXT);
+    else if (!strcmp(nom, "sys.prevcue"))      frontTransport(4, oui, T_PREV);
+    else if (!strcmp(nom, "sys.firstcue"))     frontTransport(5, oui, T_FIRST);
+    else if (!strcmp(nom, "sys.cue")) {
+        static int16_t avant = 0;              // sur CHANGEMENT : un potard ne rejoue pas la cue
+        const int16_t n = (int16_t)lroundf(valeur);
+        if (n != avant && n >= 1) g_cueDemandee = n - 1;
+        avant = n;
+    }
+    else if (!strcmp(nom, "sys.cueloop"))      g_boucleDemandee = oui ? 1 : 0;
+    else if (!strcmp(nom, "sys.autoplay"))     g_auDemarrageDemande = oui ? 1 : 0;
+    else if (!g_sysInconnu) {
         strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
         __sync_synchronize();                  // le nom avant le drapeau
         g_sysInconnu = true;
@@ -667,6 +711,39 @@ static void impressionsDrainer() {
         }
         if (nidmi_ws_quelqu_un_ecoute()) nidmi_ws_pousser(trame);
     }
+}
+
+/* LE TRANSPORT, lu par r("sys.<nom>") (MESURES §181) : appele par le sequenceur
+ * a chaque changement (Cues::surChangement), jamais par sondage. Six noms du
+ * bus (il en tient 32) : l'arret se deduit (ni lecture, ni pause). */
+static void publierEtatsTransport(const Cues::Etat& e){
+    FluxRegistry::update("sys.play",     e.lecture ? 1 : 0);
+    FluxRegistry::update("sys.pause",    e.pause ? 1 : 0);
+    FluxRegistry::update("sys.cue",      (float)(e.index + 1));
+    FluxRegistry::update("sys.nextcue",  (float)(e.suivante + 1));   // 0 : pas de suivante
+    FluxRegistry::update("sys.cueloop",  e.boucle ? 1 : 0);
+    FluxRegistry::update("sys.autoplay", e.auDemarrage ? 1 : 0);
+}
+
+/* Les demandes de transport des scripts, executees ici — dans la boucle, qui
+ * tient le sequenceur (§172) —, au tour qui suit la demande. L'ordre : l'arret,
+ * puis ou aller, puis lire — « va a la cue 3 et joue » tient en un tour. */
+static void executerTransport(){
+    const uint32_t d = __atomic_exchange_n(&g_transportDemande, 0u, __ATOMIC_SEQ_CST);
+    const int16_t cue = g_cueDemandee;
+    if (cue >= 0) g_cueDemandee = -1;
+    const int8_t boucle = g_boucleDemandee;
+    if (boucle >= 0) { g_boucleDemandee = -1; Cues::fixerBoucle(boucle == 1); }
+    const int8_t auDem = g_auDemarrageDemande;
+    if (auDem >= 0) { g_auDemarrageDemande = -1; Cues::fixerLectureAuDemarrage(auDem == 1); }
+    if (!d && cue < 0) return;
+    if (d & T_STOP)  Cues::arreter();
+    if (d & T_FIRST) Cues::aller(0);
+    if (cue >= 0)    Cues::aller(cue);
+    if (d & T_PREV)  Cues::precedent();
+    if (d & T_NEXT)  Cues::suivant();
+    if (d & T_PAUSE) { if (Cues::enLecture()) Cues::pauser(); else Cues::demarrer(); }
+    if (d & T_PLAY)  Cues::demarrer();
 }
 
 // Les etats, lus par r("sys.<nom>"). Publies a chaque changement seulement.
@@ -1329,6 +1406,10 @@ void nidmi_begin() {
     // taches des scripts ne demarrent, pour que le bus n'ait plus qu'a en
     // changer les valeurs (NiDMI.cpp, « LES FONCTIONS DE LA CARTE »).
     publierEtatsSys();
+    /* Le transport : ses options (NVS, une lecture) et qui publie son etat. Le
+       premier etat part a 3 s, avec la liste (elle se lit dans mapfs) — §181. */
+    Cues::restaurerOptions();
+    Cues::surChangement(publierEtatsTransport);
 
     // Initialiser ComponentManager
     g_componentManager.begin(&g_midiRouter);
@@ -1407,9 +1488,25 @@ void nidmi_loop() {
     if (!audioRestaure && millis() > 3000) {
         audioRestaure = true;
         AudioEngine::restaurerAuBoot();
+        Cues::annoncerEtat();           // r("sys.cue")… : le premier état du transport
+        /* LA LECTURE AU DÉMARRAGE (MESURES §181), APRÈS le son : la première cue
+           doit trouver ses échantillons en mémoire. Sautée quand le garde-fou a
+           coupé la restauration — la lecture pourrait être ce qui plante — et
+           sur un démarrage à vide, demandé justement pour ne rien lancer. */
+        if (Cues::lectureAuDemarrage()) {
+            if (AudioEngine::metriques().bootCoupe)
+                NIDMI_WEB_LOG("[cues] lecture au demarrage SAUTEE : le garde-fou a coupe la restauration");
+            else if (nidmi_demarreAVide())
+                NIDMI_WEB_LOG("[cues] lecture au demarrage sautee : demarrage a vide");
+            else {
+                Cues::demarrer();       // la tête est sur la première cue au démarrage
+                NIDMI_WEB_LOG("[cues] lecture au demarrage : cue 1");
+            }
+        }
     }
 
     uint32_t tc = nidmi_section("cues");
+    executerTransport();            // ce que les scripts ont demandé (s("sys.nextcue")…, §181)
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
     nidmi_chrono("cues", tc); tc = nidmi_section("differe");
     Differe::boucle();              // ce qui attend le silence pour s'écrire en flash

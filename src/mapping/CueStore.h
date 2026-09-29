@@ -79,9 +79,37 @@ void  arreter();           // STOP : ferme la porte de silence, decompte a plat
  * a eu la sienne, mais elle coupait le son — « pause » n'etait qu'un arret qui
  * se souvenait de l'heure. Un sequenceur, une pause, et c'en est une. */
 void  pauser();
-void  suivant();           // GO   : cue suivante
+void  suivant();           // GO   : cue suivante — la premiere apres la derniere si la liste boucle, rien sinon
+void  precedent();         // cue precedente (la derniere avant la premiere si la liste boucle)
 bool  aller(int index);    // saut direct
 void  boucle();            // appelee par nidmi_loop : avance les cues minutees
+
+// ── Options du transport (MESURES §181) ──────────────────────────────────
+/* LA LISTE BOUCLE : apres la derniere cue, la suivante est la premiere — pour
+ * GO (l'app, un bouton : s("sys.nextcue")) comme pour l'enchainement minute.
+ * Sans elle, la fin de liste ARRETE (comportement d'origine). */
+void  fixerBoucle(bool oui);
+bool  boucleActive();
+/* LECTURE AU DEMARRAGE : la carte lance la cue 1 seule, a chaque allumage —
+ * l'instrument headless qu'on branche et qui joue. Sautee apres des plantages
+ * consecutifs (le garde-fou coupe la restauration : la lecture pourrait etre
+ * la cause) et sur un demarrage a vide. */
+void  fixerLectureAuDemarrage(bool oui);
+bool  lectureAuDemarrage();
+/* Les deux vivent en NVS (« nidmi-cues ») ; elles valent tout de suite et se
+ * memorisent au silence (Differe, §157). Lues une fois au demarrage. */
+void  restaurerOptions();
+
+/* L'ETAT DU TRANSPORT, pour r("sys.…") : le rappel est appele a CHAQUE
+ * changement — lecture, pause, cue, liste, options —, pas par sondage : un
+ * bouton qui fait GO voit r("sys.cue") changer au tour suivant. `suivante` :
+ * l'index de la cue que GO jouerait, -1 s'il n'y en a pas (fin de liste). */
+struct Etat {
+  bool lecture, pause, boucle, auDemarrage;
+  int  index, suivante, nombre;
+};
+void  surChangement(void (*rappel)(const Etat&));
+void  annoncerEtat();      // republie l'etat (au demarrage, apres une liste)
 
 bool  enLecture();
 bool  enPause();           // gelee — DIFFERENT d'arretee, et le son y coule encore

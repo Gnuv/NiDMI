@@ -27,11 +27,14 @@ static const char VOCABULAIRE_EMBARQUE_JSON[] =
   "\"osc.in\",\"osc.out\",\"pgm.in\",\"pgm.out\",\"polytouch.in\",\"pow\",\"powtodb\",\"print\",\"r\","
   "\"ramp\",\"rand\",\"raw.in\",\"receive\",\"rmstodb\",\"round\",\"s\",\"scale\",\"sel\",\"send\",\"seq\","
   "\"sin\",\"spigot\",\"sqrt\",\"stripnote\",\"tan\",\"toggle\",\"touch.in\",\"touch.out\",\"vel.in\","
-  "\"wrap\",\"|\"],\"sys\":{\"s\":[\"sys.wifi\",\"sys.standalone\",\"sys.cablefirst\",\"sys.reconnect\"],"
-  "\"r\":[\"sys.wifi\",\"sys.cable\",\"sys.standalone\",\"sys.cablefirst\"]}}";
+  "\"wrap\",\"|\"],\"sys\":{\"s\":[\"sys.wifi\",\"sys.standalone\",\"sys.cablefirst\",\"sys.reconnect\","
+  "\"sys.play\",\"sys.stop\",\"sys.pause\",\"sys.nextcue\",\"sys.prevcue\",\"sys.firstcue\",\"sys.cue\","
+  "\"sys.cueloop\",\"sys.autoplay\"],\"r\":[\"sys.wifi\",\"sys.cable\",\"sys.standalone\","
+  "\"sys.cablefirst\",\"sys.play\",\"sys.pause\",\"sys.cue\",\"sys.nextcue\",\"sys.cueloop\","
+  "\"sys.autoplay\"]}}";
 
 // Ce que s("sys.<nom>") commande, pour le message qu'une faute de nom fait
 // ecrire a la carte (NiDMI.cpp) : la meme liste, pas une recopie.
-#define VOCABULAIRE_SYS_COMMANDES "sys.wifi, sys.standalone, sys.cablefirst, sys.reconnect"
+#define VOCABULAIRE_SYS_COMMANDES "sys.wifi, sys.standalone, sys.cablefirst, sys.reconnect, sys.play, sys.stop, sys.pause, sys.nextcue, sys.prevcue, sys.firstcue, sys.cue, sys.cueloop, sys.autoplay"
 
-// 108 objets ; s() commande sys.wifi, sys.standalone, sys.cablefirst, sys.reconnect ; r() relit sys.wifi, sys.cable, sys.standalone, sys.cablefirst.
+// 108 objets ; s() commande sys.wifi, sys.standalone, sys.cablefirst, sys.reconnect, sys.play, sys.stop, sys.pause, sys.nextcue, sys.prevcue, sys.firstcue, sys.cue, sys.cueloop, sys.autoplay ; r() relit sys.wifi, sys.cable, sys.standalone, sys.cablefirst, sys.play, sys.pause, sys.cue, sys.nextcue, sys.cueloop, sys.autoplay.
