@@ -142,9 +142,10 @@ void setupNetworkAPI(AsyncWebServer& server) {
 
     /* RELANCER LE CABLE (MESURES §154) : refaire l'enumeration USB, quand
      * l'hote laisse le cable « inactive » sans jamais le reactiver (§153).
-     * Coupe AUSSI le MIDI USB une a deux secondes — geste manuel (panneau
-     * Carte → Reseau), jamais automatique. Executee par nidmi_loop dans la
-     * seconde ; ici on ne fait que la demander. */
+     * Coupe AUSSI le MIDI USB une a deux secondes — ici, geste manuel (panneau
+     * Carte → Reseau) ; la carte ne la fait d'elle-meme qu'au demarrage, si
+     * aucun geste tenu n'est passe par le MIDI USB (relanceAuDemarrage, §183).
+     * Executee par nidmi_loop dans la seconde ; ici on ne fait que la demander. */
     server.on("/api/reseau/cable/relancer", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!nidmi_usbnet::enabled()) {
             request->send(409, "application/json",
