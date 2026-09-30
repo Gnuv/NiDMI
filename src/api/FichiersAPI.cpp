@@ -14,8 +14,8 @@
 //   DELETE /api/fichier?chemin=    si le genre le permet
 //
 // Chaque genre passe par SON magasin : un son par SampleStore (verifie, jouable
-// des la reponse — §177), un script par ScriptStore, une configuration par
-// Differe (ecrite au silence). La liste de cues et la composition viennent de
+// des la reponse — §177), un script par ScriptStore, une interface enregistree
+// par Differe (ecrite au silence, §190). La liste de cues et la composition viennent de
 // l'app (« Installer ») : elles se telechargent, elles ne se suppriment pas
 // d'ici.
 //
@@ -37,16 +37,18 @@
 #include "../config/EcrituresDifferees.h"
 #include "../mapping/Repertoire.h"
 #include "../config/Instrument.h"
+#include "../config/Interface.h"
 
 namespace {
 
-constexpr const char* DOSSIER_CONFIG = "/config";
 constexpr const char* VOLUME_INTERNE = Stockage::PARTITION;   // LittleFS, la memoire interne
-constexpr size_t      CONFIG_MAX     = 32 * 1024;   // une configuration exportee pese quelques ko
+/* Les interfaces enregistrees sur la carte (§190) : des .interface — des ZIP
+ * que l'app construit —, gardes tels quels. Quelques dizaines de ko. */
+constexpr size_t      INTERFACE_MAX  = 128 * 1024;
 constexpr size_t      LISTE_MAX      = 32 * 1024;   // la reponse de /api/fichiers, en PSRAM
 constexpr int         USAGES_MAX     = 64;
 
-enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Cc, Texte, Configuration, Autre };
+enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Cc, Texte, Interface, Autre };
 
 const char* nomDuGenre(Genre g) {
   switch (g) {
@@ -58,7 +60,7 @@ const char* nomDuGenre(Genre g) {
     case Genre::Options:       return "options";
     case Genre::Cc:            return "cc";
     case Genre::Texte:         return "texte";
-    case Genre::Configuration: return "configuration";
+    case Genre::Interface:     return "interface";
     default:                   return "autre";
   }
 }
@@ -78,7 +80,7 @@ Genre genreDe(const String& chemin) {
   if (chemin == Instrument::LISEZMOI || chemin == Instrument::LISEZMOI_INTERFACE) return Genre::Texte;
   if (dans(chemin, SampleStore::DOSSIER))            return Genre::Son;
   if (dans(chemin, ScriptStore::DOSSIER_INTERFACE))  return Genre::Script;
-  if (dans(chemin, DOSSIER_CONFIG))                  return Genre::Configuration;
+  if (dans(chemin, Interface::DOSSIER_ENREGISTREES)) return Genre::Interface;
   uint8_t numero; String nom, fichier;
   if (Repertoire::decouper(chemin, numero, nom, fichier) && fichier.indexOf('/') < 0) {
     if (fichier == Repertoire::SOURCE)   return Genre::Composition;
@@ -96,7 +98,7 @@ Genre genreDe(const String& chemin) {
 Genre genreTeleverse(const String& nom) {
   String n = nom; n.toLowerCase();
   if (n.endsWith(".wav"))  return Genre::Son;
-  if (n.endsWith(".json")) return Genre::Configuration;
+  if (n.endsWith(".interface")) return Genre::Interface;
   return Genre::Autre;
 }
 
@@ -134,38 +136,6 @@ void repondre(AsyncWebServerRequest* r, int code, const String& message) {
   r->send(code, "application/json",
           String("{\"status\":\"") + (code == 200 ? "ok" : "error") + "\",\"message\":\"" + m + "\"}");
 }
-
-// ── La reponse, ecrite en PSRAM ──────────────────────────────────────────────
-// Le tas interne est le reservoir qui decide (§150) : une liste de fichiers qui
-// grandit par reallocations y laisserait des trous. Un tampon PSRAM, rempli une
-// fois, part tel quel (nidmi_reponse_tampon).
-struct Ecrit {
-  std::shared_ptr<char> t;
-  size_t cap = 0, n = 0;
-  bool deborde = false;
-  void brut(const char* s, size_t k) {
-    if (deborde || n + k >= cap) { deborde = true; return; }
-    memcpy(t.get() + n, s, k); n += k;
-  }
-  void ajouter(const char* s) { brut(s, strlen(s)); }
-  void formater(const char* fmt, ...) {
-    if (deborde) return;
-    va_list a; va_start(a, fmt);
-    const int k = vsnprintf(t.get() + n, cap - n, fmt, a);
-    va_end(a);
-    if (k < 0 || n + (size_t)k >= cap) { deborde = true; return; }
-    n += (size_t)k;
-  }
-  void chaine(const char* s) {                       // une chaine JSON, echappee
-    ajouter("\"");
-    for (; *s; s++) {
-      if (*s == '"' || *s == '\\') { const char e[2] = {'\\', *s}; brut(e, 2); }
-      else if ((uint8_t)*s < 0x20) formater("\\u%04x", (unsigned)(uint8_t)*s);
-      else brut(s, 1);
-    }
-    ajouter("\"");
-  }
-};
 
 // ── Qui s'en sert ────────────────────────────────────────────────────────────
 // Les cues qui nomment un son ou un script (la carte a la liste : c'est elle qui
@@ -303,8 +273,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
                "\"prise_en_charge\":false,\"presente\":false}],",
                VOLUME_INTERNE, (unsigned)total, (unsigned)utilises);
     e.formater("\"televersables\":[{\"extension\":\".wav\",\"genre\":\"son\",\"volume\":\"%s\",\"dossier\":\"%s\"},"
-               "{\"extension\":\".json\",\"genre\":\"configuration\",\"volume\":\"%s\",\"dossier\":\"%s\"}],",
-               VOLUME_INTERNE, SampleStore::DOSSIER, VOLUME_INTERNE, DOSSIER_CONFIG);
+               "{\"extension\":\".interface\",\"genre\":\"interface\",\"volume\":\"%s\",\"dossier\":\"%s\"}],",
+               VOLUME_INTERNE, SampleStore::DOSSIER, VOLUME_INTERNE, Interface::DOSSIER_ENREGISTREES);
     e.ajouter("\"liste\":[");
     bool premier = true;
     int n = 0;
@@ -365,8 +335,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
   /* TELEVERSER. Corps BRUT, le nom en parametre d'URL ; la carte range selon
    * l'extension et DIT pourquoi elle refuse. Un son : verifie, jouable des
    * « ok » (§177) — il s'ecrit tout de suite, c'est l'exception des
-   * televersements, chiffree au §177. Une configuration : gardee en PSRAM,
-   * ecrite au silence (Differe). */
+   * televersements, chiffree au §177. Une interface : un ZIP, gardee en PSRAM,
+   * ecrite au silence (Differe), rangee avec les interfaces enregistrees (§190). */
   server.on("/api/fichier", HTTP_POST,
     [](AsyncWebServerRequest* request) {
       const String nom = request->hasParam("nom") ? request->getParam("nom")->value() : String();
@@ -380,18 +350,17 @@ void setupFichiersAPI(AsyncWebServer& server) {
             "{\"status\":\"ok\",\"chemin\":\"" + String(SampleStore::DOSSIER) + "/" + nom + "\"}");
           return;
         }
-        case Genre::Configuration: {
+        case Genre::Interface: {
           const char* t = (const char*)request->_tempObject;
           const size_t n = request->contentLength();
-          if (!SampleStore::nomValide(nom.c_str(), raison)) { repondre(request, 400, raison); return; }
-          if (!n || n > CONFIG_MAX || !t) {
-            repondre(request, 413, "configuration vide ou trop grosse (" + String((unsigned)CONFIG_MAX) + " o au plus)");
+          const String base = nom.substring(0, nom.length() - strlen(".interface"));
+          if (!Repertoire::nomValide(base, raison)) { repondre(request, 400, raison); return; }
+          if (!n || n > INTERFACE_MAX || !t) {
+            repondre(request, 413, "interface vide ou trop grosse (" + String((unsigned)INTERFACE_MAX) + " o au plus)");
             return;
           }
-          size_t k = 0;
-          while (k < n && isspace((unsigned char)t[k])) k++;
-          if (k == n || t[k] != '{') { repondre(request, 400, "une configuration est un objet JSON"); return; }
-          const String chemin = String(DOSSIER_CONFIG) + "/" + nom;
+          if (n < 4 || memcmp(t, "PK\x03\x04", 4)) { repondre(request, 400, "un .interface est un ZIP"); return; }
+          const String chemin = String(Interface::DOSSIER_ENREGISTREES) + "/" + nom;
           if (!Differe::poserFichierCopie(chemin.c_str(), t, n)) {
             repondre(request, 507, "file des ecritures differees pleine : reessayer au silence");
             return;
@@ -401,7 +370,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
           return;
         }
         default:
-          repondre(request, 415, "la carte range les sons (.wav) et les configurations (.json)");
+          repondre(request, 415, "la carte range les sons (.wav) et les interfaces (.interface)");
       }
     },
     nullptr,
@@ -418,8 +387,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
           }
           SampleStore::ecrireMorceau(request, data, len);
           return;
-        case Genre::Configuration:
-          if (index == 0 && total && total <= CONFIG_MAX)
+        case Genre::Interface:
+          if (index == 0 && total && total <= INTERFACE_MAX)
             request->_tempObject = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
           if (request->_tempObject && index + len <= total)
             memcpy((char*)request->_tempObject + index, data, len);
@@ -430,7 +399,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
     });
 
   /* SUPPRIMER, si le genre le permet. Un son se tait et rend sa PSRAM (§177) ;
-   * un script ou une configuration s'effacent au silence (Differe). */
+   * un script ou une interface enregistree s'effacent au silence (Differe). */
   server.on("/api/fichier", HTTP_DELETE, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
     if (!volumeInterne(request)) { repondre(request, 501, "ce firmware ne lit pas encore de carte SD"); return; }

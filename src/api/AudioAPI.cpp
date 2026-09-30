@@ -119,6 +119,11 @@ void setupAudioAPI(AsyncWebServer& server) {
          * `false` ici veut dire : les blocs de synthese ne sonneront pas sur
          * elle ; les echantillons, si. */
         json += "\"synthese\":" + String(AudioEngine::syntheseLourdeDisponible() ? "true" : "false") + ",";
+        /* LES MOTEURS QUE CETTE IMAGE JOUE (CONVERGENCE §9.7, MESURES §190) : un
+         * fichier de composition les compare aux siens avant d'arriver. Dits par
+         * la carte, pas devines par l'app. */
+        json += String("\"moteurs\":[\"trig-wav\",\"midi-script\"")
+              + (AudioEngine::syntheseLourdeDisponible() ? ",\"plaits\"" : "") + "],";
         json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,

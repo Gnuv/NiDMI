@@ -27,6 +27,7 @@ void setupSystemAPI(AsyncWebServer& server);
 void setupOtaAPI(AsyncWebServer& server);
 void setupAudioAPI(AsyncWebServer& server);
 void setupFichiersAPI(AsyncWebServer& server);
+void setupInterfaceAPI(AsyncWebServer& server);
 
 Preferences preferences;
 
@@ -603,4 +604,5 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
     setupOtaAPI(server);
     setupAudioAPI(server);
     setupFichiersAPI(server);
+    setupInterfaceAPI(server);
 }

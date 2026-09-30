@@ -426,6 +426,11 @@ void oublierSous(const char* prefixe) {
   }
 }
 
+void nvsEcrireMaintenant() {
+  const unsigned long now = millis();
+  for (int i = 0; i < MAX_NVS; i++) traiterNvs(i, now, true);
+}
+
 void toutEcrireMaintenant() {
   const unsigned long now = millis();
   for (int i = 0; i < MAX_FICHIERS; i++) traiterFichier(i, now, true);

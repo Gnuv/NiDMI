@@ -68,6 +68,9 @@ bool nvsEnAttente(const char* espace, const char* cle);
 // ── La boucle ────────────────────────────────────────────────────────────
 void boucle();                 // nidmi_loop : ecrit ce qui attend, au silence
 void toutEcrireMaintenant();   // avant un redemarrage voulu
+/* Les valeurs NVS qui attendent, ecrites maintenant : un document qui dit ce
+ * que la carte porte — l'interface (§190) — se lit dans la NVS. */
+void nvsEcrireMaintenant();
 bool enAttente();
 uint16_t nombreEnAttente();    // fichiers + valeurs NVS
 /* Le rappel est appele depuis la boucle quand ce nombre change (relu tous les

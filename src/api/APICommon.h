@@ -15,6 +15,7 @@
 
 #include <esp_heap_caps.h>
 #include <memory>
+#include <stdarg.h>
 
 /* ── UN TAMPON DE REPONSE QUI VIT JUSQU'AU DERNIER ENVOI ─────────────────
  * Une reponse longue part par morceaux, APRES le retour du gestionnaire. Son
@@ -29,6 +30,39 @@ inline std::shared_ptr<char> nidmi_tampon_reponse(size_t taille) {
     if (!p) return nullptr;
     return std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); });
 }
+
+/* ── UNE REPONSE ECRITE EN PSRAM ─────────────────────────────────────────
+ * Le tas interne est le reservoir qui decide (§150) : une reponse qui grandit
+ * par reallocations y laisserait des trous. Un tampon PSRAM, rempli une fois,
+ * part tel quel (nidmi_reponse_tampon). `deborde` : le tampon etait trop petit —
+ * la reponse est a refuser, pas a tronquer. */
+struct Ecrit {
+    std::shared_ptr<char> t;
+    size_t cap = 0, n = 0;
+    bool deborde = false;
+    void brut(const char* s, size_t k) {
+        if (deborde || n + k >= cap) { deborde = true; return; }
+        memcpy(t.get() + n, s, k); n += k;
+    }
+    void ajouter(const char* s) { brut(s, strlen(s)); }
+    void formater(const char* fmt, ...) {
+        if (deborde) return;
+        va_list a; va_start(a, fmt);
+        const int k = vsnprintf(t.get() + n, cap - n, fmt, a);
+        va_end(a);
+        if (k < 0 || n + (size_t)k >= cap) { deborde = true; return; }
+        n += (size_t)k;
+    }
+    void chaine(const char* s) {                       // une chaine JSON, echappee
+        ajouter("\"");
+        for (; *s; s++) {
+            if (*s == '"' || *s == '\\') { const char e[2] = {'\\', *s}; brut(e, 2); }
+            else if ((uint8_t)*s < 0x20) formater("\\u%04x", (unsigned)(uint8_t)*s);
+            else brut(s, 1);
+        }
+        ajouter("\"");
+    }
+};
 
 /** La reponse qui lit `n` octets de ce tampon, sans copie intermediaire. */
 inline AsyncWebServerResponse* nidmi_reponse_tampon(AsyncWebServerRequest* request, const char* type,
