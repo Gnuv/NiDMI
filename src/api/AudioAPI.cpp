@@ -13,6 +13,7 @@
 #include "../mapping/CueStore.h"
 #include "../mapping/CompoStore.h"
 #include "../mapping/Repertoire.h"
+#include "../config/Instrument.h"
 
 /* LE SUIVI S'ADRESSE A UNE COMPOSITION (CONVERGENCE §9.7, MESURES §186). Un
  * onglet qui ecrit dit laquelle il croit ouverte (`compo=N`) ; si un bouton ou
@@ -700,6 +701,103 @@ void setupAudioAPI(AsyncWebServer& server) {
     server.on("/api/compositions", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send(200, "application/json", Repertoire::listerJson());
     });
+
+    /* L'INSTRUMENT : son nom (CONVERGENCE §9.7, MESURES §188) — en tete de la
+     * barre de titre, pour s'y retrouver dans les sauvegardes. Hors de
+     * l'interface ; vide : pas de nom. */
+    server.on("/api/instrument", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", "{\"nom\":" + Repertoire::jsonDe(Instrument::nom()) + "}");
+    });
+    server.on("/api/instrument", HTTP_POST, [=](AsyncWebServerRequest *request){
+        String raison;
+        if (!Instrument::renommer(parametre(request, "nom"), raison)) {
+            raison.replace("\"", "'");
+            request->send(409, "application/json", "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+            return;
+        }
+        request->send(200, "application/json",
+                      "{\"status\":\"ok\",\"nom\":" + Repertoire::jsonDe(Instrument::nom()) + "}");
+    });
+
+    /* LES README.txt (CONVERGENCE §9.7, MESURES §188) : le texte d'instructions,
+     * ecrit a la main, a chaque niveau — quoi=composition (numero=N ; sans
+     * numero, l'ouverte), quoi=interface, quoi=instrument. GET le rend (204 : il
+     * n'y en a pas). POST le pose, en corps brut (texte, UTF-8) : il vaut tout
+     * de suite et s'ecrit au silence (Differe) ; un corps vide le retire. Une
+     * composition visee par son numero peut dire le nom qu'on lui connait
+     * (nom=…) : renommee ou renumerotee entre-temps par un autre geste, la carte
+     * refuse (409) plutot que d'ecrire dans une autre. */
+    constexpr size_t LISEZMOI_MAX = 16 * 1024;
+    auto cheminLisezmoi = [=](AsyncWebServerRequest* r, String& chemin, String& raison) -> bool {
+        const String quoi = parametre(r, "quoi");
+        if (quoi == "instrument") { chemin = Instrument::LISEZMOI; return true; }
+        if (quoi == "interface")  { chemin = Instrument::LISEZMOI_INTERFACE; return true; }
+        if (quoi != "composition") { raison = "quoi : composition, interface ou instrument"; return false; }
+        const String n = parametre(r, "numero");
+        const uint8_t numero = n.length() ? (uint8_t)n.toInt() : Repertoire::numeroOuvert();
+        String nom;
+        const String dossier = Repertoire::dossierDe(numero, &nom, raison);
+        if (!dossier.length()) return false;
+        const String attendu = parametre(r, "nom");
+        if (attendu.length() && attendu != nom) {
+            raison = "le n°" + String((unsigned)numero) + " s'appelle maintenant « " + nom + " »";
+            return false;
+        }
+        chemin = dossier + "/" + Repertoire::LISEZMOI;
+        return true;
+    };
+    auto refuserLisezmoi = [](AsyncWebServerRequest* r, String raison) {
+        raison.replace("\"", "'");
+        r->send(409, "application/json", "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+    };
+    server.on("/api/lisezmoi", HTTP_GET, [=](AsyncWebServerRequest *request){
+        String chemin, raison;
+        if (!cheminLisezmoi(request, chemin, raison)) { refuserLisezmoi(request, raison); return; }
+        std::shared_ptr<char> t; size_t n = 0;
+        if (!Differe::lire(chemin.c_str(), t, n) || !n) { request->send(204); return; }
+        request->send(nidmi_reponse_tampon(request, "text/plain; charset=utf-8", t, n));
+    });
+    server.on("/api/lisezmoi", HTTP_POST,
+        [=](AsyncWebServerRequest *request){
+            String chemin, raison;
+            if (!cheminLisezmoi(request, chemin, raison)) { refuserLisezmoi(request, raison); return; }
+            const size_t n = request->contentLength();
+            if (n > LISEZMOI_MAX) {
+                request->send(413, "application/json", "{\"status\":\"error\",\"message\":\"README trop long : "
+                              + String((unsigned)LISEZMOI_MAX) + " octets au plus\"}");
+                return;
+            }
+            char* p = (char*)request->_tempObject;
+            if (n && !p) {
+                request->send(507, "application/json",
+                    "{\"status\":\"error\",\"message\":\"pas de place en PSRAM pour le recevoir\"}");
+                return;
+            }
+            bool pose;
+            if (!n) {
+                pose = Differe::supprimerFichier(chemin.c_str());
+            } else {
+                request->_tempObject = nullptr;   // Differe le garde : le serveur ne le liberera pas
+                pose = Differe::poserFichier(chemin.c_str(),
+                                             std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n);
+            }
+            if (!pose) {
+                request->send(503, "application/json",
+                    "{\"status\":\"error\",\"message\":\"trop d'ecritures en attente du silence : reessayer\"}");
+                return;
+            }
+            request->send(200, "application/json", "{\"status\":\"ok\",\"octets\":" + String((unsigned)n)
+                          + ",\"message\":\"vaut tout de suite, ecrit en flash au premier silence\"}");
+        },
+        nullptr,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+            if (index == 0) {
+                if (!total || total > LISEZMOI_MAX) return;       // refuse a la fin
+                request->_tempObject = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
+            if (request->_tempObject && index + len <= total)
+                memcpy((char*)request->_tempObject + index, data, len);
+        });
 
 server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request){
         /* `actif` : le nom de l'emplacement 0 — conserve pour ne pas casser

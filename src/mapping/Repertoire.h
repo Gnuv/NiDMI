@@ -103,4 +103,16 @@ bool supprimer(uint8_t numero, String& raison);
  * apres la derniere la premiere. 0 : aucune autre. */
 uint8_t voisine(int sens);
 
+/* Le dossier nomme de la composition n°N ("" et la raison si elle n'y est
+ * pas) — pour ce qui vise une composition par son numero, ouverte ou non : son
+ * README (§188). */
+String dossierDe(uint8_t numero, String* nom, String& raison);
+
+/* Redire aux onglets « NIDMI_REPERTOIRE:<ouverte> » : ce qu'affiche leur barre
+ * de titre a change — un geste du repertoire, ou le nom de l'instrument. */
+void annoncer();
+
+// Un texte en chaine JSON, guillemets compris.
+String jsonDe(const String& texte);
+
 }  // namespace Repertoire

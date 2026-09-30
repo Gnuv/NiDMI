@@ -352,7 +352,33 @@ bool nvsEnAttente(const char* espace, const char* cle) {
   return false;
 }
 
+namespace {
+void (*s_rappelAttente)(uint16_t) = nullptr;
+int   s_annonce = -1;                  // le dernier nombre annonce
+}
+
+void surAttente(void (*rappel)(uint16_t)) { s_rappelAttente = rappel; }
+
+uint16_t nombreEnAttente() {
+  uint16_t n = 0;
+  Garde g;
+  for (auto& f : fichiers) if (f.actif) n++;
+  for (auto& v : nvs)      if (v.actif) n++;
+  return n;
+}
+
 void boucle() {
+  /* L'ANNONCE : le nombre d'ecritures qui attendent, dit quand il change. La
+   * boucle tourne chaque milliseconde ; le compte se relit tous les 100 ms. */
+  {
+    static uint32_t dernier = 0;
+    const uint32_t t = millis();
+    if (s_rappelAttente && t - dernier >= 100) {
+      dernier = t;
+      const uint16_t n = nombreEnAttente();
+      if ((int)n != s_annonce) { s_annonce = n; s_rappelAttente(n); }
+    }
+  }
   if (!enAttente()) return;
   if (!AudioEngine::silencePourLaFlash()) return;
   const unsigned long now = millis();

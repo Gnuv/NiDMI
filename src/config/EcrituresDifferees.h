@@ -69,6 +69,11 @@ bool nvsEnAttente(const char* espace, const char* cle);
 void boucle();                 // nidmi_loop : ecrit ce qui attend, au silence
 void toutEcrireMaintenant();   // avant un redemarrage voulu
 bool enAttente();
+uint16_t nombreEnAttente();    // fichiers + valeurs NVS
+/* Le rappel est appele depuis la boucle quand ce nombre change (relu tous les
+ * 100 ms au plus) : les onglets le savent sans sonder, et la barre de titre de
+ * l'app dit « en attente du silence » (CONVERGENCE §9.7, MESURES §188). */
+void surAttente(void (*rappel)(uint16_t nombre));
 
 /** Les fichiers de storage ont change — ecrits ou supprimes, ici ou par un
  *  televersement. Ce qu'on mesurait de leur occupation est a refaire (et se

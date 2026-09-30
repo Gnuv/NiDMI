@@ -36,6 +36,7 @@
 #include "../midi/MidiRouter.h"
 #include "../config/EcrituresDifferees.h"
 #include "../mapping/Repertoire.h"
+#include "../config/Instrument.h"
 
 namespace {
 
@@ -73,6 +74,8 @@ bool dans(const String& chemin, const char* dossier) {
  * broche dans interface/scripts/, et dans une composition — compositions/<nn>/
  * <nom>/ — des noms generiques qui disent chacun ce qu'ils sont. */
 Genre genreDe(const String& chemin) {
+  // Les README au-dessus des compositions : l'instrument, l'interface (§188).
+  if (chemin == Instrument::LISEZMOI || chemin == Instrument::LISEZMOI_INTERFACE) return Genre::Texte;
   if (dans(chemin, SampleStore::DOSSIER))            return Genre::Son;
   if (dans(chemin, ScriptStore::DOSSIER_INTERFACE))  return Genre::Script;
   if (dans(chemin, DOSSIER_CONFIG))                  return Genre::Configuration;

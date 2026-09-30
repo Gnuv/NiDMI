@@ -148,7 +148,7 @@ bool effacerDossier(const String& dossier, int profondeur = 0) {
   return LittleFS.rmdir(dossier) && ok;
 }
 
-void annoncer() {
+void annoncerIci() {
   char trame[32];
   snprintf(trame, sizeof trame, "NIDMI_REPERTOIRE:%u", (unsigned)_numero);
   nidmi_ws_pousser(trame);
@@ -186,6 +186,20 @@ void ecrireJson(String& j, const String& s) {
 }
 
 }  // namespace
+
+void annoncer() { annoncerIci(); }
+
+String jsonDe(const String& texte) { String j; ecrireJson(j, texte); return j; }
+
+String dossierDe(uint8_t numero, String* nom, String& raison) {
+  String n;
+  if (!numero || !monter() || !nomSous(numero, n, &raison)) {
+    raison = "n°" + String((unsigned)numero) + " : " + (raison.length() ? raison : String("absente"));
+    return String();
+  }
+  if (nom) *nom = n;
+  return dossierIndex(numero) + "/" + n;
+}
 
 bool nomValide(const String& nom, String& raison) {
   if (!nom.length()) { raison = "nom vide"; return false; }
@@ -290,7 +304,12 @@ bool decouper(const String& chemin, uint8_t& numero, String& nom, String& fichie
 }
 
 String listerJson() {
-  String j = "{\"ouverte\":" + String((unsigned)numeroOuvert()) + ",\"compositions\":[";
+  /* `ecritures_en_attente` : ce qui attend le silence pour s'ecrire en flash —
+   * la barre de titre de l'app le dit (§188) ; ensuite, les onglets l'apprennent
+   * par NIDMI_ECRITURES. */
+  String j = "{\"ouverte\":" + String((unsigned)numeroOuvert())
+           + ",\"ecritures_en_attente\":" + String((unsigned)Differe::nombreEnAttente())
+           + ",\"compositions\":[";
   bool premier = true;
   if (monter()) {
     chaqueNumero([&](uint8_t n) {
@@ -323,7 +342,7 @@ bool ouvrir(uint8_t numero, String& raison) {
   Differe::nvsOctet(NVS_ESPACE, NVS_CLE, numero);           // au silence (§157)
   NIDMI_WEB_LOG("[repertoire] ouverte : n°%02u « %s »", (unsigned)numero, nom.c_str());
   if (_recharger) _recharger();
-  annoncer();
+  annoncerIci();
   return true;
 }
 
@@ -377,7 +396,7 @@ bool enregistrerSous(const String& nom, uint8_t numero, String& raison, uint8_t&
   obtenu = n;
   NIDMI_WEB_LOG("[repertoire] enregistree sous : n°%02u « %s » (%d fichier(s)) — on continue sur la copie",
                 (unsigned)n, nom.c_str(), copies);
-  annoncer();
+  annoncerIci();
   return true;
 }
 
@@ -404,7 +423,7 @@ bool renommer(uint8_t numero, const String& nom, String& raison) {
   Differe::noterFichiersModifies();
   if (!ok) { raison = "renommage impossible"; return false; }
   NIDMI_WEB_LOG("[repertoire] n°%02u renommee « %s »", (unsigned)numero, nom.c_str());
-  annoncer();
+  annoncerIci();
   return true;
 }
 
@@ -430,7 +449,7 @@ bool changerNumero(uint8_t de, uint8_t vers, String& raison) {
   if (!ok) { raison = "deplacement impossible"; return false; }
   if (numeroOuvert() == vers) Differe::nvsOctet(NVS_ESPACE, NVS_CLE, vers);
   NIDMI_WEB_LOG("[repertoire] « %s » : n°%02u -> n°%02u", nom.c_str(), (unsigned)de, (unsigned)vers);
-  annoncer();
+  annoncerIci();
   return true;
 }
 
@@ -450,7 +469,7 @@ bool supprimer(uint8_t numero, String& raison) {
   Differe::noterFichiersModifies();
   if (!ok) { raison = "effacement incomplet"; return false; }
   NIDMI_WEB_LOG("[repertoire] n°%02u supprimee", (unsigned)numero);
-  annoncer();
+  annoncerIci();
   return true;
 }
 
