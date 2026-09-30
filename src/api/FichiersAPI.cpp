@@ -45,7 +45,7 @@ constexpr size_t      CONFIG_MAX     = 32 * 1024;   // une configuration exporte
 constexpr size_t      LISTE_MAX      = 32 * 1024;   // la reponse de /api/fichiers, en PSRAM
 constexpr int         USAGES_MAX     = 64;
 
-enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Texte, Configuration, Autre };
+enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Cc, Texte, Configuration, Autre };
 
 const char* nomDuGenre(Genre g) {
   switch (g) {
@@ -55,6 +55,7 @@ const char* nomDuGenre(Genre g) {
     case Genre::Composition:   return "composition";
     case Genre::Chaine:        return "chaine";
     case Genre::Options:       return "options";
+    case Genre::Cc:            return "cc";
     case Genre::Texte:         return "texte";
     case Genre::Configuration: return "configuration";
     default:                   return "autre";
@@ -81,6 +82,7 @@ Genre genreDe(const String& chemin) {
     if (fichier == Repertoire::CUES)     return Genre::Cues;
     if (fichier == Repertoire::CHAINE)   return Genre::Chaine;
     if (fichier == Repertoire::OPTIONS)  return Genre::Options;
+    if (fichier == Repertoire::CC)       return Genre::Cc;
     if (fichier == Repertoire::LISEZMOI) return Genre::Texte;
     if (fichier.endsWith(".nms"))        return Genre::Script;
   }
@@ -95,11 +97,12 @@ Genre genreTeleverse(const String& nom) {
   return Genre::Autre;
 }
 
-/* La source, la liste de cues, la chaine et les options d'une composition
- * viennent de l'app : les supprimer d'ici laisserait la carte jouer ce que plus
- * rien ne decrit. « Installer » les remplace. */
+/* La source, la liste de cues, la chaine, les options et les CC appris d'une
+ * composition viennent de l'app : les supprimer d'ici laisserait la carte jouer
+ * ce que plus rien ne decrit. « Installer » les remplace. */
 bool supprimable(Genre g) {
-  return g != Genre::Cues && g != Genre::Composition && g != Genre::Chaine && g != Genre::Options;
+  return g != Genre::Cues && g != Genre::Composition && g != Genre::Chaine && g != Genre::Options
+      && g != Genre::Cc;
 }
 
 // Absolu, sans remontee, court, et pas une ecriture en cours (.tmp de Differe,

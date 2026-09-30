@@ -16,7 +16,7 @@
  * décrit ce qui EST, pas ce qui pourrait être.
  *
  * Une occupation vient donc d'une DÉCLARATION :
- *   - audio : un process est mémorisé (nidmi-audio/moteur) ou l'I2S tourne ;
+ *   - audio : le DAC est déclaré (composant « dac_i2s » — voir rafraichir()) ;
  *   - i2c / spi / uart : une clé pin_I2C / pin_SPI / pin_TX / pin_RX existe.
  *
  * Et elle vaut dans les DEUX SENS : on refuse un composant sur une broche

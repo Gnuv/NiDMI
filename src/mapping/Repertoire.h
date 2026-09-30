@@ -14,6 +14,7 @@
 //     cues.txt           ce que la carte execute
 //     chain.txt          les maillons permanents de la chaine (MidiRouter)
 //     options.txt        « la liste boucle »
+//     cc.txt             les CC appris : quel potentiometre pilote quel parametre
 //     README.txt         les instructions, ecrites a la main
 //     *.nms              les scripts de ses cues et de sa chaine, A PLAT
 // A plat : sur cette flash, un dossier coute deux blocs de 4 Ko (LittleFS range
@@ -39,6 +40,7 @@ constexpr const char* SOURCE   = "composition.json";
 constexpr const char* CUES     = "cues.txt";
 constexpr const char* CHAINE   = "chain.txt";
 constexpr const char* OPTIONS  = "options.txt";
+constexpr const char* CC       = "cc.txt";
 constexpr const char* LISEZMOI = "README.txt";
 
 /* Au demarrage, AVANT les magasins (composition, cues, chaine) : retrouve la

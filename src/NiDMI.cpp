@@ -156,8 +156,8 @@ extern "C" const char* nidmi_redemarrageDemandePar() { return s_redemPar; }
  * pour toujours apres un geste de depannage est un piege sur scene.
  *
  * Desormais le demarrage a vide vaut pour UN demarrage : un drapeau en RTC,
- * consomme par restaurerAuBoot(). La NVS n'est pas touchee — le choix du son
- * reste celui de l'utilisateur, et il revient au redemarrage suivant. */
+ * consomme par restaurerAuBoot(). Rien n'est touche — le son est celui que la
+ * composition ouverte emploie, et il revient au redemarrage suivant. */
 extern "C" void nidmi_demanderDemarrageAVide() { s_aVideMagie = AVIDE_MAGIE; }
 extern "C" bool nidmi_prendreDemarrageAVide() {
     const bool oui = (s_aVideMagie == AVIDE_MAGIE);
@@ -801,7 +801,13 @@ static void rechargerComposition(){
     AudioEngine::arreterEchantillon();
     Compo::recharger();
     g_midiRouter.rechargerChaine();
+    CcMap::recharger();             // ses CC appris (§187)
     Cues::recharger();
+    /* Le moteur qu'elle emploie, deduit de ses cues, se prepare comme au
+       demarrage — ses sons en memoire avant sa premiere cue (§187). */
+    String son;
+    const int moteur = Cues::moteurEmploye(son);
+    AudioEngine::preparer(moteur, son.c_str());
     if (Cues::lectureAuDemarrage()) Cues::demarrer();
 }
 
@@ -1391,8 +1397,8 @@ void nidmi_begin() {
        navigateur pour lui redire quoi faire. Tout vient de la composition :
        chain.txt et ses scripts (MESURES §186). */
     g_midiRouter.restaurerScript();
-    // La table CC -> parametre revient elle aussi de la NVS : sans elle, un
-    // redemarrage rendait muets tous les potentiometres appris.
+    // La table CC -> parametre de la composition ouverte, son cc.txt (§187) :
+    // sans elle, un redemarrage rendait muets tous les potentiometres appris.
     CcMap::monter();
 
     /* print() d'un .nms : au journal ET vers l'app.
@@ -1558,7 +1564,11 @@ void nidmi_loop() {
     static bool audioRestaure = false;
     if (!audioRestaure && millis() > 3000) {
         audioRestaure = true;
-        AudioEngine::restaurerAuBoot();
+        /* Le moteur que la composition ouverte EMPLOIE, deduit de ses cues —
+           plus aucun choix memorise a cote (MESURES §187). */
+        String son;
+        const int moteur = Cues::moteurEmploye(son);
+        AudioEngine::restaurerAuBoot(moteur, son.c_str());
         Cues::annoncerEtat();           // r("sys.cue")… : le premier état du transport
         /* LA LECTURE AU DÉMARRAGE (MESURES §181), APRÈS le son : la première cue
            doit trouver ses échantillons en mémoire. Sautée quand le garde-fou a

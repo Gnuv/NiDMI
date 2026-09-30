@@ -64,6 +64,12 @@ bool   monter();
 void   recharger();
 int    nombre();                       // compte les lignes utiles
 bool   lire(int index, Cue& sortie);   // decode la cue N (texte en PSRAM)
+/* LE MOTEUR QUE LA COMPOSITION EMPLOIE (MESURES §187) : celui de la premiere
+ * cue qui en nomme un — -2 le lecteur d'echantillons, et `son` le premier son
+ * qu'elle nomme (le clavier le jouera) ; 0..23 un moteur de synthese ; -1
+ * aucun. DEDUIT de la liste, jamais memorise a cote : c'est ce que la carte
+ * prepare au demarrage et a chaque ouverture d'une composition. */
+int    moteurEmploye(String& son);
 bool   ecrireTout(const String& contenu);
 String contenu();                      // le fichier brut, pour l'app
 

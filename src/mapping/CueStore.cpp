@@ -76,6 +76,33 @@ bool _ligneUtile(const String& l) {
   return t.length() && !t.startsWith("#");
 }
 
+/* Le premier son d'une liste « a.wav,b.wav » : celui que le clavier jouera —
+ * a l'arrivee sur la cue (_appliquer) comme au demarrage (moteurEmploye). */
+String _premierSon(const String& noms) {
+  const int v = noms.indexOf(',');
+  String p = (v < 0) ? noms : noms.substring(0, v);
+  p.trim();
+  return p;
+}
+
+/* La valeur de `cle` dans « cle=valeur;cle=valeur » ; "" si elle n'y est pas. */
+String _valeurDe(const String& params, const char* cle) {
+  int debut = 0;
+  while (debut < (int)params.length()) {
+    int fin = params.indexOf(';', debut);
+    if (fin < 0) fin = params.length();
+    const String kv = params.substring(debut, fin);
+    debut = fin + 1;
+    const int eq = kv.indexOf('=');
+    if (eq <= 0) continue;
+    String k = kv.substring(0, eq); k.trim();
+    if (k != cle) continue;
+    String v = kv.substring(eq + 1); v.trim();
+    return v;
+  }
+  return String("");
+}
+
 /* ── AUTOMATION : LES COURBES DE LA CUE COURANTE ───────────────────────────
  * Reechantillonnees par l'app (voir CueStore.h), donc ici : un tableau de
  * nombres par parametre, et une interpolation lineaire sur la duree de la cue.
@@ -254,11 +281,9 @@ void _appliquer(const Cue& c) {
     } else {
       /* Armer le lecteur une fois — il ne charge rien, tout est deja en PSRAM.
        * Le premier nom sert d'echantillon par defaut au clavier. */
-      String premier = noms.substring(0, (noms.indexOf(',') < 0) ? noms.length()
-                                                                 : noms.indexOf(','));
-      premier.trim();
+      const String premier = _premierSon(noms);
       String raison;
-      if (!AudioEngine::setSampler(premier.c_str(), raison, /*persister=*/false))
+      if (!AudioEngine::setSampler(premier.c_str(), raison))
         Serial.printf("[cues] lecteur non arme : %s\n", raison.c_str());
 
       int dn = 0, db = 0, dg = 0, dk = 0, rang = 0;
@@ -324,7 +349,7 @@ void _appliquer(const Cue& c) {
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.
   if (c.engine >= 0) {
-    AudioEngine::setEngine(c.engine, false);      // false : une cue n'ecrit pas la NVS
+    AudioEngine::setEngine(c.engine);
     if (c.params.length()) {
       AudioEngine::Params p = AudioEngine::params();
       /* Le VOLUME voyage dans la meme chaine de parametres mais ne vit pas dans
@@ -503,6 +528,28 @@ bool lire(int index, Cue& sortie) {
     return false;
   });
   return trouve;
+}
+
+int moteurEmploye(String& son) {
+  son = "";
+  if (!monter()) return -1;
+  size_t n = 0;
+  auto t = _texteCourant(n);
+  if (!t) return -1;
+  int moteur = -1;
+  _pourChaqueLigne(t.get(), n, [&](const String& l) {
+    if (!_ligneUtile(l)) return true;
+    const String e = _champ(l, 3);
+    const int m = e.length() ? e.toInt() : -1;
+    if (m >= 0) { moteur = m; return false; }
+    if (m != -2) return true;
+    const String premier = _premierSon(_valeurDe(_champ(l, 4), "sample"));
+    if (!premier.length()) return true;          // un bloc sans son : la suivante
+    son = premier;
+    moteur = -2;
+    return false;
+  });
+  return moteur;
 }
 
 bool ecrireTout(const String& contenuTexte) {

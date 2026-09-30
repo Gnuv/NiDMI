@@ -17,11 +17,13 @@
 // La cible decide seule de sa famille (voir estParamAudio) : l'app n'a pas a
 // dire laquelle, et un futur parametre de script ne demande aucun code ici.
 //
-// PERSISTANCE : la table vit en NVS, pas en LittleFS. C'est le meme partage que
-// le script — le CONTENU d'un .nms est gros et va dans storage, la CONFIGURATION
-// est minuscule et va en NVS, pour que la carte se retrouve entiere au
-// demarrage sans monter de systeme de fichiers. Douze affectations tiennent
-// dans quelques centaines d'octets.
+// PERSISTANCE : la table est celle de la COMPOSITION OUVERTE — son cc.txt
+// (CONVERGENCE §9.7, MESURES §187). Elle vivait en NVS, commune a toute la
+// carte : ouvrir une autre composition gardait les potentiometres de la
+// precedente, et un CC appris sur « harmonics » visait le moteur d'une piece qui
+// n'en avait plus. Les CC appris visent des parametres du moteur : ils sont a la
+// composition, comme ses cues. Une affectation par ligne, sous un en-tete qui
+// dit le format — le fichier se lit dans le Finder, sans NiDMI.
 #pragma once
 
 #include <Arduino.h>
@@ -39,8 +41,13 @@ struct Entree {
     float   min, max;   // bornes dans lesquelles on etale la valeur 0..127
 };
 
-// Restaure la table memorisee. A appeler une fois au demarrage.
+// La table de la composition ouverte. A appeler une fois au demarrage, apres
+// Repertoire::demarrer().
 void monter();
+/* La composition ouverte a change (Repertoire::ouvrir) : l'apprentissage en
+ * cours s'abandonne, la table de la nouvelle la remplace — vide si elle n'en a
+ * pas. */
+void recharger();
 
 // Un CC vient d'arriver. Applique toutes les affectations qui le visent
 // (plusieurs cibles peuvent partager un CC) et renvoie leur nombre.
@@ -58,13 +65,15 @@ const char* cibleArmee();
 bool apprendre(uint8_t canal, uint8_t cc);
 
 // ── Serialisation ────────────────────────────────────────────────────────────
-// Format texte, une affectation par ';' et cinq champs par ':' :
+// Format texte, cinq champs par ':' — une affectation par ';' pour l'API, par
+// ligne dans cc.txt (les deux se lisent ; '#' ouvre un commentaire) :
 //     canal:cc:cible:min:max;canal:cc:cible:min:max
 // Pas de JSON : aucune bibliotheque a bord, et le budget de tas se compte en
 // milliers d'octets (meme raison que CueStore).
 String texte();
-bool   setTexte(const String& t, bool persister);
-void   vider(bool persister);
+// La table remplacee, et memorisee dans la composition ouverte (au silence).
+bool   setTexte(const String& t);
+void   vider();
 
 // Vrai si le nom designe un parametre du moteur audio (les autres sont des
 // parametres de script, ecrits dans le FluxRegistry).

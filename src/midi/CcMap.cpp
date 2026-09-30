@@ -2,16 +2,21 @@
 #include "../config/EcrituresDifferees.h"
 
 #include <Preferences.h>
+#include <memory>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 #include "../audio/AudioEngine.h"
 #include "../mapping/MappingEngine.h"   // FluxRegistry
+#include "../mapping/Repertoire.h"      // cc.txt de la composition ouverte
 
 namespace {
 
-constexpr const char* NVS_ESPACE = "nidmi-midi";   // partage avec le nom de script
-constexpr const char* NVS_CLE    = "ccmap";
+/* L'ancienne place de la table, commune a toute la carte : la cle ne sert plus
+ * qu'a etre effacee, une fois, au demarrage (§187). */
+constexpr const char* NVS_ESPACE_RETIRE = "nidmi-midi";
+constexpr const char* NVS_CLE_RETIREE   = "ccmap";
+constexpr const char* ENTETE = "# canal:cc:cible:min:max (canal 0 = tous) — les CC appris de cette composition\n";
 
 CcMap::Entree s_table[CcMap::MAX];
 int           s_nb = 0;
@@ -35,10 +40,23 @@ struct Verrou {
     ~Verrou() { if (s_verrou) xSemaphoreGiveRecursive(s_verrou); }
 };
 
-// Au premier silence (§157) : apprendre un CC en jouant ne doit pas couter le son.
-void ecrireNvs(const String& t) {
-    if (t.length()) Differe::nvsChaine(NVS_ESPACE, NVS_CLE, t);
-    else            Differe::nvsRetirer(NVS_ESPACE, NVS_CLE);
+/* Dans la composition ouverte, au premier silence (§157) : apprendre un CC en
+ * jouant ne doit pas couter le son. Une table vide n'a pas de fichier. */
+void memoriser(const String& t) {
+    if (!t.length()) {
+        const String chemin = Repertoire::chemin(Repertoire::CC);
+        if (chemin.length()) Differe::supprimerFichier(chemin.c_str());
+        return;
+    }
+    String raison;
+    if (!Repertoire::assurerOuverte("", raison)) {
+        Serial.printf("[CcMap] table NON memorisee : %s\n", raison.c_str());
+        return;
+    }
+    String corps = t;
+    corps.replace(';', '\n');
+    const String f = String(ENTETE) + corps + "\n";
+    Differe::poserFichierCopie(Repertoire::chemin(Repertoire::CC).c_str(), f.c_str(), f.length());
 }
 
 // Etale 0..127 dans [min, max]. 127 (et non 128) pour que la butee haute du
@@ -72,9 +90,8 @@ static void poser(const Entree& e, uint8_t valeur) {
     }
     if (!strcmp(e.cible, "engine")) {
         // Un CC qui balaie les moteurs demande une allocation a chaque cran :
-        // setEngine s'en garde lui-meme (il refuse sous le seuil de tas) et ne
-        // persiste pas — un geste de jeu ne redefinit pas le defaut du boitier.
-        AudioEngine::setEngine((int)lroundf(v), /*persister=*/false);
+        // setEngine s'en garde lui-meme (il refuse sous le seuil de tas).
+        AudioEngine::setEngine((int)lroundf(v));
         return;
     }
     AudioEngine::Params p = AudioEngine::params();
@@ -147,7 +164,7 @@ bool apprendre(uint8_t canal, uint8_t cc) {
         if (place == s_nb) s_nb++;       // l'entree complete, PUIS le compte
         s_cibleArmee[0] = '\0';
     }
-    ecrireNvs(texte());     // une affectation apprise survit au redemarrage
+    memoriser(texte());     // une affectation apprise survit au redemarrage
     Serial.printf("[CcMap] appris : canal %u CC %u -> %s\n",
                   (unsigned)canal, (unsigned)cc, e.cible);
     return true;
@@ -176,18 +193,19 @@ String texte() {
     return out;
 }
 
-bool setTexte(const String& t, bool persister) {
-    // Lue a cote, posee d'un coup : un CC entrant voit l'ancienne table ou la nouvelle.
+/* Lue a cote, posee d'un coup : un CC entrant voit l'ancienne table ou la
+ * nouvelle. Rend le nombre d'affectations. */
+static int poserTable(const String& t) {
     Entree table[MAX];
     int nb = 0;
     int debut = 0;
     while (debut < (int)t.length() && nb < MAX) {
-        int fin = t.indexOf(';', debut);
-        if (fin < 0) fin = t.length();
+        int fin = debut;                                // ';' (l'API) ou une ligne (cc.txt)
+        while (fin < (int)t.length() && t[fin] != ';' && t[fin] != '\n') fin++;
         String ligne = t.substring(debut, fin);
         debut = fin + 1;
         ligne.trim();
-        if (!ligne.length()) continue;
+        if (!ligne.length() || ligne[0] == '#') continue;
 
         // canal:cc:cible:min:max — cinq champs, aucun optionnel. Une ligne
         // malformee est IGNOREE plutot que de faire echouer toute la table :
@@ -217,28 +235,49 @@ bool setTexte(const String& t, bool persister) {
         memcpy(s_table, table, sizeof(Entree) * nb);
         s_nb = nb;
     }
-    if (persister) ecrireNvs(texte());
-    Serial.printf("[CcMap] table : %d affectation(s)%s\n",
-                  nb, persister ? " memorisee(s)" : "");
+    return nb;
+}
+
+bool setTexte(const String& t) {
+    const int nb = poserTable(t);
+    memoriser(texte());
+    Serial.printf("[CcMap] table : %d affectation(s), dans la composition ouverte\n", nb);
     return true;
 }
 
-void vider(bool persister) {
+void vider() {
     {
         Verrou verrou;
         s_nb = 0;
         s_cibleArmee[0] = '\0';
     }
-    if (persister) ecrireNvs("");
+    memoriser("");
+}
+
+/* La table de la composition ouverte : ce qui attend le silence d'abord, la
+ * flash sinon. Pas de fichier : pas d'affectation. */
+static void lireLaComposition() {
+    const String chemin = Repertoire::chemin(Repertoire::CC);
+    std::shared_ptr<char> brut; size_t n = 0;
+    String t;
+    if (chemin.length() && Differe::lire(chemin.c_str(), brut, n)) t.concat(brut.get(), (unsigned)n);
+    const int nb = poserTable(t);
+    if (nb) Serial.printf("[CcMap] %d affectation(s) de la composition ouverte\n", nb);
 }
 
 void monter() {
-    Preferences p;
-    if (!p.begin(NVS_ESPACE, true)) return;
-    const String t = p.getString(NVS_CLE, "");
-    p.end();
-    if (!t.length()) return;
-    setTexte(t, /*persister=*/false);
+    {
+        Preferences p;
+        bool ancienne = false;
+        if (p.begin(NVS_ESPACE_RETIRE, true)) { ancienne = p.isKey(NVS_CLE_RETIREE); p.end(); }
+        if (ancienne) Differe::nvsRetirer(NVS_ESPACE_RETIRE, NVS_CLE_RETIREE);   // au silence
+    }
+    lireLaComposition();
+}
+
+void recharger() {
+    desarmer();
+    lireLaComposition();
 }
 
 }  // namespace CcMap

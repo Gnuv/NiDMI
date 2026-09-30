@@ -211,18 +211,22 @@ void setupAudioAPI(AsyncWebServer& server) {
          * broches, donc le seul composant qui peut s'y trouver est le DAC
          * lui-meme — et la garde se declenchait justement sur lui. La
          * declaration ci-dessus est la condition, et elle suffit. */
-        if (AudioEngine::setEngine(n, /*persister=*/true)) {
+        const bool applique = AudioEngine::setEngine(n);
+        if (applique || AudioEngine::derniereBascule() == AudioEngine::Bascule::Armee)
+            AudioEngine::rearmerGardeFou();                  // un choix humain
+        if (applique) {
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"engine\":" + String(AudioEngine::engine()) + "}");
         } else if (AudioEngine::derniereBascule() == AudioEngine::Bascule::Armee) {
             // 202 : la demande est acceptée mais pas appliquée maintenant. Le
-            // choix est en NVS ; il sera chargé au prochain démarrage, sur un
-            // tas vierge — le seul ordre d'allocation mesuré comme sûr.
+            // prochain démarrage chargera le moteur sur un tas vierge — le seul
+            // ordre d'allocation mesuré comme sûr —, s'il le trouve dans les
+            // cues de la composition ouverte : rien d'autre n'est mémorisé (§187).
             request->send(202, "application/json",
                 "{\"status\":\"armed\",\"engine\":" + String(n)
                 + ",\"redemarrage_requis\":true,\"message\":"
-                "\"tas trop fragmente pour basculer a chaud — choix memorise, "
-                "actif au prochain redemarrage\"}");
+                "\"tas trop fragmente pour basculer a chaud — le moteur viendra au "
+                "prochain demarrage, si les cues de la composition ouverte l'emploient\"}");
         } else {
             request->send(507, "application/json",
                 "{\"status\":\"error\",\"message\":\"Plaits indisponible (tas insuffisant ?) — sinus conserve\"}");
@@ -244,13 +248,11 @@ void setupAudioAPI(AsyncWebServer& server) {
              * fait pas : on NE casse PAS la cue — les continus qui suivent et
              * le reste du spectacle continuent. On laisse simplement setEngine
              * refuser, et `engine` rendu plus bas dira la verite. */
-            // Chemin des CUES (js/device/audio-board.js) : on ne persiste pas.
-            // Une cue change le son, elle ne redéfinit pas le défaut du boîtier.
-            // Un refus de bascule n'est PAS un échec de la cue : les continus
-            // qui suivent s'appliquent au process résident, et le spectacle
-            // continue. On ne renvoie une erreur que si l'engine a vraiment
-            // cassé. Le cas « armé » n'existe pas ici : une cue ne persiste rien.
-            if (!AudioEngine::setEngine(n, /*persister=*/false)
+            // Chemin des CUES (js/device/audio-board.js). Un refus de bascule
+            // n'est PAS un échec de la cue : les continus qui suivent
+            // s'appliquent au process résident, et le spectacle continue. On ne
+            // renvoie une erreur que si l'engine a vraiment cassé.
+            if (!AudioEngine::setEngine(n)
                 && AudioEngine::derniereBascule() != AudioEngine::Bascule::Armee) {
                 request->send(507, "application/json",
                     "{\"status\":\"error\",\"message\":\"moteur indisponible (tas insuffisant ?)\"}");
@@ -404,17 +406,22 @@ void setupAudioAPI(AsyncWebServer& server) {
             "{\"status\":\"ok\",\"voix\":" + String(voix) + "}");
     });
 
-    /* Choix de l'échantillon à jouer. name vide = on arrête le lecteur. */
+    /* Choix de l'échantillon à jouer. name vide = on arrête le lecteur.
+     * Tout de suite, et rien n'est mémorisé : au démarrage, la carte arme ce
+     * que les cues de la composition ouverte emploient (MESURES §187). Un choix
+     * humain réarme quand même le garde-fou. */
     server.on("/api/audio/sampler", HTTP_POST, [](AsyncWebServerRequest *request){
         const String nom = request->hasParam("name", true)
                          ? request->getParam("name", true)->value() : String("");
         if (!nom.length()) {
-            AudioEngine::arreterSampler(/*persister=*/true);   // action humaine
+            AudioEngine::arreterSampler();
+            AudioEngine::rearmerGardeFou();                  // action humaine
             request->send(200, "application/json", "{\"status\":\"ok\",\"sampler\":\"\"}");
             return;
         }
         String raison;
-        if (AudioEngine::setSampler(nom.c_str(), raison, /*persister=*/true)) {
+        if (AudioEngine::setSampler(nom.c_str(), raison)) {
+            AudioEngine::rearmerGardeFou();
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"sampler\":\"" + nom + "\"}");
         } else {
@@ -1617,7 +1624,11 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
      * ORDRE : /api/midi/cc/learn AVANT /api/midi/cc — ESPAsyncWebServer fait
      * du prefixe, pas de l'exact, et le generique avalerait la commande
      * (meme piege que /api/cues, qui avait efface la liste des cues).       */
+    /* LA TABLE DES CC EST CELLE DE LA COMPOSITION OUVERTE (cc.txt, §187) :
+     * l'apprendre ou la remplacer est une ecriture dans une composition, que
+     * l'app adresse (compo=N) comme les autres. */
     server.on("/api/midi/cc/learn", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!compositionAttendue(request)) return;
         String cible;
         if (request->hasParam("cible", true)) cible = request->getParam("cible", true)->value();
         if (!cible.length()) {
@@ -1650,13 +1661,15 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
                           "{\"status\":\"error\",\"message\":\"parametre 'table' manquant\"}");
             return;
         }
-        CcMap::setTexte(request->getParam("table", true)->value(), /*persister=*/true);
+        if (!compositionAttendue(request)) return;
+        CcMap::setTexte(request->getParam("table", true)->value());
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"table\":\"") + CcMap::texte() + "\"}");
     });
 
     server.on("/api/midi/cc", HTTP_DELETE, [](AsyncWebServerRequest *request){
-        CcMap::vider(/*persister=*/true);
+        if (!compositionAttendue(request)) return;
+        CcMap::vider();
         request->send(200, "application/json", "{\"status\":\"ok\",\"table\":\"\"}");
     });
 

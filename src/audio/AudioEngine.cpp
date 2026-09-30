@@ -526,21 +526,21 @@ void boucleAudio(void*) {
 
 }  // namespace
 
-// ── Persistance du choix de moteur ─────────────────────────────────────────
-// Le fichier d'echantillon survit au redemarrage (il est sur storage), mais le
-// CHOIX ne survivait pas : apres un reboot on retombait sur le sinus, et
-// l'echantillon telebverse semblait avoir disparu. C'est de la configuration de
-// carte au sens du §11 de CONVERGENCE_NIDMI.md — « la carte detient la config
-// qui tourne » — donc elle a sa place en NVS.
-//
-// Format d'une seule cle : ""/"-1" = sinus · "p:<n>" = Plaits n · "s:<nom>" =
-// echantillon. Une cle plutot que deux : l'etat est exclusif par construction.
+// ── Le moteur de la composition, et le garde-fou ────────────────────────────
+// LE MOTEUR N'EST PLUS MEMORISE : il se DEDUIT de la composition ouverte
+// (Cues::moteurEmploye, MESURES §187). Il vivait en NVS, commun a toute la
+// carte — ""/"-1" sinus, "p:<n>" Plaits, "s:<nom>" echantillon —, pose en
+// passant par chaque son ecoute dans l'inspecteur : la derniere ecoute, dans
+// n'importe quelle composition, decidait de ce que la carte chargerait au
+// demarrage. Une composition dont les cues jouent des sons pouvait demarrer
+// sans eux, une autre charger ce qu'elle n'emploie pas. Ses cues disent ce
+// qu'elle emploie ; une copie a cote finit par mentir (CONVERGENCE §9.6).
 namespace {
 constexpr const char* NVS_ESPACE = "nidmi-audio";
-constexpr const char* NVS_CLE    = "moteur";
-// L'ancien compteur du garde-fou, en NVS, retire au §157 : sa cle s'efface au
-// premier demarrage, pour ne pas laisser d'orpheline dans le reservoir.
-constexpr const char* NVS_CLE_ESSAIS_RETIREE = "bootess";
+/* Les cles retirees s'effacent au demarrage, pour ne pas laisser d'orphelines
+ * dans le reservoir : l'ancien compteur du garde-fou (§157), l'ancien choix du
+ * moteur (§187). */
+constexpr const char* NVS_CLES_RETIREES[] = { "bootess", "moteur" };
 
 /* LE GARDE-FOU DU BOOT COMPTE LES PLANTAGES (MESURES §157). Il comptait les
  * demarrages sans interface servie, en NVS : un instrument autonome qu'on
@@ -572,56 +572,53 @@ Bascule derniereBasc = Bascule::Appliquee;
 uint8_t  essaisAuBoot      = 0;        // plantages consecutifs comptes a ce demarrage
 bool     restaurationCoupee = false;
 
-void memoriser(const String& valeur) {
-  // Le choix vaut tout de suite ; il s'ecrit en flash au premier silence (§157).
-  Differe::nvsChaine(NVS_ESPACE, NVS_CLE, valeur);
-  // Un choix humain explicite réarme le garde-fou : c'est le seul chemin de
-  // sortie quand la restauration a été coupée (la carte sert alors son UI, donc
-  // l'utilisateur peut choisir autre chose — ou le même moteur, en connaissance
-  // de cause).
-  rtcPlantages = 0;
-  essaisAuBoot = 0;
-  restaurationCoupee = false;
+// Ce que la composition emploie, pour le journal.
+String decrire(int moteur, const char* son) {
+  if (moteur == -2) return String("le lecteur d'echantillons (clavier sur ") + (son ? son : "") + ")";
+  if (moteur >= 0)  return String("le moteur de synthese n°") + moteur;
+  return String("aucun moteur");
 }
 
 // Appele une seule fois, par restaurerAuBoot() (3 s apres le demarrage, sous le
 // garde-fou des plantages consecutifs) : un echec ici ne doit pas pouvoir couter
 // l'OTA.
-void restaurer() {
-  Preferences p;
-  if (!p.begin(NVS_ESPACE, true)) return;
-  const String v = p.getString(NVS_CLE, "");
-  p.end();
-  if (!v.length() || v == "-1") return;
-
-  if (v.startsWith("s:")) {
+void restaurer(int moteur, const char* son) {
+  if (moteur == -2) {
     /* ON CHARGE TOUT, pas seulement celui-la. Une composition met des sons
-     * differents sur des pistes differentes ; ne restaurer que le dernier
-     * designe, c'est arriver a la premiere cue avec un magasin incomplet. */
+     * differents sur des pistes differentes ; ne charger que le premier,
+     * c'est arriver a la premiere cue avec un magasin incomplet. */
     const uint8_t n = SampleStore::chargerTout();
     moteurCourant = -2;
-    const String nom = v.substring(2);
-    strncpy(echantillonClavier, nom.c_str(), sizeof(echantillonClavier) - 1);
+    strncpy(echantillonClavier, son ? son : "", sizeof(echantillonClavier) - 1);
     Serial.printf("[audio] lecteur d'echantillons arme — %u en PSRAM, clavier sur %s\n",
-                  (unsigned)n, nom.c_str());
-  } else if (v.startsWith("p:")) {
+                  (unsigned)n, echantillonClavier);
+  } else if (moteur >= 0) {
     if (!syntheseLourdeDisponible()) {
-      /* Un choix memorise par une image qui acceptait la synthese ne doit pas
-       * ressusciter dans une image qui ne l'accepte plus. On l'ignore, et on le
-       * DIT — un reglage qui disparait en silence est un piege. */
-      Serial.println("[audio] moteur de synthese memorise IGNORE : cette image "
-                     "n'en accepte pas (carte seule). Voir MESURES.md §126.");
+      /* Une composition ecrite pour une image qui accepte la synthese, ouverte
+       * sur une image qui ne l'accepte pas. On l'ignore, et on le DIT — un
+       * reglage qui disparait en silence est un piege. */
+      Serial.println("[audio] la composition emploie un moteur de synthese : IGNORE, "
+                     "cette image n'en accepte pas (carte seule). Voir MESURES.md §126.");
       return;
     }
-    const int n = v.substring(2).toInt();
-    if (n >= 0 && n <= 23 && plaitsAlloue()) {
-      plaitsPatch.engine = n;
-      moteurCourant = n;
-      Serial.printf("[audio] moteur Plaits restaure : %d\n", n);
+    if (moteur <= 23 && plaitsAlloue()) {
+      plaitsPatch.engine = moteur;
+      moteurCourant = moteur;
+      Serial.printf("[audio] moteur Plaits restaure : %d\n", moteur);
     }
   }
 }
 }  // namespace
+
+/* Un choix humain explicite — un moteur, un son, choisis dans l'app — réarme le
+ * garde-fou : c'est le seul chemin de sortie quand la restauration a été coupée
+ * (la carte sert alors son UI, donc l'utilisateur peut choisir autre chose — ou
+ * le même moteur, en connaissance de cause). */
+void rearmerGardeFou() {
+  rtcPlantages = 0;
+  essaisAuBoot = 0;
+  restaurationCoupee = false;
+}
 
 bool isStarted() { return demarre; }
 
@@ -629,7 +626,8 @@ bool isStarted() { return demarre; }
 // Voir l'en-tête pour le pourquoi. Ici, le comment :
 //
 //   1. un démarrage qui ne suit pas un plantage remet le compteur (RTC) à zéro ;
-//   2. lire le choix mémorisé — s'il n'y a rien à charger, on s'arrête là ;
+//   2. le moteur que la composition ouverte emploie (déduit de ses cues par
+//      l'appelant) — si elle n'en emploie aucun, on s'arrête là ;
 //   3. si le compteur a atteint TENTATIVES_MAX, couper : la carte démarre nue.
 //      C'est la protection de l'OTA que l'initialisation paresseuse assurait
 //      avant, transposée au nouvel ordre ;
@@ -639,10 +637,10 @@ bool isStarted() { return demarre; }
 // Plus aucune écriture en flash : le compteur vivait en NVS, et sa remise à
 // zéro coûtait 1,8 % de blocs en retard le temps de l'écriture, une fois par
 // boot (MESURES.md §13) — pendant le son. Il vit en RTC depuis le §157.
-void restaurerAuBoot() {
+void restaurerAuBoot(int moteur, const char* son) {
   /* DEMARRAGE A VIDE, DEMANDE POUR CE SEUL DEMARRAGE. Le drapeau est consomme
-   * ici : le suivant restaurera le son. La NVS n'est pas lue, donc pas touchee —
-   * et le compteur de tentatives non plus : ce n'est pas une tentative. */
+   * ici : le suivant restaurera le son. La NVS n'est pas touchee — et le
+   * compteur de tentatives non plus : ce n'est pas une tentative. */
   if (nidmi_prendreDemarrageAVide()) {
     Serial.println("[audio] boot : demarrage A VIDE demande — le son reviendra au suivant");
     return;
@@ -655,23 +653,28 @@ void restaurerAuBoot() {
   if (!apresPlantage) rtcPlantages = 0;
   essaisAuBoot = rtcPlantages;
 
-  String choix;
   {
     Preferences p;
-    if (!p.begin(NVS_ESPACE, false)) return;   // ecriture : effacer l'ancienne cle, une fois
-    choix = p.getString(NVS_CLE, "");
-    if (p.isKey(NVS_CLE_ESSAIS_RETIREE)) p.remove(NVS_CLE_ESSAIS_RETIREE);   // avant le son
-    p.end();
+    bool retirer = false;
+    if (p.begin(NVS_ESPACE, true)) {
+      for (const char* cle : NVS_CLES_RETIREES) retirer = retirer || p.isKey(cle);
+      p.end();
+    }
+    if (retirer && p.begin(NVS_ESPACE, false)) {  // avant le son : une fois
+      for (const char* cle : NVS_CLES_RETIREES) if (p.isKey(cle)) p.remove(cle);
+      p.end();
+    }
   }
-  if (!choix.length() || choix == "-1") {
-    Serial.println("[audio] boot : aucun process memorise, la carte demarre nue");
+  const String choix = decrire(moteur, son);
+  if (moteur == -1) {
+    Serial.println("[audio] boot : la composition ouverte n'emploie aucun moteur, la carte demarre nue");
     return;
   }
 
   if (rtcPlantages >= TENTATIVES_MAX) {
     restaurationCoupee = true;
     Serial.printf("[audio] boot : restauration COUPEE — %u plantages de suite apres restauration.\n"
-                  "        La carte demarre nue (choix conserve : %s).\n"
+                  "        La carte demarre nue (la composition emploie %s).\n"
                   "        Choisir un process dans l'UI rearme le chargement.\n",
                   (unsigned)rtcPlantages, choix.c_str());
     return;
@@ -691,7 +694,7 @@ void restaurerAuBoot() {
     Serial.println("[audio] boot : I2S indisponible — le reste du boitier continue");
     return;
   }
-  restaurer();
+  restaurer(moteur, son);
 
   Serial.printf("[audio] boot : apres chargement, tas %lu o, plus gros bloc %lu o\n",
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -731,7 +734,7 @@ bool arreter() {
 
 void validerConfigBoot() {
   // Memoire RTC : rien a ecrire en flash, donc appelable d'async_tcp. Une
-  // restauration coupee attend un choix humain (memoriser), pas une page.
+  // restauration coupee attend un choix humain (rearmerGardeFou), pas une page.
   if (restaurationCoupee) return;
   rtcPlantages = 0;
   essaisAuBoot = 0;
@@ -1103,7 +1106,7 @@ bool declenchementSurCue() { return sampleSurCue; }
 /* ARMER LE LECTEUR — il ne « charge » plus rien : tout est deja en PSRAM.
  * `nom` designe seulement l'echantillon que le CLAVIER jouera ; les cues, elles,
  * nomment le leur a chaque declenchement. */
-bool setSampler(const char* nom, String& raison, bool persister) {
+bool setSampler(const char* nom, String& raison) {
   if (!ensureStarted()) { raison = "audio indisponible"; return false; }
   libererPlaits();                       // on ne tient jamais les deux à la fois
   SampleStore::chargerTout();            // la premiere fois ; ensuite, rien a relire
@@ -1113,13 +1116,11 @@ bool setSampler(const char* nom, String& raison, bool persister) {
   }
   if (nom) strncpy(echantillonClavier, nom, sizeof(echantillonClavier) - 1);
   moteurCourant = -2;
-  if (persister) memoriser(String("s:") + nom);
   return true;
 }
 
-void arreterSampler(bool persister) {
-  const bool etaitArme = (moteurCourant == -2);
-  if (etaitArme) { moteurCourant = -1; if (persister) memoriser("-1"); }
+void arreterSampler() {
+  if (moteurCourant == -2) moteurCourant = -1;
   arreterEchantillon();
   /* ON NE LIBERE PAS LA PSRAM. Les echantillons restent charges tant que
    * leur fichier est dans storage (voir SampleStore.h — le pire cas absolu tient
@@ -1163,11 +1164,10 @@ void echantillonParti(const char* nom) {
   rendreApresLecture(SampleStore::retirer(nom));
 }
 
-bool setEngine(int moteur, bool persister) {
+bool setEngine(int moteur) {
   if (moteur == -2) return false;        // passer par setSampler
   if (moteur < 0) {
     arreterEchantillon(); libererPlaits();
-    if (persister) memoriser("-1");
     derniereBasc = Bascule::Appliquee;
     return true;
   }
@@ -1187,22 +1187,41 @@ bool setEngine(int moteur, bool persister) {
   if (!plaitsVoix) {
     const uint32_t bloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
     if (bloc < seuilBasculeChaud()) {
+      /* ARMEE : le prochain demarrage l'allouera sur un tas vierge — si la
+       * composition ouverte l'emploie, puisqu'il s'en deduit (§187). */
       derniereBasc = Bascule::Armee;
-      if (persister) memoriser(String("p:") + moteur);
       Serial.printf("[audio] bascule REFUSEE a chaud : plus gros bloc %lu o < %lu.\n"
-                    "        Choix %s pour le prochain demarrage.\n",
-                    (unsigned long)bloc, (unsigned long)seuilBasculeChaud(),
-                    persister ? "memorise" : "NON memorise (chemin cue)");
+                    "        Le moteur %d viendra au prochain demarrage, si la composition l'emploie.\n",
+                    (unsigned long)bloc, (unsigned long)seuilBasculeChaud(), moteur);
       return false;
     }
   }
-  if (moteurCourant == -2) arreterSampler(persister);   // propage la décision
+  if (moteurCourant == -2) arreterSampler();
   if (!plaitsAlloue()) { derniereBasc = Bascule::Echec; return false; }
   derniereBasc = Bascule::Appliquee;
   plaitsPatch.engine = moteur;
   moteurCourant = moteur;
-  if (persister) memoriser(String("p:") + moteur);
   return true;
+}
+
+/* UNE AUTRE COMPOSITION S'OUVRE (§186, §187) : comme au demarrage, le moteur
+ * qu'elle emploie se prepare — ses sons en memoire, le clavier sur le premier ;
+ * son moteur de synthese, si le tas le permet (sinon il viendra au prochain
+ * demarrage, deduit de ses cues). RIEN NE SE DEMOLIT : l'I2S reste ouvert, un
+ * moteur resident le reste — liberer puis reallouer a chaque changement, c'est
+ * hacher le tas qu'un spectacle entier doit garder. Ce qui jouait se tait, et
+ * le clavier revient « sur cue », comme a l'allumage : une cue l'armera. */
+void preparer(int moteur, const char* son) {
+  arreterEchantillon();
+  fixerDeclenchementSurCue(true);
+  if (moteur == -2) {
+    String raison;
+    if (!setSampler(son, raison))
+      Serial.printf("[audio] composition ouverte : lecteur non arme — %s\n", raison.c_str());
+  } else if (moteur >= 0) {
+    setEngine(moteur);
+  }
+  Serial.printf("[audio] composition ouverte : elle emploie %s\n", decrire(moteur, son).c_str());
 }
 
 int engine() { return moteurCourant; }

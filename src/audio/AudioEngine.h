@@ -66,7 +66,16 @@ bool arreter();
 //
 // À appeler UNE FOIS à la fin de nidmi_setup() : après serverCore.begin(), donc
 // WiFi et serveur déjà installés, et avant qu'aucune page n'ait été servie.
-void restaurerAuBoot();
+//
+// Le moteur à charger est celui que la COMPOSITION OUVERTE emploie, déduit de
+// ses cues par l'appelant (Cues::moteurEmploye, MESURES §187) : -2 le lecteur
+// d'échantillons et `son`, le premier qu'elle nomme ; 0..23 un moteur de
+// synthèse ; -1 aucun — la carte démarre sans son.
+void restaurerAuBoot(int moteur, const char* son);
+
+// Une autre composition s'ouvre : le moteur qu'elle emploie se prépare comme au
+// démarrage (mêmes arguments), sans le garde-fou, et rien ne se démolit.
+void preparer(int moteur, const char* son);
 
 // Garde-fou, qui remplace la protection qu'offrait l'initialisation paresseuse
 // (« un échec ici ne doit pas pouvoir coûter l'OTA »). Il compte les PLANTAGES
@@ -74,8 +83,9 @@ void restaurerAuBoot();
 // un allumage, un redémarrage voulu, un OTA le remettent à zéro, et il n'écrit
 // jamais la flash (MESURES §157). Au bout de TENTATIVES_MAX plantages de suite,
 // la restauration se coupe : la carte démarre nue, joignable, flashable. Une
-// action humaine explicite (choix d'un moteur dans l'UI) la réarme.
+// action humaine explicite (choix d'un moteur ou d'un son dans l'UI) la réarme.
 constexpr uint8_t TENTATIVES_MAX = 3;
+void rearmerGardeFou();
 
 // Appelée quand l'interface est servie (page, ou page de secours) : preuve de
 // vie, qui remet le compteur à zéro. Mémoire RTC : appelable d'async_tcp.
@@ -134,16 +144,14 @@ const char* moteursSubstitues();
 // Le passage à Plaits alloue paresseusement ses ~24 ko sur le TAS INTERNE — si
 // l'allocation échoue, on reste au sinus et on le dit. Le son ne doit jamais
 // pouvoir emporter le reste du boîtier.
-// persister : écrire le choix en NVS. FAUX PAR DÉFAUT, et ce n'est pas un
-// détail — une écriture NVS est une écriture FLASH, et une opération flash
-// bloque le cache d'instructions, donc la tâche audio (mesuré : 1,8 % de blocs
-// en retard, MESURES.md §13). Une cue qui change de moteur en performance ne
-// doit donc RIEN écrire. Seule une action humaine explicite persiste.
+// RIEN N'EST MÉMORISÉ ICI (MESURES §187) : le moteur que la carte charge au
+// démarrage se déduit des cues de la composition ouverte.
 // GARDE D'ALLOCATION À CHAUD. Prendre 16 ko d'un seul tenant sur un tas déjà
 // haché par un chargement de page prend le dernier gros bloc, et AsyncTCP ne
 // s'en relève pas : la carte répond au ping sans plus servir de HTTP (constaté
-// le 2026-09-03). setEngine() refuse donc d'allouer sous le seuil — mais
-// mémorise le choix, qui sera chargé au prochain boot sur un tas vierge.
+// le 2026-09-03). setEngine() refuse donc d'allouer sous le seuil (« armée ») —
+// le prochain démarrage le chargera sur un tas vierge, si la composition
+// l'emploie.
 // Deux cas ne sont JAMAIS refusés, parce qu'ils n'allouent rien :
 //   - Plaits déjà résident : changer parmi ses 24 moteurs écrit un entier ;
 //   - moteur = -1 : libère.
@@ -151,7 +159,7 @@ const char* moteursSubstitues();
 enum class Bascule : uint8_t { Appliquee, Armee, Echec };
 Bascule derniereBascule();
 
-bool setEngine(int moteur, bool persister = false);
+bool setEngine(int moteur);
 // engine = -1 LIBÈRE Plaits (et ne fait pas que le désélectionner) : sans ça la
 // carte ne peut plus servir sa propre interface. Voir le .cpp.
 void libererPlaits();
@@ -179,12 +187,10 @@ struct Params { float harmonics, timbre, morph, decay, lpgColour, drone; };
 // que Plaits en RAM interne (quelques centaines d'octets contre 26 632), parce
 // que l'échantillon vit en PSRAM : il cohabite donc avec le service de
 // l'interface sans le dégrader. Voir SampleStore.
-bool setSampler(const char* nom, String& raison, bool persister = false);
-// Même règle que setEngine : on n'écrit en NVS que sur action explicite.
+bool setSampler(const char* nom, String& raison);
 // setEngine() appelle cette fonction en interne quand on quitte le mode
-// échantillon — y compris depuis le chemin des cues. Sans le paramètre, une cue
-// effaçait le choix mémorisé (constaté au test de redémarrage).
-void arreterSampler(bool persister = false);
+// échantillon — y compris depuis le chemin des cues.
+void arreterSampler();
 bool samplerActif();
 /* Un fichier vient d'arriver dans storage (televersement), ou d'en partir : le
  * magasin en PSRAM suit, sans rien couper d'autre que ce son-la (§177). */
