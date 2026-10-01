@@ -23,6 +23,17 @@ String nidmi_lienMortJson();           // NiDMI.cpp : le lien du cable mort, pho
 #ifndef NIDMI_FW_VARIANT
 #define NIDMI_FW_VARIANT "?"
 #endif
+/* L'app embarquee a sa propre version (le commit de son depot, ecrit par
+ * scripts/cartes/embarquer-app.py) : deux images d'un meme firmware ne se
+ * distinguaient pas — leur version etait la meme (MESURES §192). */
+#if defined(__has_include)
+#  if __has_include("../ui/app_archive.h")
+#    include "../ui/app_archive.h"
+#  endif
+#endif
+#ifndef NIDMI_APP_VERSION
+#define NIDMI_APP_VERSION "?"
+#endif
 
 void setupNetworkAPI(AsyncWebServer& server) {
     // API - Statut général
@@ -64,6 +75,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
         json += ",\"web_debug_console\":" + String(nidmi_web_debug_is_supported() ? "true" : "false");
         json += ",\"fw_version\":\"" NIDMI_FW_VERSION "\"";
         json += ",\"fw_variant\":\"" NIDMI_FW_VARIANT "\"";
+        json += ",\"app_version\":\"" NIDMI_APP_VERSION "\"";
         json += "}";
         request->send(200, "application/json", json);
     });
