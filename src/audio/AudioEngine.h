@@ -183,7 +183,7 @@ int  engine();
  * memes chemins (cue, /api/audio/params) ; lu comme un booleen au seuil 0,5. */
 struct Params { float harmonics, timbre, morph, decay, lpgColour, drone; };
 
-// Lecteur d'échantillons — l'équivalent embarqué de trig-wav. Bien moins cher
+// Lecteur d'échantillons — l'équivalent embarqué de play-sf. Bien moins cher
 // que Plaits en RAM interne (quelques centaines d'octets contre 26 632), parce
 // que l'échantillon vit en PSRAM : il cohabite donc avec le service de
 // l'interface sans le dégrader. Voir SampleStore.
@@ -196,11 +196,11 @@ bool samplerActif();
  * magasin en PSRAM suit, sans rien couper d'autre que ce son-la (§177). */
 bool echantillonArrive(const char* nom, String& raison);
 void echantillonParti(const char* nom);
-/* `trig-wav` : demarre a l'ARRIVEE SUR UNE CUE, a la hauteur du fichier, et
+/* `play-sf` : demarre a l'ARRIVEE SUR UNE CUE, a la hauteur du fichier, et
  * boucle si la cue le demande. Ni clavier ni transposition — c'est son
  * comportement d'origine cote navigateur (un BufferSource avec `loop`). */
 /* Declenche UN echantillon NOMME sur une voix libre (la plus ancienne sinon).
- * `demiTons` = 0 : a la hauteur du fichier — le cas de trig-wav sur cue.
+ * `demiTons` = 0 : a la hauteur du fichier — le cas de play-sf sur cue.
  * HUIT VOIX : mesure a ~380 cycles/echantillon la voix, sur 5 000 de budget,
  * soit 62 % a huit. Deux pistes instrument avec deux sons en meme temps sont
  * donc possibles — elles ne l'etaient pas, le lecteur etant monophonique et le
@@ -224,7 +224,56 @@ void fixerClavier(uint32_t bloc, float gain);
 void fixerMesureVu(bool oui);
 uint8_t releverCretes(uint32_t* blocs, uint16_t* cretesG, uint16_t* cretesD, uint8_t max);
 void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
-void arreterEchantillon();                       // toutes les voix
+/* Toutes les voix — ou, `listesComprises` faux, toutes SAUF celles des play
+ * list : une cue qui arrive laisse poserListes() decider des siennes (une
+ * liste qui continue d'une cue a l'autre continue de jouer). */
+void arreterEchantillon(bool listesComprises = true);
+
+/* ── LES PLAY LIST (MESURES §196) ──────────────────────────────────────────
+ * Une variante de playlist~ (Max) : une liste de CLIPS — un son, une
+ * selection, une boucle — dont UNE NOTE choisit lequel joue, un a la fois.
+ * La note du clip 1 (`lnote`) joue le clip 1, la suivante le clip 2… ; celle
+ * juste en dessous arrete la liste (le « 0 » de playlist~). Un clip qui en
+ * coupe un autre le fait taire en 5 ms (sans claquement). A la fin d'un clip,
+ * `lsuite` : 0 s'arreter, 1 enchainer le suivant, 2 enchainer et reboucler —
+ * l'enchainement se fait dans la tache audio, sans trou. La velocite ne compte
+ * pas ; un note-off ne coupe rien.
+ *
+ * Les listes arrivent ECRITES comme dans une ligne de cue, en champs
+ * positionnels : listes separees par des virgules, clips par des barres —
+ * deux signes qu'aucun nom de son ne peut porter (SampleStore::nomValide) :
+ *   liste=a.wav/b.wav,c.wav;lbloc=12,15;lnote=60,72;lsuite=1,0;
+ *   lgain=0.800,1.000;ldebut=0/1.5,0;lfin=0/12.25,0;lboucle=0/1,0
+ * Un clip sans son garde sa place : son RANG dit sa note. Secondes ; fin 0 =
+ * jusqu'au bout. `lnote`, `lsuite`, `lgain` : une valeur vaut pour les listes
+ * suivantes ; `lbloc` sans completion (l'etiquette des voix, pour le volume).
+ *
+ * Elles vivent en PSRAM, en deux exemplaires : on ecrit celui que la tache
+ * audio ne lit pas, elle l'adopte au debut d'un bloc — jamais une memoire
+ * qu'elle lit n'est reecrite sous elle. Aucune lecture en flash : les sons
+ * sont tous en PSRAM. */
+constexpr uint8_t LISTES_MAX = 4;     // listes armees a la fois
+constexpr uint8_t CLIPS_MAX  = 32;    // clips par liste
+/* Les listes d'une CUE — toutes, a la place des precedentes. Une liste dont
+ * le bloc etait deja arme (une chaine de cellules : meme bloc d'une cue a la
+ * suivante) garde le clip qui joue ; les autres se taisent. Vide : aucune. */
+void poserListes(const String& params);
+/* LE CHEMIN VIVANT : la liste d'UN bloc (memes cles, une liste), a la place
+ * de celle du meme bloc — ou ajoutee. Sans aucun son, elle est retiree. Rend
+ * le nombre de clips (-1 : `lbloc` manque, ou plus de place), et dans
+ * `absents` les sons que la carte n'a pas, separes par des virgules. */
+int poserListe(const String& params, String& absents, uint32_t& bloc);
+/* Joue le clip k (1..n) de la liste du bloc — 0 l'arrete. Le meme effet
+ * qu'une note, passe par la file de la tache audio. Faux : pas de liste
+ * armee pour ce bloc, ou clip k sans son. */
+bool jouerClip(uint32_t bloc, uint8_t k);
+/* L'ETAT DES LISTES ARMEES : bloc, clip qui joue (0 : aucun), nombre de
+ * clips. Rend leur nombre, au plus `max` — ou -1 si un ecrivain les tient et
+ * que `attendre` est faux : la boucle ne doit jamais attendre le web.
+ * `generationListes()` change a chaque depart, fin, arret ou nouvelle liste :
+ * c'est elle qui fait annoncer (Activite, NIDMI_LISTE). */
+int etatListes(uint32_t* blocs, uint8_t* clips, uint8_t* nombres, uint8_t max, bool attendre = true);
+uint32_t generationListes();
 /* QUI DECLENCHE. `true` (defaut) : la cue, a la hauteur du fichier — l'original.
  * `false` : le clavier, transpose par la note. Les deux marchent ; c'est le bloc
  * qui tranche, par son interrupteur Cue/MIDI (`oncue` dans la cue). */

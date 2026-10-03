@@ -122,8 +122,21 @@ void setupAudioAPI(AsyncWebServer& server) {
         /* LES MOTEURS QUE CETTE IMAGE JOUE (CONVERGENCE §9.7, MESURES §190) : un
          * fichier de composition les compare aux siens avant d'arriver. Dits par
          * la carte, pas devines par l'app. */
-        json += String("\"moteurs\":[\"trig-wav\",\"midi-script\"")
+        json += String("\"moteurs\":[\"play-sf\",\"play-list\",\"midi-script\"")
               + (AudioEngine::syntheseLourdeDisponible() ? ",\"plaits\"" : "") + "],";
+        /* LES PLAY LIST ARMEES (§196) : le clip que chacune joue — 0 aucun — et
+         * son nombre de clips. L'app l'apprend par l'annonce NIDMI_LISTE ; ceci
+         * pour les bancs et pour qui arrive. */
+        {
+            uint32_t blocs[AudioEngine::LISTES_MAX];
+            uint8_t clips[AudioEngine::LISTES_MAX], nombres[AudioEngine::LISTES_MAX];
+            const int n = AudioEngine::etatListes(blocs, clips, nombres, AudioEngine::LISTES_MAX);
+            json += "\"listes\":[";
+            for (int i = 0; i < n; i++)
+                json += String(i ? "," : "") + "{\"bloc\":" + String(blocs[i]) + ",\"clip\":"
+                      + String(clips[i]) + ",\"n\":" + String(nombres[i]) + "}";
+            json += "],";
+        }
         json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
@@ -203,7 +216,7 @@ void setupAudioAPI(AsyncWebServer& server) {
                 "resident ne laisse que 7 668 o de memoire d'un seul tenant, et "
                 "recharger l'interface coince alors la carte (MESURES §122-126). "
                 "Ce qui marche ici : capteurs, MIDI, OSC, sequenceur, scripts .nms "
-                "et ECHANTILLONS (trig-wav). La synthese commence a deux cartes.\"}");
+                "et ECHANTILLONS (play-sf). La synthese commence a deux cartes.\"}");
             return;
         }
         if (n >= 0 && !Occupations::audioDeclare()) {
@@ -329,8 +342,72 @@ void setupAudioAPI(AsyncWebServer& server) {
      * la carte y range chaque fichier selon son genre, et l'explorateur du
      * panneau Carte s'en sert. */
 
+    /* ── PLAY LIST (MESURES §196) ──────────────────────────────────────────
+     * L'ECOUTE D'UN CLIP depuis l'inspecteur : `bloc`, `clip` (0 arrete). Par
+     * la file de la tache audio, comme une note. 404 : pas de liste armee
+     * pour ce bloc, ou ce clip ne se joue pas (sans son).
+     * AVANT « /api/audio/liste » : le prefixe l'avalerait. */
+    server.on("/api/audio/liste/jouer", HTTP_POST, [](AsyncWebServerRequest *request){
+        const uint32_t bloc = request->hasParam("bloc", true)
+                            ? (uint32_t)request->getParam("bloc", true)->value().toInt() : 0;
+        const int clip = request->hasParam("clip", true)
+                       ? request->getParam("clip", true)->value().toInt() : 0;
+        if (!AudioEngine::jouerClip(bloc, (uint8_t)constrain(clip, 0, 255))) {
+            request->send(404, "application/json",
+                "{\"status\":\"error\",\"message\":\"pas de liste armee pour ce bloc, "
+                "ou ce clip ne se joue pas\"}");
+            return;
+        }
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"bloc\":" + String(bloc) + ",\"clip\":" + String(clip) + "}");
+    });
+
+    /* LA LISTE D'UN BLOC, TOUT DE SUITE — le chemin VIVANT de l'inspecteur :
+     * les cles d'une cue (liste, lbloc, lnote, lsuite, lgain, ldebut, lfin,
+     * lboucle) pour UNE liste. Elle remplace celle du meme bloc, ou s'ajoute,
+     * et s'arme pour les notes ; sans aucun son, elle se retire. Le lecteur
+     * s'arme s'il ne l'est pas. Rend le nombre de clips et les sons que la
+     * carte n'a pas. Rien ne s'ecrit en flash : la liste de cues, tenue a jour
+     * par le suivi, la redira a la prochaine arrivee sur la cue. */
+    server.on("/api/audio/liste", HTTP_POST, [](AsyncWebServerRequest *request){
+        static const char* const CLES[] = { "liste", "lbloc", "lnote", "lsuite",
+                                            "lgain", "ldebut", "lfin", "lboucle" };
+        String params;
+        for (const char* cle : CLES)
+            if (request->hasParam(cle, true))
+                params += String(params.length() ? ";" : "") + cle + "="
+                        + request->getParam(cle, true)->value();
+        if (!AudioEngine::samplerActif()) {
+            String raison;
+            if (!AudioEngine::setSampler("", raison)) {
+                request->send(409, "application/json",
+                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                return;
+            }
+        }
+        String absents;
+        uint32_t bloc = 0;
+        const int n = AudioEngine::poserListe(params, absents, bloc);
+        if (n < 0) {
+            request->send(bloc ? 507 : 400, "application/json", bloc
+                ? "{\"status\":\"error\",\"message\":\"plus de place : "
+                  + String(AudioEngine::LISTES_MAX) + " play list armees au plus\"}"
+                : String("{\"status\":\"error\",\"message\":\"lbloc requis\"}"));
+            return;
+        }
+        String json = "{\"status\":\"ok\",\"bloc\":" + String(bloc) + ",\"clips\":" + String(n)
+                    + ",\"absents\":[";
+        for (int i = 0, debut = 0; debut < (int)absents.length(); i++) {
+            int fin = absents.indexOf(',', debut); if (fin < 0) fin = absents.length();
+            json += String(i ? "," : "") + "\"" + absents.substring(debut, fin) + "\"";
+            debut = fin + 1;
+        }
+        json += "]}";
+        request->send(200, "application/json", json);
+    });
+
     /* DECLENCHER L'ECHANTILLON MAINTENANT — le chemin VIVANT.
-     * Cote navigateur, `trig-wav` demarre son BufferSource au chargement de la
+     * Cote navigateur, `play-sf` demarre son BufferSource au chargement de la
      * case ; poser un son dans l'inspecteur doit donc s'entendre tout de suite,
      * sans attendre un changement de cue. `loop` et `oncue` accompagnent le
      * declenchement : c'est le meme etat que la cue installerait. */

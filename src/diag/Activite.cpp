@@ -13,6 +13,7 @@ namespace {
   std::atomic<uint32_t> g_brochesBas{0};
   std::atomic<uint32_t> g_brochesHaut{0};
   uint32_t g_dernierePublication = 0;
+  uint32_t g_genListesPubliee = 0;        // l'etat des play list deja annonce (§196)
   constexpr uint32_t PERIODE_MS = 100;    // 10 Hz : l'oeil suit un vu-metre
   constexpr uint8_t  BLOCS_VU   = 8;      // autant que de voix d'echantillon
 }
@@ -42,6 +43,24 @@ void publier(uint32_t maintenant) {
   const uint32_t h = g_brochesHaut.exchange(0, std::memory_order_relaxed);
   uint32_t blocs[BLOCS_VU]; uint16_t cg[BLOCS_VU], cd[BLOCS_VU];
   const uint8_t n = AudioEngine::releverCretes(blocs, cg, cd, BLOCS_VU);
+  /* LES PLAY LIST (§196) : le clip que chacune joue, a chaque changement —
+   * un depart, une fin, un arret, une liste qui arrive ou part. L'etat ENTIER,
+   * « NIDMI_LISTE:<bloc>:<clip>,… » (vide : aucune liste) : une trame perdue
+   * se rattrape a la suivante. Jamais d'attente : si un ecrivain tient les
+   * listes, on reessaie a la prochaine periode. */
+  const uint32_t gl = AudioEngine::generationListes();
+  if (ecoute && gl != g_genListesPubliee) {
+    uint32_t lb[AudioEngine::LISTES_MAX]; uint8_t lc[AudioEngine::LISTES_MAX], ln[AudioEngine::LISTES_MAX];
+    const int nl = AudioEngine::etatListes(lb, lc, ln, AudioEngine::LISTES_MAX, /*attendre=*/false);
+    if (nl >= 0) {
+      char liste[16 + AudioEngine::LISTES_MAX * 16];
+      int k = snprintf(liste, sizeof liste, "NIDMI_LISTE:");
+      for (int i = 0; i < nl && k > 0 && k < (int)sizeof liste - 16; i++)
+        k += snprintf(liste + k, sizeof liste - k, "%s%lu:%u", i ? "," : "",
+                      (unsigned long)lb[i], (unsigned)lc[i]);
+      if (nidmi_ws_pousser(liste)) g_genListesPubliee = gl;
+    }
+  }
   if ((!s && !n) || !ecoute) return;
   /* UNE trame pour l'activite ET les vu-metres : autant de paquets de moins.
    * Les cretes en millemes de la pleine echelle (32 767), bornees a 1000 :

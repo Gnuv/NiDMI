@@ -229,12 +229,12 @@ void _appliquer(const Cue& c) {
   if (c.paramsScript.length()) g_midiRouter.setParamsScript(c.paramsScript);
 
   /* 2 bis. L'ECHANTILLON. `engine = -2` veut dire « lecteur d'echantillons » —
-   * l'equivalent embarque de trig-wav. Le fichier voyage dans les params, sous
+   * l'equivalent embarque de play-sf. Le fichier voyage dans les params, sous
    * `sample=<nom>` : pas de champ nouveau dans la ligne de cue, et le nom est
    * celui de storage (le panier de la carte), pas le chemin du poste.
    *
    * C'ETAIT LE MAILLON MANQUANT. Le lecteur existait et marchait ; rien ne lui
-   * disait quoi jouer depuis une composition. Un bloc trig-wav laissait donc la
+   * disait quoi jouer depuis une composition. Un bloc play-sf laissait donc la
    * carte sur son moteur precedent, et une note y sonnait en SINUS — constate
    * par l'utilisateur, « j'entends un sinus quand je joue trig wav ». */
   if (c.engine == -2) {
@@ -251,7 +251,7 @@ void _appliquer(const Cue& c) {
      * `bloc=` porte l'identifiant du bloc de chaque son (MESURES §165), sans
      * completion : c'est par lui que le volume retrouve une voix qui joue. */
     String noms, boucles, gains, blocs;
-    bool surCue = true;      // defaut : le comportement d'origine de trig-wav
+    bool surCue = true;      // defaut : le comportement d'origine de play-sf
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -272,15 +272,21 @@ void _appliquer(const Cue& c) {
 
     /* ON COUPE D'ABORD ce que la cue precedente tenait. Sans cela une boucle
      * survivrait a la cue qui l'a lancee — le comportement fantome corrige
-     * partout ailleurs. Les sons de CETTE cue repartent juste apres. */
-    AudioEngine::arreterEchantillon();
+     * partout ailleurs. Les sons de CETTE cue repartent juste apres.
+     * SAUF les clips des play list (§196) : poserListes, plus bas, fait taire
+     * ceux d'une liste qui part, et laisse jouer celle qui CONTINUE — une
+     * chaine de cellules porte le meme bloc d'une cue a la suivante. */
+    AudioEngine::arreterEchantillon(/*listesComprises=*/false);
     AudioEngine::fixerDeclenchementSurCue(surCue);
+    /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
+    const bool listes = _valeurDe(c.params, "liste").length() > 0;
 
-    if (!noms.length()) {
+    if (!noms.length() && !listes) {
       Serial.println("[cues] aucun echantillon nomme");
     } else {
       /* Armer le lecteur une fois — il ne charge rien, tout est deja en PSRAM.
-       * Le premier nom sert d'echantillon par defaut au clavier. */
+       * Le premier nom sert d'echantillon par defaut au clavier ; une cue qui
+       * n'a que des play list arme le lecteur sans clavier. */
       const String premier = _premierSon(noms);
       String raison;
       if (!AudioEngine::setSampler(premier.c_str(), raison))
@@ -333,9 +339,12 @@ void _appliquer(const Cue& c) {
         }
         dn = fn + 1; rang++;
       }
-      Serial.printf("[cues] %d echantillon(s) %s\n", rang,
-                    surCue ? "lances" : "armes pour le clavier");
+      if (rang) Serial.printf("[cues] %d echantillon(s) %s\n", rang,
+                              surCue ? "lances" : "armes pour le clavier");
     }
+    /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
+     * charge. Une cue sans liste les retire (une banque vide). */
+    AudioEngine::poserListes(c.params);
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
@@ -344,7 +353,7 @@ void _appliquer(const Cue& c) {
   /* Et une cue qui ne parle plus d'echantillon du tout (engine != -2) arrete
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
-  if (c.engine != -2) AudioEngine::arreterEchantillon();
+  if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String()); }
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.
@@ -543,8 +552,11 @@ int moteurEmploye(String& son) {
     const int m = e.length() ? e.toInt() : -1;
     if (m >= 0) { moteur = m; return false; }
     if (m != -2) return true;
-    const String premier = _premierSon(_valeurDe(_champ(l, 4), "sample"));
-    if (!premier.length()) return true;          // un bloc sans son : la suivante
+    const String params = _champ(l, 4);
+    const String premier = _premierSon(_valeurDe(params, "sample"));
+    /* Un son de play-sf, ou une play list (§196) — sans clavier : son vide. */
+    if (!premier.length() && !_valeurDe(params, "liste").length())
+      return true;                               // un bloc sans son : la suivante
     son = premier;
     moteur = -2;
     return false;
@@ -572,7 +584,7 @@ bool ecrireTout(const String& contenuTexte) {
    * pouvait depasser la nouvelle fin — installer une composition plus courte
    * laissait alors le transport bloque : `demarrer()` ne trouvait plus sa cue et
    * abandonnait, porte de silence fermee, pendant qu'un `goto` declenchait des
-   * sons dans le vide. Trouve par le banc trig-wav (MESURES §136). */
+   * sons dans le vide. Trouve par le banc play-sf (MESURES §136). */
   const int total = nombre();
   {
     VerrouSeq verrou;

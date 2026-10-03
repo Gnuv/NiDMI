@@ -208,7 +208,14 @@ String listerJson() {
       if (!f.isDirectory()) {
         if (!premier) out += ",";
         premier = false;
-        out += "{\"name\":\"" + String(_base(f.path())) + "\",\"bytes\":" + String(f.size()) + "}";
+        const char* base = _base(f.path());
+        out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size());
+        /* SA DUREE, quand il est charge (MESURES §196) : l'editeur de clips en
+         * fait l'invite de la fin d'une selection. */
+        const int i = _index(base);
+        if (i >= 0 && _ech[i].freq)
+          out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
+        out += "}";
       }
       f = d.openNextFile();
     }

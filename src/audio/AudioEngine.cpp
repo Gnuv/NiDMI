@@ -118,7 +118,11 @@ void IRAM_ATTR sondeTic() {
 }
 
 // Une note en attente, déposée par MidiTask ou par un rappel RTP.
-struct Evenement { uint8_t note; uint8_t velo; };   // velo 0 = extinction
+// `sorte` CLIP (§196) : jouer le clip `clip` de la play list du bloc `bloc`,
+// demande hors du clavier (l'ecoute de l'inspecteur) — par la meme file, pour
+// que seule la tache audio touche aux voix des listes.
+constexpr uint8_t SORTE_NOTE = 0, SORTE_CLIP = 1;
+struct Evenement { uint8_t note; uint8_t velo; uint8_t sorte; uint8_t clip; uint32_t bloc; };   // velo 0 = extinction
 
 struct Voix {
   bool  active   = false;
@@ -225,7 +229,7 @@ bool plaitsAlloue() {
 }
 
 // ---- lecteur d'échantillons ----------------------------------------------
-// Monophonique, à la manière de trig-wav : un déclenchement repart de zéro.
+// Monophonique, à la manière de play-sf : un déclenchement repart de zéro.
 // La hauteur suit la note (do central = hauteur d'origine), par lecture à pas
 // fractionnaire avec interpolation linéaire — quelques opérations par
 // échantillon, sans commune mesure avec un moteur de synthèse.
@@ -263,6 +267,14 @@ struct VoixEch {
   uint32_t age    = 0;        // ordre de declenchement, pour le vol de voix
   uint16_t picG   = 0;        // cretes depuis la derniere lecture (vu-metres, §169)
   uint16_t picD   = 0;
+  /* UN CLIP D'UNE PLAY LIST (§196) : sa liste dans la banque active (-1 :
+   * aucune), son rang, sa selection en trames (finT 0 : jusqu'au bout du
+   * fichier) ; `fondu` > 0 : la voix se tait, de tant par echantillon. */
+  int8_t   liste  = -1;
+  uint8_t  clip   = 0;
+  uint32_t debutT = 0;
+  uint32_t finT   = 0;
+  float    fondu  = 0.0f;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
@@ -280,6 +292,48 @@ static inline float _borneGain(float g) {
 }
 VoixEch  voixEch[VOIX_MAX];
 uint32_t voixHorloge = 0;
+
+/* ── LES PLAY LIST (MESURES §196) ─────────────────────────────────────────
+ * Voir AudioEngine.h. Une banque = les listes armees ; DEUX banques, en
+ * PSRAM (~15 Ko, prises une fois) : un ecrivain remplit celle que la tache
+ * audio ne lit pas et la PROPOSE ; elle l'adopte au debut d'un bloc et ne
+ * relit plus l'autre — c'est seulement alors qu'un ecrivain peut la reprendre.
+ * Les ecrivains (la cue, le chemin vivant, un son qui arrive) passent l'un
+ * apres l'autre, sous verrouListes ; la tache audio ne prend aucun verrou.
+ * Les noms sont resolus, et les secondes converties en trames, par
+ * l'ecrivain : la tache audio ne lit que des index et des nombres. */
+/* Des structures A PLAT, sans constructeur : une banque se met a zero et se
+ * recopie d'un bloc (memset, memcpy), et la memoire prise a zero est deja deux
+ * banques vides. Tout champ se pose explicitement (_remplirListe). */
+struct Clip {
+  char     son[SampleStore::NOM_MAX];
+  float    debutS, finS;                 // ce que dit la cue, en secondes
+  bool     boucle;
+  int8_t   iEch;                         // resolu : -1, la carte n'a pas ce son
+  uint32_t debut, fin;                   // resolus, en trames du fichier (fin 0 : au bout)
+};
+struct Liste {
+  uint32_t bloc;                         // le bloc de la composition : l'etiquette des voix
+  uint8_t  note;                         // la note du clip 1
+  uint8_t  suite;                        // 0 s'arreter, 1 enchainer, 2 enchainer et reboucler
+  uint8_t  n;                            // nombre de clips
+  uint8_t  courant;                      // le clip qui joue (0 : aucun), tenu par la tache audio
+  float    gain;
+  Clip     clips[CLIPS_MAX];
+};
+struct Banque {
+  uint8_t n;
+  Liste   listes[LISTES_MAX];
+};
+Banque*           banques        = nullptr;   // [2], en PSRAM
+volatile int8_t   banqueActive   = 0;          // celle que lit la tache audio
+volatile int8_t   banqueProposee = -1;         // a adopter au debut du prochain bloc
+volatile uint32_t genListes      = 0;          // change a chaque changement d'etat
+StaticSemaphore_t tamponVerrouListes;
+SemaphoreHandle_t verrouListes = xSemaphoreCreateMutexStatic(&tamponVerrouListes);
+/* Un clip qui en coupe un autre fait taire celui-ci en 5 ms, lineairement :
+ * un arret net en plein son claque. */
+constexpr float FONDU_COUPE_S = 0.005f;
 /* LES VU-METRES DE L'APP (MESURES §169) : chaque voix retient sa crete, que
  * loopTask releve (releverCretes). SEULEMENT quand un onglet ecoute — sans lui,
  * rien n'est mesure, pas seulement rien n'est envoye — et porte ouverte : une
@@ -293,8 +347,160 @@ static inline bool _uneVoixSonne() {
   for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif) return true;
   return false;
 }
+
+/* La voix libre, sinon la PLUS ANCIENNE. */
+VoixEch* _voixLibre() {
+  VoixEch* plusVieille = &voixEch[0];
+  for (uint8_t v = 0; v < VOIX_MAX; v++) {
+    if (!voixEch[v].actif) return &voixEch[v];
+    if (voixEch[v].age < plusVieille->age) plusVieille = &voixEch[v];
+  }
+  return plusVieille;
+}
+
+/* ── LES PLAY LIST, COTE TACHE AUDIO (§196) ────────────────────────────────
+ * Tout ce qui suit tourne dans la tache audio, et seulement elle : une note,
+ * un clip demande, la fin d'un clip, l'adoption d'une banque. Elle ne lit que
+ * la banque active, des index et des nombres. */
+
+/* Faire taire une voix en 5 ms : elle quitte sa liste — elle n'enchainera
+ * plus — et descend lineairement jusqu'a zero, ou elle s'eteint. */
+void _eteindreEnDouceur(VoixEch& vo) {
+  vo.liste = -1;
+  const float g = (vo.gain > 1e-4f) ? vo.gain : 1e-4f;
+  vo.fondu = g / (FONDU_COUPE_S * float(srReel));
+}
+
+/* Le clip k (1..n) de L se joue-t-il ? Un son que la carte a, une selection
+ * qui contient au moins deux trames. */
+bool _clipJouable(const Liste& L, uint8_t k) {
+  if (k == 0 || k > L.n) return false;
+  const Clip& c = L.clips[k - 1];
+  if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch)) return false;
+  const size_t n = SampleStore::trames((uint8_t)c.iEch);
+  const size_t fin = (c.fin > c.debut && c.fin < n) ? c.fin : n;
+  return (size_t)c.debut + 2 <= fin;
+}
+
+/* Pose sur la voix le son et la selection du clip k — pas son gain. Faux, et
+ * la voix intacte, si le clip ne se joue pas. */
+bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
+  if (!_clipJouable(L, k)) return false;
+  const Clip& c = L.clips[k - 1];
+  const size_t n = SampleStore::trames((uint8_t)c.iEch);
+  vo.iEch   = (uint8_t)c.iEch;
+  vo.pas    = double(SampleStore::frequence(vo.iEch)) / double(srReel);
+  vo.pos    = double(c.debut);
+  vo.debutT = c.debut;
+  vo.finT   = (c.fin > c.debut && c.fin < n) ? c.fin : 0;
+  vo.boucle = c.boucle;
+  vo.clip   = k;
+  return true;
+}
+
+/* Lancer le clip k de la liste li — 0 : seulement l'arreter. Ce que la liste
+ * jouait se tait en 5 ms : un clip a la fois. Un clip qui ne se joue pas (sans
+ * son) ne fait RIEN, pas meme arreter le precedent. */
+void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
+  const Liste& L = b.listes[li];
+  if (k > 0 && !_clipJouable(L, k)) return;
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (voixEch[v].actif && voixEch[v].liste == (int8_t)li) _eteindreEnDouceur(voixEch[v]);
+  if (k == 0) return;
+  VoixEch* vo = _voixLibre();
+  vo->actif = false;                   // voir declencherEchantillon
+  __sync_synchronize();
+  _poserClip(*vo, L, k);
+  vo->liste = (int8_t)li;
+  vo->bloc  = L.bloc;
+  vo->velo  = 1.0f;                    // la velocite ne compte pas
+  vo->cible = _borneGain(L.gain);
+  vo->gain  = vo->cible;
+  vo->fondu = 0.0f;
+  vo->age   = ++voixHorloge;
+  vo->picG  = 0; vo->picD = 0;
+  __sync_synchronize();
+  vo->actif = true;
+}
+
+/* LA FIN D'UN CLIP — sa selection lue, sans boucle : la liste decide (`suite`).
+ * Vrai si la voix enchaine, l'autre clip deja pose : la meme voix lit un autre
+ * son, sans un echantillon de trou. Les clips qui ne se jouent pas sont
+ * sautes ; au plus un tour de liste. */
+bool _clipSuivant(VoixEch& vo) {
+  if (vo.liste < 0 || !banques) return false;
+  const Banque& b = banques[banqueActive];
+  if (vo.liste >= (int8_t)b.n) return false;
+  const Liste& L = b.listes[vo.liste];
+  if (L.suite == 0 || !L.n) return false;
+  for (uint8_t essai = 1; essai <= L.n; essai++) {
+    uint16_t k = (uint16_t)vo.clip + essai;
+    if (k > L.n) {
+      if (L.suite != 2) return false;
+      k = (uint16_t)((k - 1) % L.n) + 1;
+    }
+    if (_poserClip(vo, L, (uint8_t)k)) return true;
+  }
+  return false;
+}
+
+/* UNE NOTE CHOISIT LE CLIP, dans chaque liste armee : la note du clip 1 joue
+ * le clip 1, la suivante le clip 2… ; celle juste en dessous arrete. */
+void _notePourLesListes(uint8_t note) {
+  if (!banques) return;
+  const Banque& b = banques[banqueActive];
+  for (uint8_t li = 0; li < b.n; li++) {
+    const int k = int(note) - int(b.listes[li].note) + 1;   // 0 : la note d'arret
+    if (k >= 0 && k <= b.listes[li].n) _lancerClip(b, li, (uint8_t)k);
+  }
+}
+
+/* Un clip demande hors du clavier : l'ecoute de l'inspecteur (jouerClip). */
+void _clipDemande(uint32_t bloc, uint8_t k) {
+  if (!banques || !bloc) return;
+  const Banque& b = banques[banqueActive];
+  for (uint8_t li = 0; li < b.n; li++)
+    if (b.listes[li].bloc == bloc) { _lancerClip(b, li, k); return; }
+}
+
+/* L'ADOPTION d'une banque proposee, au debut d'un bloc — ou par l'ecrivain
+ * quand la tache audio ne tourne pas. Une voix dont la liste continue (meme
+ * bloc : une chaine de cellules) la suit, et glisse vers son nouveau gain ;
+ * celle d'une liste qui part se tait en 5 ms. */
+void _adopter(int8_t prop) {
+  const Banque& an = banques[banqueActive];
+  Banque& nv = banques[prop];
+  for (uint8_t v = 0; v < VOIX_MAX; v++) {
+    VoixEch& vo = voixEch[v];
+    if (!vo.actif || vo.liste < 0) continue;
+    const uint32_t bloc = (vo.liste < (int8_t)an.n) ? an.listes[vo.liste].bloc : 0;
+    int8_t li = -1;
+    for (uint8_t k = 0; k < nv.n && bloc; k++) if (nv.listes[k].bloc == bloc) { li = (int8_t)k; break; }
+    if (li < 0) { _eteindreEnDouceur(vo); continue; }
+    vo.liste = li;
+    vo.cible = vo.velo * _borneGain(nv.listes[li].gain);
+  }
+  for (uint8_t k = 0; k < nv.n; k++) nv.listes[k].courant = 0;   // recompte au bloc
+  banqueActive = prop;
+  __sync_synchronize();
+  banqueProposee = -1;
+  genListes = genListes + 1;
+}
+
+/* LE CLIP QUI JOUE, recompte a chaque bloc DEPUIS LES VOIX : rien d'autre ne
+ * peut mentir — une fin, un STOP, un vol de voix, une coupure de cue. */
+void _suivreLesListes() {
+  if (!banques) return;
+  Banque& b = banques[banqueActive];
+  for (uint8_t li = 0; li < b.n; li++) {
+    uint8_t c = 0;
+    for (uint8_t v = 0; v < VOIX_MAX; v++)
+      if (voixEch[v].actif && voixEch[v].liste == (int8_t)li) { c = voixEch[v].clip; break; }
+    if (b.listes[li].courant != c) { b.listes[li].courant = c; genListes = genListes + 1; }
+  }
+}
 /* DEUX FACONS DE DECLENCHER, et c'est le bloc qui choisit.
- *   surCue = true  — comportement d'ORIGINE de trig-wav : le son part a
+ *   surCue = true  — comportement d'ORIGINE de play-sf : le son part a
  *                    l'arrivee sur la cue, a la hauteur du fichier, et le
  *                    clavier ne le touche pas.
  *   surCue = false — le clavier le declenche, transpose par la note (do central
@@ -322,21 +528,36 @@ void rendreSample() {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
       const int16_t* pcm = SampleStore::donnees(vo.iEch);
-      const size_t   n   = SampleStore::trames(vo.iEch);
+      size_t         n   = SampleStore::trames(vo.iEch);
       if (!pcm || n < 2) { vo.actif = false; continue; }
       /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
        * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
-       * trame a chaque tour. */
-      if (vo.pos >= double(n - 1)) {
-        if (!vo.boucle) { vo.actif = false; continue; }
-        vo.pos -= double(n - 1);
+       * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
+       * selection d'un clip de play list (§196), qui reboucle sur son debut —
+       * et a la fin d'un clip, la liste peut enchainer sur la meme voix. */
+      size_t fin = (vo.finT > 1 && vo.finT < n) ? vo.finT : n;
+      if (vo.pos >= double(fin - 1)) {
+        if (vo.boucle) {
+          vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
+          if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
+        } else if (vo.liste >= 0 && _clipSuivant(vo)) {
+          pcm = SampleStore::donnees(vo.iEch);
+          n   = SampleStore::trames(vo.iEch);
+          if (!pcm || n < 2) { vo.actif = false; continue; }
+        } else { vo.actif = false; continue; }
       }
-      /* Le gain rejoint sa cible — `fixerGainBloc` la deplace pendant que la
-       * voix joue. Arrive a moins de 1e-4, on pose la cible : pas de traine
-       * sans fin vers zero, donc pas de nombres denormaux dans la boucle. */
-      const float ecart = vo.cible - vo.gain;
-      if (ecart != 0.0f)
-        vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
+      if (vo.fondu > 0.0f) {
+        /* SE TAIRE EN 5 MS (§196) : un clip coupe par un autre. */
+        vo.gain -= vo.fondu;
+        if (vo.gain <= 0.0f) { vo.actif = false; vo.fondu = 0.0f; continue; }
+      } else {
+        /* Le gain rejoint sa cible — `fixerGainBloc` la deplace pendant que la
+         * voix joue. Arrive a moins de 1e-4, on pose la cible : pas de traine
+         * sans fin vers zero, donc pas de nombres denormaux dans la boucle. */
+        const float ecart = vo.cible - vo.gain;
+        if (ecart != 0.0f)
+          vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
+      }
       const size_t k = (size_t)vo.pos;
       const float  f = float(vo.pos - double(k));
       const bool  st = SampleStore::stereo(vo.iEch);
@@ -387,7 +608,12 @@ void appliquer(const Evenement& e) {
   // La porte n'est PAS ouverte par les notes : c'est le TRANSPORT qui decide.
   // Sans play, le clavier ne doit rien produire — regle demandee explicitement.
   // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
+  if (e.sorte == SORTE_CLIP) { _clipDemande(e.bloc, e.clip); return; }   // §196
   if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
+    /* LES PLAY LIST D'ABORD (§196) : une note choisit le clip de chaque liste
+     * armee. Le clavier d'un play-sf la recoit aussi, s'il est en mode MIDI :
+     * deux blocs, deux instruments. */
+    if (e.velo != 0) _notePourLesListes(e.note);
     /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
      * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
      * tomberait sur le sinus plus bas, et on entendrait un bip a chaque touche
@@ -456,6 +682,9 @@ void rendre() {
 void boucleAudio(void*) {
   for (;;) {
     if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
+    /* LES PLAY LIST PROPOSEES s'adoptent AVANT les notes de ce bloc (§196) :
+     * une liste posee puis jouee (l'ecoute de l'inspecteur) trouve la sienne. */
+    if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
     /* UN SON RETIRE (remplace, supprime — §177) se tait ici, au debut du bloc :
@@ -479,6 +708,7 @@ void boucleAudio(void*) {
       rendre();
     }
     cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
+    _suivreLesListes();                 // le clip qui joue, depuis les voix (§196)
     /* VOLUME. Avant la porte, donc avant la mesure de crete : ce qu'on mesure
      * reste ce qui part vraiment. A 1.0 on ne touche a rien — le cas courant ne
      * paie pas une multiplication par echantillon. */
@@ -574,7 +804,9 @@ bool     restaurationCoupee = false;
 
 // Ce que la composition emploie, pour le journal.
 String decrire(int moteur, const char* son) {
-  if (moteur == -2) return String("le lecteur d'echantillons (clavier sur ") + (son ? son : "") + ")";
+  if (moteur == -2) return (son && *son)
+                         ? String("le lecteur d'echantillons (clavier sur ") + son + ")"
+                         : String("le lecteur d'echantillons (des play list, sans clavier)");
   if (moteur >= 0)  return String("le moteur de synthese n°") + moteur;
   return String("aucun moteur");
 }
@@ -983,22 +1215,13 @@ void libererPlaits() {
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 }
 
-/* DECLENCHER SANS NOTE, a la hauteur du fichier. C'est ce que fait `trig-wav`
+/* DECLENCHER SANS NOTE, a la hauteur du fichier. C'est ce que fait `play-sf`
  * a l'arrivee sur une cue : on part de zero, on lit au rythme du fichier (la
  * seule correction est l'ecart entre sa frequence et celle que l'I2S a
  * reellement obtenue), et on boucle si la cue le demande. */
-/* La voix libre, sinon la PLUS ANCIENNE. */
-static VoixEch* _voixLibre() {
-  VoixEch* plusVieille = &voixEch[0];
-  for (uint8_t v = 0; v < VOIX_MAX; v++) {
-    if (!voixEch[v].actif) return &voixEch[v];
-    if (voixEch[v].age < plusVieille->age) plusVieille = &voixEch[v];
-  }
-  return plusVieille;
-}
 
 /* Declenche UN echantillon, nomme. `demiTons` = 0 signifie « a la hauteur du
- * fichier » — le cas de trig-wav sur cue ; le clavier passe un ecart. `gain`
+ * fichier » — le cas de play-sf sur cue ; le clavier passe un ecart. `gain`
  * negatif = non precise, donc plein. */
 bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiTons,
                            uint32_t bloc, float velo) {
@@ -1024,6 +1247,9 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   vo->boucle = boucle;
   vo->age    = ++voixHorloge;
   vo->picG   = 0; vo->picD = 0;        // une voix volee ne garde pas la crete d'avant
+  /* Une voix de play-sf n'est pas un clip (§196) : le fichier entier, aucune
+   * liste — une voix volee a une liste ne doit rien en garder. */
+  vo->liste  = -1; vo->clip = 0; vo->debutT = 0; vo->finT = 0; vo->fondu = 0.0f;
   __sync_synchronize();
   vo->actif  = true;
   return true;
@@ -1038,6 +1264,12 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
 uint8_t fixerGainBloc(uint32_t bloc, float gain) {
   if (!bloc) return 0;                     // 0 = voix sans bloc : on n'y touche pas
   const float g = _borneGain(gain);
+  /* Une play list de ce bloc (§196) : ses clips A VENIR aussi. Un flottant
+   * aligne, ecrit d'un coup : la tache audio lit l'ancien ou le nouveau. */
+  if (banques) {
+    Banque& b = banques[banqueActive];
+    for (uint8_t li = 0; li < b.n; li++) if (b.listes[li].bloc == bloc) b.listes[li].gain = g;
+  }
   uint8_t n = 0;
   for (uint8_t v = 0; v < VOIX_MAX; v++) {
     VoixEch& vo = voixEch[v];
@@ -1097,7 +1329,242 @@ void arreterEchantillonNomme(const char* nom) {
 
 /* Quitter la cue arrete le son — comme le `dispose()` du BufferSource cote
  * navigateur. Sans ca, une boucle survivrait a la cue qui l'a lancee. */
-void arreterEchantillon() { for (uint8_t v = 0; v < VOIX_MAX; v++) voixEch[v].actif = false; }
+void arreterEchantillon(bool listesComprises) {
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (listesComprises || voixEch[v].liste < 0) voixEch[v].actif = false;
+}
+
+/* ── LES PLAY LIST, COTE ECRIVAINS (§196) ─────────────────────────────────
+ * La cue (loopTask ou serveur web), le chemin vivant et l'ecoute (serveur
+ * web), un son qui arrive ou part. L'un apres l'autre, sous verrouListes. */
+namespace {
+struct VerrouListes {
+  VerrouListes()  { xSemaphoreTake(verrouListes, portMAX_DELAY); }
+  ~VerrouListes() { xSemaphoreGive(verrouListes); }
+};
+
+bool _assurerBanques() {
+  if (banques) return true;
+  /* Deux banques a zero : deux banques vides. En PSRAM — ~15 Ko que le tas
+   * interne n'a pas a porter ; la tache audio n'y lit qu'aux bornes d'un clip
+   * et a chaque note, jamais a chaque echantillon. */
+  banques = (Banque*)heap_caps_calloc(2, sizeof(Banque), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!banques) Serial.println("[audio] play list : 2 banques impossibles en PSRAM");
+  return banques != nullptr;
+}
+
+/* Attendre que la proposition en cours soit adoptee — au plus 200 ms ; la
+ * tache audio l'adopte au bloc suivant (2,5 ms). Si elle ne tourne pas,
+ * personne d'autre ne lit les banques : on adopte soi-meme. */
+bool _attendreAdoption() {
+  for (int i = 0; i < 200 && banqueProposee >= 0; i++) {
+    if (!demarre) { _adopter(banqueProposee); break; }
+    vTaskDelay(1);
+  }
+  return banqueProposee < 0;
+}
+
+/* La banque que la tache audio NE LIT PAS — a remplir puis proposer. Nul si
+ * une proposition reste pendante : jamais on ne reecrit ce qu'elle va lire. */
+Banque* _banqueLibre() {
+  if (!_assurerBanques() || !_attendreAdoption()) return nullptr;
+  return &banques[1 - banqueActive];
+}
+
+void _proposer(Banque* b) {
+  __sync_synchronize();
+  banqueProposee = (int8_t)(b - banques);
+  /* Adoptee avant de rendre la main : l'appelant peut enchainer (jouer un
+   * clip), et le suivant trouvera la banque libre. */
+  _attendreAdoption();
+}
+
+// La valeur de `cle` dans « cle=valeur;cle=valeur » ; "" si absente.
+String _valeurParam(const String& params, const char* cle) {
+  int debut = 0;
+  while (debut < (int)params.length()) {
+    int fin = params.indexOf(';', debut);
+    if (fin < 0) fin = params.length();
+    const int eq = params.indexOf('=', debut);
+    if (eq > debut && eq < fin) {
+      String k = params.substring(debut, eq); k.trim();
+      if (k == cle) { String v = params.substring(eq + 1, fin); v.trim(); return v; }
+    }
+    debut = fin + 1;
+  }
+  return String();
+}
+// La partie k de `s` coupee par `sep` ; "" au-dela.
+String _partie(const String& s, char sep, int k) {
+  int debut = 0;
+  for (int i = 0; i < k; i++) {
+    const int p = s.indexOf(sep, debut);
+    if (p < 0) return String();
+    debut = p + 1;
+  }
+  const int fin = s.indexOf(sep, debut);
+  String v = (fin < 0) ? s.substring(debut) : s.substring(debut, fin);
+  v.trim();
+  return v;
+}
+int _nbParties(const String& s, char sep) {
+  if (!s.length()) return 0;
+  int n = 1;
+  for (size_t i = 0; i < s.length(); i++) if (s[i] == sep) n++;
+  return n;
+}
+// Comme _partie, mais une liste plus courte prolonge sa derniere valeur.
+String _partieCompletee(const String& s, char sep, int k) {
+  const int n = _nbParties(s, sep);
+  return n ? _partie(s, sep, (k < n) ? k : n - 1) : String();
+}
+
+struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle; };
+Champs _champs(const String& params) {
+  return Champs{ _valeurParam(params, "liste"),  _valeurParam(params, "lbloc"),
+                 _valeurParam(params, "lnote"),  _valeurParam(params, "lsuite"),
+                 _valeurParam(params, "lgain"),  _valeurParam(params, "ldebut"),
+                 _valeurParam(params, "lfin"),   _valeurParam(params, "lboucle") };
+}
+
+/* Le son d'un clip, cherche dans le magasin ; ses secondes, en trames DU
+ * FICHIER. Refait quand un son arrive ou part (_reresoudre). */
+void _resoudre(Clip& c) {
+  c.iEch = -1; c.debut = 0; c.fin = 0;
+  if (!c.son[0]) return;
+  const int i = SampleStore::indexDe(c.son);
+  if (i < 0) return;
+  const float f = (float)SampleStore::frequence((uint8_t)i);
+  c.iEch  = (int8_t)i;
+  c.debut = (c.debutS > 0.0f) ? (uint32_t)(c.debutS * f + 0.5f) : 0;
+  c.fin   = (c.finS   > 0.0f) ? (uint32_t)(c.finS   * f + 0.5f) : 0;
+}
+
+/* La liste i des champs, dans L — tous ses champs poses. Les sons que la
+ * carte n'a pas vont dans `absents` (une fois chacun). Rend vrai si au moins
+ * un clip porte un son (une liste sans aucun son n'en est pas une). */
+bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents) {
+  memset(&L, 0, sizeof(Liste));
+  L.bloc = (uint32_t)_partie(ch.bloc, ',', i).toInt();
+  const String n = _partieCompletee(ch.note,  ',', i);
+  const String s = _partieCompletee(ch.suite, ',', i);
+  const String g = _partieCompletee(ch.gain,  ',', i);
+  L.note  = n.length() ? (uint8_t)constrain(n.toInt(), 0, 127) : 60;
+  L.suite = s.length() ? (uint8_t)constrain(s.toInt(), 0, 2)   : 0;
+  L.gain  = g.length() ? _borneGain(g.toFloat()) : 1.0f;
+  const String noms = _partie(ch.liste, ',', i), debs = _partie(ch.debut,  ',', i),
+               fins = _partie(ch.fin,   ',', i), bcls = _partie(ch.boucle, ',', i);
+  const int nc = _nbParties(noms, '/');
+  if (nc > CLIPS_MAX)
+    Serial.printf("[audio] play list %lu : %d clips, %u gardes\n",
+                  (unsigned long)L.bloc, nc, (unsigned)CLIPS_MAX);
+  bool unSon = false;
+  for (int k = 0; k < nc && k < CLIPS_MAX; k++) {
+    Clip& c = L.clips[k];
+    const String nom = _partie(noms, '/', k);
+    strncpy(c.son, nom.c_str(), sizeof(c.son) - 1);
+    c.debutS = _partie(debs, '/', k).toFloat();
+    c.finS   = _partie(fins, '/', k).toFloat();
+    c.boucle = _partie(bcls, '/', k).toFloat() >= 0.5f;
+    _resoudre(c);
+    if (c.son[0]) unSon = true;
+    if (absents && c.son[0] && c.iEch < 0
+        && ("," + *absents + ",").indexOf("," + String(c.son) + ",") < 0)
+      *absents += (absents->length() ? "," : "") + String(c.son);
+    L.n = (uint8_t)(k + 1);
+  }
+  return unSon;
+}
+
+/* Un son est arrive ou parti : les index des clips se recalculent — un clip
+ * ne garde jamais l'emplacement d'un son retire. */
+void _reresoudre() {
+  VerrouListes v;
+  if (!banques || !banques[banqueActive].n) return;
+  Banque* b = _banqueLibre();
+  if (!b) return;
+  memcpy(b, &banques[banqueActive], sizeof(Banque));
+  for (uint8_t li = 0; li < b->n; li++)
+    for (uint8_t k = 0; k < b->listes[li].n; k++) _resoudre(b->listes[li].clips[k]);
+  _proposer(b);
+}
+}  // namespace
+
+void poserListes(const String& params) {
+  VerrouListes v;
+  const Champs ch = _champs(params);
+  const int nl = _nbParties(ch.liste, ',');
+  /* Rien avant, rien apres : pas de banque a proposer (chaque cue sans liste
+   * passe par ici). */
+  if (!nl && (!banques || !banques[banqueActive].n)) return;
+  Banque* b = _banqueLibre();
+  if (!b) { Serial.println("[audio] play list : banque non adoptee, listes non posees"); return; }
+  memset(b, 0, sizeof(Banque));
+  for (int i = 0; i < nl; i++) {
+    if (b->n >= LISTES_MAX) {
+      Serial.printf("[audio] %d play lists, %u gardees\n", nl, (unsigned)LISTES_MAX);
+      break;
+    }
+    if (_remplirListe(b->listes[b->n], ch, i, nullptr)) b->n++;
+  }
+  _proposer(b);
+}
+
+int poserListe(const String& params, String& absents, uint32_t& bloc) {
+  VerrouListes v;
+  absents = "";
+  const Champs ch = _champs(params);
+  bloc = (uint32_t)_partie(ch.bloc, ',', 0).toInt();
+  if (!bloc) return -1;
+  Banque* b = _banqueLibre();
+  if (!b) return -1;
+  memcpy(b, &banques[banqueActive], sizeof(Banque));
+  int li = -1;
+  for (uint8_t k = 0; k < b->n; k++) if (b->listes[k].bloc == bloc) { li = k; break; }
+  if (li < 0) {
+    if (b->n >= LISTES_MAX) return -1;               // plus de place
+    li = b->n++;
+  }
+  const bool unSon = _remplirListe(b->listes[li], ch, 0, &absents);
+  const int n = b->listes[li].n;
+  if (!unSon) {                                      // sans aucun son : retiree
+    for (int k = li; k + 1 < b->n; k++) memcpy(&b->listes[k], &b->listes[k + 1], sizeof(Liste));
+    b->n--;
+  }
+  _proposer(b);
+  return unSon ? n : 0;
+}
+
+bool jouerClip(uint32_t bloc, uint8_t k) {
+  if (!demarre || !bloc) return false;
+  {
+    VerrouListes v;
+    if (!banques) return false;
+    const Banque& b = banques[banqueActive];
+    int li = -1;
+    for (uint8_t i = 0; i < b.n; i++) if (b.listes[i].bloc == bloc) { li = i; break; }
+    if (li < 0) return false;
+    if (k > 0 && !_clipJouable(b.listes[li], k)) return false;
+  }
+  Evenement e{};
+  e.sorte = SORTE_CLIP; e.bloc = bloc; e.clip = k;
+  deposerEvenement(e);
+  return true;
+}
+
+int etatListes(uint32_t* blocs, uint8_t* clips, uint8_t* nombres, uint8_t max, bool attendre) {
+  if (!banques) return 0;
+  if (xSemaphoreTake(verrouListes, attendre ? portMAX_DELAY : 0) != pdTRUE) return -1;
+  const Banque& b = banques[banqueActive];
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < b.n && n < max; i++, n++) {
+    blocs[n] = b.listes[i].bloc; clips[n] = b.listes[i].courant; nombres[n] = b.listes[i].n;
+  }
+  xSemaphoreGive(verrouListes);
+  return n;
+}
+
+uint32_t generationListes() { return genListes; }
 
 /* Qui declenche : la cue (defaut, comportement d'origine) ou le clavier. */
 void fixerDeclenchementSurCue(bool surCue) { sampleSurCue = surCue; }
@@ -1122,6 +1589,7 @@ bool setSampler(const char* nom, String& raison) {
 void arreterSampler() {
   if (moteurCourant == -2) moteurCourant = -1;
   arreterEchantillon();
+  poserListes(String());              // plus de lecteur, plus de play list (§196)
   /* ON NE LIBERE PAS LA PSRAM. Les echantillons restent charges tant que
    * leur fichier est dans storage (voir SampleStore.h — le pire cas absolu tient
    * dans 12,7 % de la PSRAM) : pas de rechargement de 32 a 72 ms a chaque cue.
@@ -1156,12 +1624,14 @@ bool echantillonArrive(const char* nom, String& raison) {
   int ancien = -1;
   if (!SampleStore::installer(nom, raison, ancien)) return false;
   rendreApresLecture(ancien);
+  _reresoudre();                      // un clip qui le nomme le trouve (§196)
   return true;
 }
 
 /* UN SON QUITTE MAPFS : il se tait, et sa PSRAM est rendue. */
 void echantillonParti(const char* nom) {
   rendreApresLecture(SampleStore::retirer(nom));
+  _reresoudre();                      // ses clips ne le jouent plus (§196)
 }
 
 bool setEngine(int moteur) {
@@ -1213,6 +1683,7 @@ bool setEngine(int moteur) {
  * le clavier revient « sur cue », comme a l'allumage : une cue l'armera. */
 void preparer(int moteur, const char* son) {
   arreterEchantillon();
+  poserListes(String());              // ses play list viendront avec ses cues (§196)
   fixerDeclenchementSurCue(true);
   if (moteur == -2) {
     String raison;
