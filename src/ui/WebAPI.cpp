@@ -32,8 +32,6 @@ void setupConcertAPI(AsyncWebServer& server);
 
 Preferences preferences;
 
-volatile bool g_pinMonitoringEnabled = false;
-
 // Fonction pour obtenir la configuration par défaut d'une pin
 String getDefaultConfig(String pin) {
     // Pins analogiques (A0, A1, A2, ... A10) - dynamique selon le MCU
@@ -182,8 +180,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
         nidmi_ws_client_arrive(client);
     } else if (type == WS_EVT_DISCONNECT) {
         Serial.println("WebSocket client disconnected");
-        nidmi_ws_client_parti(client);
-        g_pinMonitoringEnabled = false;
+        nidmi_ws_client_parti(client);   // ses abonnements partent avec lui, pas ceux des autres (§200)
     } else if (type == WS_EVT_DATA) {
         AwsFrameInfo *info = (AwsFrameInfo*)arg;
         if (!info || info->opcode != WS_TEXT) return;
@@ -256,11 +253,16 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
             return;
         }
 
-        // Activation/désactivation runtime-only du monitoring SVG
+        /* Le suivi des broches (la telemetrie du monitoring SVG), PAR ONGLET
+         * (MESURES §200) : il tourne tant qu'un onglet le demande, et sa
+         * telemetrie ne va qu'aux onglets qui l'ont demande. La reponse dit
+         * l'etat de CET onglet. */
         if (message.startsWith("PIN_MONITORING:")) {
-            String val = message.substring(15);
-            g_pinMonitoringEnabled = (val == "1");
-            if (client) client->text(String("PIN_MONITORING_STATE:") + (g_pinMonitoringEnabled ? "1" : "0"));
+            const bool oui = (message.substring(15) == "1");
+            if (client) {
+                nidmi_ws_abonner(client->id(), NIDMI_ABO_BROCHES, oui);
+                client->text(String("PIN_MONITORING_STATE:") + (oui ? "1" : "0"));
+            }
             return;
         }
 

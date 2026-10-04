@@ -15,6 +15,8 @@
 #include "../components/ValidationRegistry.h"
 #include "../managers/complex/ComplexHandlerRegistry.h"
 #include "../network/UsbMidiManager.h"
+#include "../server/ServerCore.h"      // nidmi_ws_pousser : l'annonce d'une broche (§201)
+#include <esp_rom_crc.h>
 
 /* Forward declarations */
 String getDefaultConfig(String pin);
@@ -24,6 +26,65 @@ static const size_t NVS_MAX_PIN_CONFIG_SIZE = 1900U;
 
 /* Sentinelle pour indiquer au request handler que le body était trop gros (413) */
 static const void* PINAPI_PAYLOAD_TOO_LARGE = (const void*)1;
+
+/* ── LA REVISION D'UNE BROCHE (MESURES §201) ─────────────────────────────────
+ *
+ * La garde de la composition (§198) ne couvrait pas l'interface. Un panneau I/O
+ * reste ouvert dans un onglet ; un autre client change la broche ; le premier
+ * touche un reglage — l'editeur enregistre a chaque changement — et renvoie
+ * TOUTE la configuration qu'il avait lue, par-dessus la nouvelle.
+ *
+ * Meme mecanisme que la composition : la revision est le CRC-32 de ce que la NVS
+ * garde pour cette broche (`pin_<label>`), jamais un compteur — elle ne depend
+ * que du contenu, survit a un redemarrage, et 0 dit « aucune configuration ».
+ * /api/pins/list les rend (`revs`). Une ecriture ou une suppression qui dit
+ * `base=` est refusee (409, `obsolete`) si la broche a change depuis, et ne
+ * touche a rien ; sans `base` (les outils, la page d'origine), elle passe.
+ * Chaque changement s'annonce : NIDMI_BROCHE:<label>:<revision>. Tout cela
+ * tourne dans async_tcp, seule tache a ecrire ces cles : comparer puis ecrire
+ * n'a pas besoin de verrou. */
+static uint32_t revisionDe(const char* d, size_t n) {
+    if (!d || !n) return 0;
+    const uint32_t r = esp_rom_crc32_le(0, (const uint8_t*)d, (uint32_t)n);
+    return r ? r : 1;                    // jamais 0 pour un contenu
+}
+static uint32_t revisionDe(const String& s) { return revisionDe(s.c_str(), s.length()); }
+static uint32_t revisionBroche(const String& pinLabel) {
+    Preferences p;
+    if (!p.begin("nidmi", true)) return 0;
+    const String s = p.getString(("pin_" + pinLabel).c_str(), "");
+    p.end();
+    return revisionDe(s);
+}
+static String hex8(uint32_t v) { char h[9]; snprintf(h, sizeof h, "%08x", (unsigned)v); return String(h); }
+/* `base=` (formulaire ou adresse) ; false si l'ecriture n'en dit pas. */
+static bool baseDemandee(AsyncWebServerRequest* request, uint32_t& base) {
+    String b;
+    if (request->hasParam("base", true)) b = request->getParam("base", true)->value();
+    else if (request->hasParam("base"))  b = request->getParam("base")->value();
+    if (!b.length()) return false;
+    base = (uint32_t)strtoul(b.c_str(), nullptr, 16);
+    return true;
+}
+/* Refusee si `base` ne dit plus ce que la carte garde : 409, et la revision de
+ * la carte, pour que l'onglet sache ou il en est. */
+static bool refuseeCarPerimee(AsyncWebServerRequest* request, const String& pinLabel) {
+    uint32_t base = 0;
+    if (!baseDemandee(request, base)) return false;
+    const uint32_t rev = revisionBroche(pinLabel);
+    if (base == rev) return false;
+    request->send(409, "application/json",
+        "{\"status\":\"error\",\"obsolete\":true,\"message\":\"La broche " + pinLabel
+        + " a change depuis que cet onglet l'a lue : rien n'a ete ecrit.\",\"revision\":\""
+        + hex8(rev) + "\",\"broche\":\"" + pinLabel + "\"}");
+    return true;
+}
+static void annoncerBroche(const String& pinLabel, uint32_t rev) {
+    char trame[48];
+    snprintf(trame, sizeof trame, "NIDMI_BROCHE:%s:%08x", pinLabel.c_str(), (unsigned)rev);
+    nidmi_ws_pousser(trame);
+}
+static String okRevision(uint32_t rev) { return "{\"status\":\"ok\",\"revision\":\"" + hex8(rev) + "\"}"; }
 
 /** Extrait la valeur d'une clé JSON "\"key\":\"value\"" depuis un buffer (évite String complète = moins de pile) */
 static bool extractJsonQuoted(const char* json, size_t jsonLen, const char* key, char* out, size_t outLen) {
@@ -110,6 +171,36 @@ static String fusionnerConfigBroche(const String& neuf, const String& ancien) {
         sortie = sortie.substring(0, accolade) + ",\"" + cle + "\":" + valeur + "}";
     }
     return sortie;
+}
+
+/* LE CORPS JSON BRUT (LIS3DH, MPR121), recu en entier par le body handler. Il
+ * s'ecrivait des la fin du corps, DANS le body handler : trop tot pour refuser
+ * une ecriture perimee (§201). Il s'ecrit maintenant ici, dans le gestionnaire de
+ * fin de requete — meme tache, meme effet —, une fois sa revision verifiee.
+ * Depuis le tampon : pas de String(json) complete, la pile reste petite. */
+static void ecrireCorpsJson(AsyncWebServerRequest* request, const char* buf) {
+    const size_t total = strlen(buf);
+    char pinLabelBuf[16];
+    char roleBuf[32];
+    if (!extractJsonQuoted(buf, total, "pinLabel", pinLabelBuf, sizeof(pinLabelBuf)) ||
+        !extractJsonQuoted(buf, total, "role", roleBuf, sizeof(roleBuf)) ||
+        pinLabelBuf[0] == '\0' || roleBuf[0] == '\0') {
+        Serial.printf("[PinAPI] JSON body invalide (pinLabel ou role manquant, len=%u)\n", (unsigned)total);
+        request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"pinLabel and role required\"}");
+        return;
+    }
+    const String pinLabel(pinLabelBuf);
+    if (refuseeCarPerimee(request, pinLabel)) return;      // rien n'est ecrit
+    Preferences preferences;
+    preferences.begin("nidmi", false);
+    preferences.putString(("pin_" + pinLabel).c_str(), buf);
+    preferences.end();
+    g_configCache.setConfigClean(pinLabel, buf, total);
+    nidmi_requestReloadPins();
+    Serial.printf("[PinAPI] JSON body %s role=%s len=%u\n", pinLabelBuf, roleBuf, (unsigned)total);
+    const uint32_t rev = revisionDe(buf, total);
+    annoncerBroche(pinLabel, rev);
+    request->send(200, "application/json", okRevision(rev));
 }
 
 void setupPinAPI(AsyncWebServer& server) {
@@ -320,6 +411,14 @@ void setupPinAPI(AsyncWebServer& server) {
     server.on("/api/pins/list", HTTP_GET, [](AsyncWebServerRequest *request){
         String json = "{";
         json += "\"pins\":[";
+        /* La revision de chaque broche rendue (§201) : ce que l'onglet dira en
+         * `base` quand il l'ecrira. A cote des configurations, jamais dedans :
+         * elles partent telles que la NVS les garde. */
+        String revs;
+        auto noterRev = [&revs](const String& label, const String& stocke) {
+            if (revs.length()) revs += ",";
+            revs += "\"" + label + "\":\"" + hex8(revisionDe(stocke)) + "\"";
+        };
         
         Preferences preferences;
         preferences.begin("nidmi", true);
@@ -348,6 +447,7 @@ void setupPinAPI(AsyncWebServer& server) {
                 }
                 if (!first) json += ",";
                 json += configStr;  // Le config est déjà un JSON complet avec pinLabel
+                noterRev(pinLabel, configStr);
                 first = false;
             }
         }
@@ -361,6 +461,7 @@ void setupPinAPI(AsyncWebServer& server) {
             if (!configStr.isEmpty()) {
                 if (!first) json += ",";
                 json += configStr;  // Le config est déjà un JSON complet avec pinLabel
+                noterRev(String(busLabel), configStr);
                 first = false;
             }
         }
@@ -410,8 +511,10 @@ void setupPinAPI(AsyncWebServer& server) {
                         /* Si la config existe dans NVS, l'utiliser directement (contient tous les paramètres MIDI, formFields, etc.) */
                         if (!first) json += ",";
                         json += configStr;  /* Le config est déjà un JSON complet avec pinLabel */
+                        noterRev(sigPinLabel, configStr);
                         first = false;
                     } else {
+                        noterRev(sigPinLabel, String());   // rien en NVS : revision 0
                         /* Fallback : construire depuis MuxConfig si pas trouvé dans NVS (compatibilité) */
                         if (!first) json += ",";
                         
@@ -462,7 +565,7 @@ void setupPinAPI(AsyncWebServer& server) {
         }
         
         preferences.end();
-        json += "]}";
+        json += "],\"revs\":{" + revs + "}}";
         
         request->send(200, "application/json", json);
     });
@@ -478,11 +581,12 @@ void setupPinAPI(AsyncWebServer& server) {
             request->send(413, "application/json", "{\"status\":\"error\",\"message\":\"Config trop grande pour NVS (max 1900 octets)\"}");
             return;
         }
-        /* Si le body JSON a déjà été traité par le body handler, ne rien faire */
+        /* Un corps JSON brut, recu en entier : il s'ecrit ici (§201). */
         if (request->_tempObject) {
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
-            free(request->_tempObject);
+            char* buf = (char*)request->_tempObject;
             request->_tempObject = nullptr;
+            ecrireCorpsJson(request, buf);
+            free(buf);
             return;
         }
         
@@ -493,6 +597,10 @@ void setupPinAPI(AsyncWebServer& server) {
         
         String pinLabel = request->getParam("pinLabel", true)->value();
         String role = request->getParam("role", true)->value();
+
+        /* LA GARDE DE REVISION (§201), avant tout le reste : refusee, l'ecriture
+         * ne touche a rien — ni a la NVS, ni aux occupations. */
+        if (refuseeCarPerimee(request, pinLabel)) return;
         
         /* Obtenir la définition du composant pour lecture dynamique des paramètres */
         const ComponentDefinition* def = ComponentRegistry::findById(role.c_str());
@@ -1045,8 +1153,11 @@ void setupPinAPI(AsyncWebServer& server) {
         /* Mettre à jour ConfigCache */
         g_configCache.setConfigClean(pinLabel, json);
         nidmi_requestReloadPins();
-        
-        request->send(200, "application/json", "{\"status\":\"ok\"}");
+
+        /* Ce que la NVS garde desormais, et que les autres onglets apprennent (§201). */
+        const uint32_t rev = written ? revisionDe(json) : revisionBroche(pinLabel);
+        annoncerBroche(pinLabel, rev);
+        request->send(200, "application/json", okRevision(rev));
     },
     /* Upload handler (non utilisé) */
     NULL,
@@ -1057,43 +1168,28 @@ void setupPinAPI(AsyncWebServer& server) {
             request->_tempObject = malloc(total + 1);
             if (!request->_tempObject) return;
         }
-        if (!request->_tempObject) return;
+        if (!request->_tempObject || request->_tempObject == PINAPI_PAYLOAD_TOO_LARGE) return;
         memcpy((uint8_t*)request->_tempObject + index, data, len);
         if (index + len != total) return;
         ((char*)request->_tempObject)[total] = '\0';
-        const char* buf = (const char*)request->_tempObject;
-        char pinLabelBuf[16];
-        char roleBuf[32];
-        if (!extractJsonQuoted(buf, total, "pinLabel", pinLabelBuf, sizeof(pinLabelBuf)) ||
-            !extractJsonQuoted(buf, total, "role", roleBuf, sizeof(roleBuf)) ||
-            pinLabelBuf[0] == '\0' || roleBuf[0] == '\0') {
-            Serial.printf("[PinAPI] JSON body invalide (pinLabel ou role manquant, len=%u)\n", (unsigned)total);
-            free(request->_tempObject);
-            request->_tempObject = nullptr;
-            return;
-        }
         if (total > NVS_MAX_PIN_CONFIG_SIZE) {
-            Serial.printf("[PinAPI] JSON body trop gros pour NVS: %u > %u (pin=%s)\n",
-                (unsigned)total, (unsigned)NVS_MAX_PIN_CONFIG_SIZE, pinLabelBuf);
+            Serial.printf("[PinAPI] JSON body trop gros pour NVS: %u > %u\n",
+                (unsigned)total, (unsigned)NVS_MAX_PIN_CONFIG_SIZE);
             free(request->_tempObject);
             request->_tempObject = (void*)PINAPI_PAYLOAD_TOO_LARGE;
             return;
         }
-        String pinLabel = String(pinLabelBuf);
-        String key = String("pin_") + pinLabel;
-        Preferences preferences;
-        preferences.begin("nidmi", false);
-        preferences.putString(key.c_str(), buf); /* Écrire directement depuis le buffer, pas de String(json) */
-        preferences.end();
-        g_configCache.setConfigClean(pinLabel, buf, total);
-        nidmi_requestReloadPins();
-        Serial.printf("[PinAPI] JSON body %s role=%s len=%u\n", pinLabelBuf, roleBuf, (unsigned)total);
+        /* Rien d'ecrit ici : le gestionnaire de fin de requete verifie la
+         * revision, puis ecrit (ecrireCorpsJson, §201). */
     });
 
     /* API - Suppression d'une pin (unifié pour simples et complexes) */
     server.on("/api/pins/delete", HTTP_POST, [](AsyncWebServerRequest *request){
         if(request->hasParam("pin", true)){
             String pinLabel = request->getParam("pin", true)->value();
+            /* La garde de revision (§201) : on ne supprime pas une broche qu'un
+             * autre client vient de configurer. */
+            if (refuseeCarPerimee(request, pinLabel)) return;
             
             /* Chercher le complexId depuis MuxManager en premier (plus fiable) */
             PinMapper::detectMcu();
@@ -1146,8 +1242,9 @@ void setupPinAPI(AsyncWebServer& server) {
             
             /* Supprimer dans NVS et ConfigCache (pour tous les types) */
             g_configCache.removeConfig(pinLabel);
-            
-            request->send(200, "application/json", "{\"status\":\"ok\"}");
+
+            annoncerBroche(pinLabel, 0);       // revision 0 : plus de configuration (§201)
+            request->send(200, "application/json", okRevision(0));
         } else {
             request->send(400, "application/json", "{\"error\":\"pin required\"}");
         }

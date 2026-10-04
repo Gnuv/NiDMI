@@ -407,7 +407,9 @@ UsbMidiManager& ServerCore::usbMidi() {
 namespace {
     constexpr size_t   kTrameMax   = 216;   // « DEBUG_LOG: » + 200 = le pire cas
     constexpr UBaseType_t kFileLen = 24;
-    struct TrameWs { char t[kTrameMax]; };
+    /* `pour` : 0 = tous les onglets ; sinon un abonnement (NIDMI_ABO_*), et
+     * seuls ses abonnes la recoivent (MESURES §200). */
+    struct TrameWs { char t[kTrameMax]; uint8_t pour; };
 
     StaticQueue_t  g_fileTCB;
     QueueHandle_t  g_fileWs = nullptr;
@@ -445,6 +447,18 @@ namespace {
     };
     InfoOnglet* g_infos = nullptr;
     volatile uint32_t g_generationClients = 0;
+
+    /* LES ABONNEMENTS DE CHAQUE ONGLET (MESURES §200), au meme indice que
+     * g_onglets : des bits NIDMI_ABO_*. En RAM interne, seize octets — pas dans
+     * g_infos, qui peut manquer : sans eux, plus de suivi ni de console du tout.
+     * `g_abosTous` en est le OU, lisible de partout sans verrou. */
+    uint8_t g_abos[kOngletsPlaces] = {};
+    volatile uint8_t g_abosTous = 0;
+    void recalculerAbos() {   // sous le verrou du registre
+        uint8_t tous = 0;
+        for (uint8_t i = 0; i < g_nOnglets; i++) tous |= g_abos[i];
+        g_abosTous = tous;
+    }
 
     /* « la liste a change » : un evenement minuscule, jamais la liste. Appele
      * sous le verrou du registre — nidmi_ws_pousser n'en prend aucun. */
@@ -485,6 +499,7 @@ void nidmi_ws_client_arrive(AsyncWebSocketClient* c) {
         i.depuis = millis();
     }
     g_onglets[g_nOnglets] = c;
+    g_abos[g_nOnglets] = 0;          // il arrive sans abonnement : il les demandera
     g_nOnglets = g_nOnglets + 1;
     /* Au-dela de huit, le plus ancien s'en va — ce que faisait cleanupClients().
      * Il reste inscrit jusqu'a son depart effectif (WS_EVT_DISCONNECT). */
@@ -501,11 +516,16 @@ void nidmi_ws_client_parti(AsyncWebSocketClient* c) {
         if (g_onglets[i] != c) continue;
         for (uint8_t j = i + 1; j < g_nOnglets; j++) {
             g_onglets[j - 1] = g_onglets[j];
+            g_abos[j - 1] = g_abos[j];
             if (g_infos) g_infos[j - 1] = g_infos[j];
         }
         g_nOnglets = g_nOnglets - 1;
         g_onglets[g_nOnglets] = nullptr;
+        g_abos[g_nOnglets] = 0;
         if (g_infos) memset(&g_infos[g_nOnglets], 0, sizeof(InfoOnglet));
+        /* Ses abonnements partent avec lui, ceux des autres restent : c'etait
+         * ici que le suivi des broches s'eteignait pour tous (MESURES §200). */
+        recalculerAbos();
         annoncerClients();
         return;
     }
@@ -541,6 +561,33 @@ int nidmi_ws_envoyer_a(uint32_t id, const char* texte) {
     return -1;
 }
 uint32_t nidmi_ws_trames_jetees() { return g_jetees; }
+
+/* ── LES ABONNEMENTS (MESURES §200) ─────────────────────────────────────────── */
+
+void nidmi_ws_abonner(uint32_t id, uint8_t abo, bool oui) {
+    VerrouOnglets verrou;
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        if (g_onglets[i]->id() != id) continue;
+        const uint8_t neuf = oui ? (uint8_t)(g_abos[i] | abo) : (uint8_t)(g_abos[i] & ~abo);
+        if (neuf == g_abos[i]) return;      // deja dans cet etat : rien a dire
+        g_abos[i] = neuf;
+        recalculerAbos();
+        annoncerClients();                  // la liste montre les abonnements
+        return;
+    }
+}
+
+bool nidmi_ws_abonne(uint8_t abo) { return (g_abosTous & abo) != 0; }
+
+void nidmi_ws_envoyer_aux_abonnes(uint8_t abo, const char* texte) {
+    if (!texte || !texte[0] || !(g_abosTous & abo)) return;
+    VerrouOnglets verrou;
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        if (!(g_abos[i] & abo)) continue;   // pas abonne : pas un paquet de plus pour lui
+        AsyncWebSocketClient* c = g_onglets[i];
+        if (c->status() == WS_CONNECTED && c->canSend()) c->text(texte);
+    }
+}
 
 /* ── QUI EST CONNECTE (MESURES §199) ──────────────────────────────────────── */
 
@@ -622,20 +669,32 @@ void nidmi_ws_clients_ecrire(String& j) {
         j += ",\"mode\":\""; j += (o.mode == 1 ? "edit" : o.mode == 2 ? "regie" : o.mode == 3 ? "scene" : ""); j += "\"";
         j += ",\"visible\":"; j += (o.visible == 1 ? "true" : o.visible == 2 ? "false" : "null");
         j += ",\"visible_depuis_s\":" + String(o.visible ? (unsigned)((maintenant - o.changementVisible) / 1000) : 0u);
-        j += ",\"rev\":\""; j += (o.aRev ? rev : ""); j += "\"}";
+        j += ",\"rev\":\""; j += (o.aRev ? rev : ""); j += "\"";
+        /* Ce a quoi il est abonne (§200) : ce qu'il recoit de plus que les autres. */
+        j += ",\"abonnements\":[";
+        j += (g_abos[i] & NIDMI_ABO_BROCHES) ? "\"broches\"" : "";
+        j += ((g_abos[i] & NIDMI_ABO_BROCHES) && (g_abos[i] & NIDMI_ABO_CONSOLE)) ? "," : "";
+        j += (g_abos[i] & NIDMI_ABO_CONSOLE) ? "\"console\"" : "";
+        j += "]}";
     }
     j += "]";
 }
 
-bool nidmi_ws_pousser(const char* trame) {
+static bool pousserPour(uint8_t pour, const char* trame) {
     if (!trame || !trame[0] || !g_fileWs) return false;
     TrameWs m;
     strlcpy(m.t, trame, sizeof m.t);
+    m.pour = pour;
     /* File pleine = le client ne suit pas. ON JETTE, sans attendre : bloquer
      * ici bloquerait MidiTask, et une note en retard vaut pire qu'une courbe
      * trouee. */
     if (xQueueSend(g_fileWs, &m, 0) != pdTRUE) { g_jetees++; return false; }
     return true;
+}
+bool nidmi_ws_pousser(const char* trame) { return pousserPour(0, trame); }
+bool nidmi_ws_pousser_aux_abonnes(uint8_t abo, const char* trame) {
+    if (!(g_abosTous & abo)) return false;    // personne : rien a poser dans la file
+    return pousserPour(abo, trame);
 }
 
 void nidmi_ws_drainer() {
@@ -645,7 +704,8 @@ void nidmi_ws_drainer() {
     TrameWs m;
     uint8_t n = 0;
     while (n < kFileLen && xQueueReceive(g_fileWs, &m, 0) == pdTRUE) {
-        nidmi_ws_envoyer_a_tous(m.t);
+        if (m.pour) nidmi_ws_envoyer_aux_abonnes(m.pour, m.t);
+        else        nidmi_ws_envoyer_a_tous(m.t);
         n++;
     }
 }

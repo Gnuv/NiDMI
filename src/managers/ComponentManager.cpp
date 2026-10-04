@@ -34,7 +34,6 @@
 #include "../Globals.h"
 #include "../components/motion/Lis3dhDef.h"
 
-extern volatile bool g_pinMonitoringEnabled;
 
 ComponentManager::ComponentManager()
     : component_count(0), midi_sender(nullptr), midiTaskHandle(nullptr), midiTaskStarted(false),
@@ -298,7 +297,7 @@ void ComponentManager::update() {
         TelemetryWsMsg tm;
         uint8_t drained = 0;
         while (drained < 32 && xQueueReceive(telemetryQueue, &tm, 0) == pdTRUE) {
-            nidmi_ws_envoyer_a_tous(tm.payload);
+            nidmi_ws_envoyer_aux_abonnes(NIDMI_ABO_BROCHES, tm.payload);   // a ceux qui suivent (§200)
             drained++;
         }
     }
@@ -1098,8 +1097,8 @@ void ComponentManager::midiTaskLoop() {
                     // --- Télémétrie WebSocket pour le monitoring SVG ---
                     // LED d’activité = flash bref quand une valeur pertinente change.
                     // Le front éteint via un decay côté navigateur.
-                    if (!g_pinMonitoringEnabled) {
-                        // Monitoring désactivé: ne rien émettre.
+                    if (!nidmi_ws_abonne(NIDMI_ABO_BROCHES)) {
+                        // Aucun onglet ne suit les broches (MESURES §200) : ne rien émettre.
                         index++;
                         processed++;
                         continue;

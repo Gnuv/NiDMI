@@ -12,7 +12,8 @@
 #include <esp_heap_caps.h>
 
 static AsyncWebSocket* g_ws = nullptr;
-static bool g_subscribe = false;
+/* Qui est abonne : le registre des onglets le sait, un onglet a la fois
+ * (MESURES §200). Ici, il n'y avait qu'un drapeau pour tous. */
 
 enum : uint16_t {
     kRingLines = 48,
@@ -71,9 +72,34 @@ static void ring_push(const char* line) {
  * alors que la carte parlait.
  *
  * On memorise donc l'ID du client (jamais son POINTEUR, qui pend des qu'il se
- * deconnecte) et la boucle principale draine, en respectant canSend(). */
-static uint32_t g_flushClient = 0;
-static uint16_t g_flushIndex  = 0;
+ * deconnecte) et la boucle principale draine, en respectant canSend().
+ *
+ * UNE FILE D'ATTENTE, PAS UNE PLACE (MESURES §200). Il n'y avait qu'une place :
+ * chaque abonnement prenait celle du precedent, dont le rejeu s'arretait la —
+ * sans la fin (DEBUG_CONSOLE_STATE:1), que l'app attend pour reprendre les lignes.
+ * Apres un redemarrage, tous les onglets se reconnectent ensemble : un seul
+ * retrouvait sa console. Chacun attend maintenant son tour, et recoit tout.
+ * Seize places, comme le registre des onglets ; la tete est celle qu'on sert. Ecrite par
+ * async_tcp (l'abonnement), lue et avancee par loopTask (la pompe) : sous une
+ * section critique, quelques instructions, jamais un envoi dedans. */
+static constexpr uint8_t kAttenteMax = 16;
+static uint32_t g_attente[kAttenteMax] = {};
+static uint8_t  g_nAttente   = 0;
+static uint16_t g_flushIndex = 0;     // la ligne ou en est la tete
+static portMUX_TYPE g_muxAttente = portMUX_INITIALIZER_UNLOCKED;
+
+/* Retirer cet onglet de la file (servi, parti ou desabonne). */
+static void retirerDeLAttente(uint32_t id) {
+    taskENTER_CRITICAL(&g_muxAttente);
+    for (uint8_t i = 0; i < g_nAttente; i++) {
+        if (g_attente[i] != id) continue;
+        for (uint8_t j = i + 1; j < g_nAttente; j++) g_attente[j - 1] = g_attente[j];
+        g_nAttente--;
+        if (i == 0) g_flushIndex = 0;   // la tete suivante commence au debut
+        break;
+    }
+    taskEXIT_CRITICAL(&g_muxAttente);
+}
 
 void nidmi_web_debug_init(AsyncWebSocket* ws) {
     g_ws = ws;
@@ -88,38 +114,56 @@ bool nidmi_web_debug_is_supported() {
  * parcourait la liste de la bibliotheque pendant qu'async_tcp la modifiait
  * (MESURES §171). */
 void nidmi_web_debug_pump() {
-    if (!g_flushClient || !g_ws) return;
+    if (!g_ws) return;
+    taskENTER_CRITICAL(&g_muxAttente);
+    const uint32_t id  = g_nAttente ? g_attente[0] : 0;
+    const uint16_t idx = g_flushIndex;
+    taskEXIT_CRITICAL(&g_muxAttente);
+    if (!id) return;
     /* D'abord la vie precedente (§162) : ce qu'un redemarrage a efface de
      * l'historique, la memoire RTC l'a garde. */
     const uint16_t avant = JournalAvant::nbLignesRejeu();
-    if (g_flushIndex >= avant + g_size) {
+    if (idx >= avant + g_size) {
         // l'accuse ferme le rattrapage ; file pleine (0) : on repassera
-        if (nidmi_ws_envoyer_a(g_flushClient, "DEBUG_CONSOLE_STATE:1") != 0) g_flushClient = 0;
+        if (nidmi_ws_envoyer_a(id, "DEBUG_CONSOLE_STATE:1") != 0) retirerDeLAttente(id);
         return;
     }
     const char* ligne = nullptr;
-    if (g_flushIndex < avant) {
-        ligne = JournalAvant::ligneRejeu((uint8_t)g_flushIndex);
+    if (idx < avant) {
+        ligne = JournalAvant::ligneRejeu((uint8_t)idx);
     } else {
         LigneRing* r = ring();
-        if (r) ligne = r[(g_start + g_flushIndex - avant) % kRingLines];
+        if (r) ligne = r[(g_start + idx - avant) % kRingLines];
     }
     char msg[kLineCap + 16];
     snprintf(msg, sizeof(msg), "DEBUG_LOG:%s", ligne ? ligne : "");
-    const int r = nidmi_ws_envoyer_a(g_flushClient, msg);
-    if (r < 0) { g_flushClient = 0; return; }   // parti
-    if (r > 0) ++g_flushIndex;                  // 0 : file pleine, on repassera
+    const int r = nidmi_ws_envoyer_a(id, msg);
+    if (r < 0) { retirerDeLAttente(id); return; }   // parti : au suivant
+    if (r > 0) {                                     // 0 : sa file est pleine, on repassera
+        taskENTER_CRITICAL(&g_muxAttente);
+        if (g_nAttente && g_attente[0] == id) g_flushIndex++;   // toujours lui en tete ?
+        taskEXIT_CRITICAL(&g_muxAttente);
+    }
 }
 
 void nidmi_web_debug_handle_ws_text(AsyncWebSocketClient* client, const String& message) {
+    if (!client) return;
+    const uint32_t id = client->id();
     if (message == "DEBUG_CONSOLE:1") {
-        g_subscribe = true;
-        /* On NOTE, on n'emet pas : la boucle principale s'en charge. */
-        g_flushClient = client ? client->id() : 0;
-        g_flushIndex  = 0;
+        nidmi_ws_abonner(id, NIDMI_ABO_CONSOLE, true);
+        /* On NOTE, on n'emet pas : la boucle principale s'en charge. Deja en
+         * attente : sa place reste la sienne. */
+        taskENTER_CRITICAL(&g_muxAttente);
+        bool deja = false;
+        for (uint8_t i = 0; i < g_nAttente; i++) if (g_attente[i] == id) deja = true;
+        if (!deja && g_nAttente < kAttenteMax) {
+            if (g_nAttente == 0) g_flushIndex = 0;
+            g_attente[g_nAttente++] = id;
+        }
+        taskEXIT_CRITICAL(&g_muxAttente);
     } else if (message == "DEBUG_CONSOLE:0") {
-        g_subscribe = false;
-        g_flushClient = 0;
+        nidmi_ws_abonner(id, NIDMI_ABO_CONSOLE, false);   // lui seul : les autres gardent la leur
+        retirerDeLAttente(id);
     }
 }
 
@@ -129,8 +173,8 @@ void nidmi_web_debug_append_line(const char* line) {
     }
     ring_push(line);                       // TOUJOURS : c'est l'historique
     JournalAvant::noter(line);             // et ce qui survivra a un redemarrage (§162)
-    if (!g_subscribe || !g_ws) {
-        return;
+    if (!g_ws || !nidmi_ws_abonne(NIDMI_ABO_CONSOLE)) {
+        return;                            // aucun onglet n'a la console ouverte
     }
     /* NIDMI_WEB_LOG est appele depuis N'IMPORTE QUELLE tache — MidiTask
      * comprise. On ne touche donc pas a la socket ici : on POUSSE, loopTask
@@ -139,12 +183,9 @@ void nidmi_web_debug_append_line(const char* line) {
      * ensuite la retrouvera : on ne perd que l'instant, pas la trace. C'est CE
      * chemin, combine au flot de textAll, qui fermait la socket a 26 ms
      * (MESURES §84). */
-    if (!nidmi_ws_quelqu_un_ecoute()) {
-        return;
-    }
     char msg[kLineCap + 16];
     snprintf(msg, sizeof(msg), "DEBUG_LOG:%s", line);
-    nidmi_ws_pousser(msg);
+    nidmi_ws_pousser_aux_abonnes(NIDMI_ABO_CONSOLE, msg);   // aux seuls abonnes (§200)
 }
 
 #endif

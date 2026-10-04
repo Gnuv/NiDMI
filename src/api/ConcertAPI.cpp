@@ -2,6 +2,7 @@
 #include "../config/Concert.h"
 #include "../server/ServerCore.h"
 #include "../mapping/CompoStore.h"
+#include "../server/WebDebugConsole.h"   // NIDMI_WEB_LOG : la ligne de /api/diag/journal (§200)
 
 /*
  * API du CONCERT et des CLIENTS — le verrou, et qui est connecte
@@ -10,6 +11,7 @@
  *   GET  /api/verrou              l'etat : verrouillee, par, depuis_s
  *   POST /api/verrou  etat=on|off [par=…]
  *   GET  /api/clients             les onglets connectes, et ce qu'ils disent
+ *   POST /api/diag/journal  texte=…   une ligne dans la console (MESURES §200)
  *
  * Le verrou est un geste de jeu pour la garde (Concert.cpp) : sans quoi on ne le
  * leverait jamais. Le lever n'est pas protege — personne n'est authentifie —,
@@ -53,5 +55,22 @@ void setupConcertAPI(AsyncWebServer& server) {
         nidmi_ws_clients_ecrire(j);
         j += "}";
         request->send(200, "application/json", j);
+    });
+
+    /* UNE LIGNE DANS LA CONSOLE (MESURES §200). La console ne va plus qu'aux
+     * onglets qui s'y abonnent : pour l'eprouver, il faut une ligne qu'on
+     * provoque. La seule route qui en ecrivait une, /api/pins/read, lit un ADC —
+     * sur une broche du bus audio, c'est l'I2S qui s'arrete (§45). Celle-ci n'a
+     * aucun autre effet : la ligne va au journal comme les autres (historique,
+     * port serie, memoire RTC). 120 caracteres au plus. */
+    server.on("/api/diag/journal", HTTP_POST, [](AsyncWebServerRequest *request){
+        String t = request->hasParam("texte", true) ? request->getParam("texte", true)->value() : String("");
+        if (!t.length()) {
+            request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"texte= manquant\"}");
+            return;
+        }
+        if (t.length() > 120) t = t.substring(0, 120);
+        NIDMI_WEB_LOG("[journal] %s", t.c_str());
+        request->send(200, "application/json", "{\"status\":\"ok\"}");
     });
 }

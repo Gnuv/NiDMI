@@ -192,4 +192,24 @@ void nidmi_ws_client_parti(AsyncWebSocketClient* client);    // WS_EVT_DISCONNEC
 void nidmi_ws_client_etat(uint32_t id, const char* texte);     // async_tcp : ce que l'onglet dit de lui
 void nidmi_ws_clients_ecrire(String& j);                       // « "n":…,"generation":…,"clients":[…] », sans accolades
 
+/* ── LES ABONNEMENTS : A CHAQUE ONGLET LES SIENS (MESURES §200) ──────────────
+ *
+ * Le suivi des broches (PIN_MONITORING) et la console (DEBUG_CONSOLE) n'avaient
+ * qu'UN interrupteur pour tous les onglets. N'importe quel onglet qui partait
+ * eteignait le suivi des autres ; un « DEBUG_CONSOLE:0 » coupait la console de
+ * tous ; et chaque abonnement volait au precedent son rejeu d'historique — cet
+ * onglet-la n'en recevait jamais la fin, et l'app jette les lignes tant qu'elle
+ * l'attend : sa console restait muette. Vecu a chaque redemarrage de la carte,
+ * quand tous les onglets se reconnectent ensemble.
+ *
+ * Chaque onglet porte maintenant SES abonnements, dans le registre, rayes avec
+ * lui. Le suivi tourne tant qu'UN onglet le demande ; ce qui ne concerne que les
+ * abonnes — la telemetrie des broches, les lignes de la console — ne va qu'a eux :
+ * les autres onglets n'en recoivent plus un paquet. */
+enum : uint8_t { NIDMI_ABO_BROCHES = 1, NIDMI_ABO_CONSOLE = 2 };
+void nidmi_ws_abonner(uint32_t id, uint8_t abo, bool oui);          // async_tcp : PIN_MONITORING, DEBUG_CONSOLE
+bool nidmi_ws_abonne(uint8_t abo);                                  // un octet, sans verrou : un onglet au moins ?
+bool nidmi_ws_pousser_aux_abonnes(uint8_t abo, const char* trame);  // depuis N'IMPORTE QUELLE tache
+void nidmi_ws_envoyer_aux_abonnes(uint8_t abo, const char* texte);  // loopTask UNIQUEMENT (les drains)
+
 // Note: L'instance globale serverCore est déclarée dans Globals.h
