@@ -31,14 +31,32 @@ void demarrer();                   // lit la source de la composition ouverte, s
 void recharger();
 
 // La composition la plus recente — nullptr si la carte n'en a pas. Le tampon
-// partage reste valide tant qu'on le tient, meme si une autre arrive.
-std::shared_ptr<char> courante(size_t& octets);
+// partage reste valide tant qu'on le tient, meme si une autre arrive. `revision`
+// (facultative) rend celle de CE tampon, prise sous le meme verrou : un client
+// qui lit la source sait de quelle version elle est (MESURES §198).
+std::shared_ptr<char> courante(size_t& octets, uint32_t* revision = nullptr);
+
+/* LA REVISION (MESURES §198) : un CRC32 de la source, calcule par la carte — a
+ * la reception (au fil du corps) et a la relecture —, jamais un compteur : il ne
+ * depend que du CONTENU, donc il survit a un redemarrage, deux onglets qui ont
+ * le meme texte ont la meme revision, et rien n'est a memoriser en flash. 0 : la
+ * composition n'a pas de source. */
+uint32_t revision();
 
 // Adopter une composition recue (tampon PSRAM, JSON). Rendue tout de suite ;
 // ecrite en flash au premier silence, 3 s au moins apres la derniere. Sur un
 // repertoire vide, elle en cree la premiere composition, nommee d'apres son
 // titre (« meta.name »). false : `raison` dit pourquoi — rien n'a change.
-bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison);
+//
+// `aBase` : l'ecriture DIT de quelle revision elle derive (`base`). Si ce n'est
+// plus celle de la carte — un autre onglet a ecrit entre-temps —, elle est
+// refusee (`obsolete`, et `revision` rend celle de la carte) : un onglet reste
+// en retard ne remplace plus ce qu'un autre vient de poser. Le compare et la
+// pose sont indivisibles. Sans `aBase` : les outils, les bancs — comme sans
+// `compo=N`. Une composition sans source (revision 0) accepte tout.
+bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison,
+             bool aBase = false, uint32_t base = 0,
+             bool* obsolete = nullptr, uint32_t* revision = nullptr);
 
 String etatJson();                 // octets, en attente
 

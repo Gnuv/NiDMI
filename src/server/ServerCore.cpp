@@ -6,6 +6,7 @@
 #include "../midi/MidiRouter.h"      // emettreRtp : le RTP sortant, emis par la boucle (§175)
 #include "../audio/AudioEngine.h"
 #include "WebDebugConsole.h"
+#include "../network/UsbNetBootstrap.h"   // parLeCable : le cable ou le WiFi, pour chaque onglet
 #include <ESPmDNS.h>
 #include <mdns.h>
 #include <esp_netif.h>
@@ -426,6 +427,34 @@ namespace {
         VerrouOnglets()  { if (g_verrouOnglets) xSemaphoreTakeRecursive(g_verrouOnglets, portMAX_DELAY); }
         ~VerrouOnglets() { if (g_verrouOnglets) xSemaphoreGiveRecursive(g_verrouOnglets); }
     };
+
+    /* CE QUE CHAQUE ONGLET DIT DE LUI, au meme indice que g_onglets (MESURES §199).
+     * En PSRAM : alloue par nidmi_ws_file_init(). Sans PSRAM ni tas, le registre
+     * marche comme avant et la liste est vide — rien ne casse. */
+    struct InfoOnglet {
+        uint32_t id;                 // celui d'AsyncWebSocketClient : sert aussi de cle
+        uint32_t ip;                 // IPv4, octets dans l'ordre de IPAddress
+        uint32_t depuis;             // millis() a l'arrivee
+        uint32_t changementVisible;  // millis() du dernier passage premier plan / arriere-plan
+        uint32_t rev;                // la revision de composition qu'il dit tenir
+        char     nom[24];            // ASCII imprimable : il part tel quel dans du JSON
+        char     jeton[13];          // choisi par l'onglet, pour se reconnaitre dans la liste
+        uint8_t  mode;               // 0 inconnu, 1 EDIT, 2 REGIE, 3 SCENE
+        uint8_t  visible;            // 0 inconnu, 1 premier plan, 2 arriere-plan
+        uint8_t  aRev;               // `rev` est-il renseigne ?
+    };
+    InfoOnglet* g_infos = nullptr;
+    volatile uint32_t g_generationClients = 0;
+
+    /* « la liste a change » : un evenement minuscule, jamais la liste. Appele
+     * sous le verrou du registre — nidmi_ws_pousser n'en prend aucun. */
+    void annoncerClients() {
+        g_generationClients = g_generationClients + 1;
+        char trame[40];
+        snprintf(trame, sizeof trame, "NIDMI_CLIENTS:%u:%u",
+                 (unsigned)g_nOnglets, (unsigned)g_generationClients);
+        nidmi_ws_pousser(trame);
+    }
 }
 
 void nidmi_ws_file_init() {
@@ -434,6 +463,11 @@ void nidmi_ws_file_init() {
     uint8_t* stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!stock) stock = (uint8_t*)heap_caps_malloc(taille, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (stock) g_fileWs = xQueueCreateStatic(kFileLen, sizeof(TrameWs), stock, &g_fileTCB);
+    if (!g_infos) {
+        const size_t n = kOngletsPlaces * sizeof(InfoOnglet);
+        g_infos = (InfoOnglet*)heap_caps_calloc(1, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!g_infos) g_infos = (InfoOnglet*)heap_caps_calloc(1, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
 }
 /* async_tcp, rappel WS_EVT_CONNECT. */
 void nidmi_ws_client_arrive(AsyncWebSocketClient* c) {
@@ -443,11 +477,19 @@ void nidmi_ws_client_arrive(AsyncWebSocketClient* c) {
     c->setCloseClientOnQueueFull(false);
     VerrouOnglets verrou;
     if (g_nOnglets >= kOngletsPlaces) { c->close(); return; }   // jamais vu : 16 onglets de front
+    if (g_infos) {
+        InfoOnglet& i = g_infos[g_nOnglets];
+        memset(&i, 0, sizeof i);
+        i.id = c->id();
+        i.ip = (uint32_t)c->remoteIP();
+        i.depuis = millis();
+    }
     g_onglets[g_nOnglets] = c;
     g_nOnglets = g_nOnglets + 1;
     /* Au-dela de huit, le plus ancien s'en va — ce que faisait cleanupClients().
      * Il reste inscrit jusqu'a son depart effectif (WS_EVT_DISCONNECT). */
     if (g_nOnglets > kOngletsMax) g_onglets[0]->close();
+    annoncerClients();
 }
 
 /* async_tcp, rappel WS_EVT_DISCONNECT — emis par le destructeur du client,
@@ -457,9 +499,14 @@ void nidmi_ws_client_parti(AsyncWebSocketClient* c) {
     VerrouOnglets verrou;
     for (uint8_t i = 0; i < g_nOnglets; i++) {
         if (g_onglets[i] != c) continue;
-        for (uint8_t j = i + 1; j < g_nOnglets; j++) g_onglets[j - 1] = g_onglets[j];
+        for (uint8_t j = i + 1; j < g_nOnglets; j++) {
+            g_onglets[j - 1] = g_onglets[j];
+            if (g_infos) g_infos[j - 1] = g_infos[j];
+        }
         g_nOnglets = g_nOnglets - 1;
         g_onglets[g_nOnglets] = nullptr;
+        if (g_infos) memset(&g_infos[g_nOnglets], 0, sizeof(InfoOnglet));
+        annoncerClients();
         return;
     }
 }
@@ -494,6 +541,91 @@ int nidmi_ws_envoyer_a(uint32_t id, const char* texte) {
     return -1;
 }
 uint32_t nidmi_ws_trames_jetees() { return g_jetees; }
+
+/* ── QUI EST CONNECTE (MESURES §199) ──────────────────────────────────────── */
+
+/* Un nom que la carte rend tel quel dans du JSON : ASCII imprimable, sans les
+ * quatre caracteres qui casseraient la trame ou la chaine. */
+static void copierTexte(char* dest, size_t cap, const char* src, bool seulementAlnum) {
+    size_t k = 0;
+    for (; src && *src && k < cap - 1; src++) {
+        const uint8_t c = (uint8_t)*src;
+        if (seulementAlnum) { if (isalnum(c)) dest[k++] = (char)c; continue; }
+        dest[k++] = (c < 0x20 || c > 0x7E || c == '"' || c == '\\' || c == '|' || c == ':') ? '?' : (char)c;
+    }
+    dest[k] = 0;
+}
+
+void nidmi_ws_client_etat(uint32_t id, const char* texte) {
+    if (!g_infos || !texte) return;
+    char brut[96];
+    strlcpy(brut, texte, sizeof brut);
+    char* champ[5] = { brut, nullptr, nullptr, nullptr, nullptr };
+    uint8_t k = 1;
+    for (char* p = brut; *p && k < 5; p++) if (*p == '|') { *p = 0; champ[k++] = p + 1; }
+    VerrouOnglets verrou;
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        InfoOnglet& o = g_infos[i];
+        if (o.id != id) continue;
+        bool change = false;
+        auto texteChange = [&](char* dest, size_t cap, const char* src, bool alnum) {
+            char neuf[24];
+            copierTexte(neuf, sizeof neuf < cap ? sizeof neuf : cap, src, alnum);
+            if (strncmp(dest, neuf, cap)) { strlcpy(dest, neuf, cap); change = true; }
+        };
+        texteChange(o.jeton, sizeof o.jeton, champ[0], true);
+        if (champ[1]) texteChange(o.nom, sizeof o.nom, champ[1], false);
+        if (champ[2]) {
+            const uint8_t m = (champ[2][0] == 'e') ? 1 : (champ[2][0] == 'r') ? 2 : (champ[2][0] == 's') ? 3 : 0;
+            if (m != o.mode) { o.mode = m; change = true; }
+        }
+        if (champ[3]) {
+            const uint8_t v = (champ[3][0] == '1') ? 1 : (champ[3][0] == '0') ? 2 : 0;
+            if (v != o.visible) { o.visible = v; o.changementVisible = millis(); change = true; }
+        }
+        if (champ[4]) {
+            const uint8_t a = champ[4][0] != 0;
+            const uint32_t r = a ? (uint32_t)strtoul(champ[4], nullptr, 16) : 0;
+            if (a != o.aRev || r != o.rev) { o.aRev = a; o.rev = r; change = true; }
+        }
+        if (change) annoncerClients();         // rien de neuf : rien a dire
+        return;
+    }
+}
+
+void nidmi_ws_clients_ecrire(String& j) {
+    VerrouOnglets verrou;
+    j += "\"n\":" + String((unsigned)g_nOnglets);
+    j += ",\"generation\":" + String((unsigned)g_generationClients);
+    j += ",\"clients\":[";
+    const uint32_t maintenant = millis();
+    for (uint8_t i = 0; i < g_nOnglets; i++) {
+        if (i) j += ",";
+        if (!g_infos) { j += "{}"; continue; }
+        const InfoOnglet& o = g_infos[i];
+        const IPAddress ip((uint32_t)o.ip);
+        /* Le cable ou le WiFi : la carte le sait par l'adresse locale que cette
+         * connexion a empruntee (le meme calcul que /api/interface). Le pointeur
+         * du client est valide tant qu'on tient le verrou : le destructeur
+         * attend ce meme verrou (voir « LES ONGLETS »). */
+        AsyncWebSocketClient* c = g_onglets[i];
+        const bool cable = (c && c->client())
+                         ? nidmi_usbnet::parLeCable(c->client()->localIP(), ip) : false;
+        char rev[9];
+        snprintf(rev, sizeof rev, "%08x", (unsigned)o.rev);
+        j += "{\"id\":" + String((unsigned)o.id);
+        j += ",\"jeton\":\""; j += o.jeton; j += "\"";
+        j += ",\"nom\":\""; j += o.nom; j += "\"";
+        j += ",\"ip\":\""; j += ip.toString(); j += "\"";
+        j += ",\"cable\":"; j += cable ? "true" : "false";
+        j += ",\"depuis_s\":" + String((unsigned)((maintenant - o.depuis) / 1000));
+        j += ",\"mode\":\""; j += (o.mode == 1 ? "edit" : o.mode == 2 ? "regie" : o.mode == 3 ? "scene" : ""); j += "\"";
+        j += ",\"visible\":"; j += (o.visible == 1 ? "true" : o.visible == 2 ? "false" : "null");
+        j += ",\"visible_depuis_s\":" + String(o.visible ? (unsigned)((maintenant - o.changementVisible) / 1000) : 0u);
+        j += ",\"rev\":\""; j += (o.aRev ? rev : ""); j += "\"}";
+    }
+    j += "]";
+}
 
 bool nidmi_ws_pousser(const char* trame) {
     if (!trame || !trame[0] || !g_fileWs) return false;

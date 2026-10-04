@@ -28,6 +28,7 @@ void setupOtaAPI(AsyncWebServer& server);
 void setupAudioAPI(AsyncWebServer& server);
 void setupFichiersAPI(AsyncWebServer& server);
 void setupInterfaceAPI(AsyncWebServer& server);
+void setupConcertAPI(AsyncWebServer& server);
 
 Preferences preferences;
 
@@ -170,6 +171,7 @@ String getDefaultConfig(String pin) {
 
 #include "../audio/AudioEngine.h"
 #include "../midi/MidiRouter.h"
+#include "../config/Concert.h"      // le verrou de concert : la garde HTTP, et la calibration par WebSocket (§197)
 
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
     if (type == WS_EVT_CONNECT) {
@@ -193,6 +195,14 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
         message.reserve(len);
         for (size_t i = 0; i < len; i++) {
             message += (char)data[i];
+        }
+
+        /* CE QUE L'ONGLET DIT DE LUI (MESURES §199) : « CLIENT:<jeton>|<nom>|<mode>|
+         * <visible>|<rev> ». Il n'y a rien a repondre : la carte retient, et dit a
+         * tous que la liste a change. */
+        if (message.startsWith("CLIENT:")) {
+            if (client) nidmi_ws_client_etat(client->id(), message.c_str() + 7);
+            return;
         }
 
 #if NIDMI_WEB_DEBUG_CONSOLE
@@ -257,6 +267,10 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 
         // Commande globale de calibration touch (toutes les baselines)
         if (message == "TOUCH_CALIBRATE_ALL") {
+            /* VERROUILLEE (§197) : recalibrer change ce que les capteurs disent —
+             * de la structure, pas un geste de jeu. Ignoree, et le client est
+             * prevenu que la carte est verrouillee. */
+            if (Concert::verrouille()) { if (client) client->text("NIDMI_VERROU:1"); return; }
             TouchProcessor::resetAllBaselines();
             client->text("TOUCH_CALIBRATE_DONE");
             return;
@@ -431,7 +445,9 @@ static const char SECOURS_HTML[] =
     "complete ne se sert plus</b> &mdash; c'est tout son objet.</p>\n"
     "<div id=e>lecture de l'etat...</div>\n"
     "<p><button onclick=dech()>Redemarrer a vide</button>\n"
-    "<button onclick=reb()>Redemarrer</button></p>\n"
+    "<button onclick=reb()>Redemarrer</button>\n"
+    "<button onclick=lev()>Deverrouiller</button></p>\n"
+    "<p>Verrouillee (concert), la carte refuse de redemarrer : deverrouiller d'abord.</p>\n"
     "<p>A vide : la carte redemarre sans le son, ce qui lui rend la memoire d'un seul\n"
     "tenant dont le serveur web a besoin. <b>Pour ce seul demarrage</b> : le son\n"
     "revient au suivant. La composition n'est pas touchee : elle vit en flash.</p>\n"
@@ -442,6 +458,7 @@ static const char SECOURS_HTML[] =
     "E.textContent='moteur '+d.engine+(d.plaits_ready?' (Plaits charge)':'')\n"
     "+'\\nplus gros bloc libre : '+d.heap_largest_block+' o'\n"
     "+(d.heap_largest_block<8192?'\\n\\nEN DESSOUS DE 8192 : l interface complete ne se sert pas.':'\\n\\nAssez pour servir l interface complete.')\n"
+    "+(d.verrouillee?'\\n\\nVERROUILLEE (concert) : elle refuse de redemarrer.':'')\n"
     "+(d.redemarrage_demande_par?'\\n\\nDernier redemarrage demande par : '+d.redemarrage_demande_par:'');}\n"
     "catch(e){E.textContent='carte muette';}}\n"
     "async function attendre(){E.textContent='redemarrage...';\n"
@@ -455,8 +472,10 @@ static const char SECOURS_HTML[] =
     "E.textContent='la carte n est pas revenue. Verifier son alimentation.';}\n"
     "function red(c){return fetch('/api/system/reboot',{method:'POST',\n"
     "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:c}).catch(function(){});}\n"
-    "async function dech(){await red('par=secours&vide=1');attendre();}\n"
-    "async function reb(){await red('par=secours');attendre();}\n"
+    "async function dech(){const r=await red('par=secours&vide=1');if(r&&r.status==423){etat();return;}attendre();}\n"
+    "async function reb(){const r=await red('par=secours');if(r&&r.status==423){etat();return;}attendre();}\n"
+    "async function lev(){await fetch('/api/verrou',{method:'POST',\n"
+    "headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'etat=off&par=secours'}).catch(function(){});etat();}\n"
     "etat();\n"
     "</script>";
 
@@ -477,6 +496,12 @@ static void _sertSecours(AsyncWebServerRequest *request){
 }
 
 void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
+    /* LA GARDE DU CONCERT, AVANT TOUTE ROUTE (MESURES §197). Le premier handler
+     * qui reconnait une requete la prend : posee la premiere, elle refuse tout
+     * ce qui ecrit — hors les gestes de jeu — tant que la carte est verrouillee,
+     * avant que le corps ou le televersement n'atteigne un gestionnaire. */
+    Concert::installerGarde(server);
+
     /* ── L'application NiDMI (nidmi.html + css/ + js/), embarquée ────────────
        GÉNÉRÉE par scripts/cartes/embarquer-app.py (dépôt nidmi) : fichiers
        gzippés en PROGMEM, servis tels quels (Content-Encoding: gzip). C'est
@@ -605,4 +630,5 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
     setupAudioAPI(server);
     setupFichiersAPI(server);
     setupInterfaceAPI(server);
+    setupConcertAPI(server);
 }

@@ -20,6 +20,7 @@
 #include "mapping/Repertoire.h"
 #include "config/EcrituresDifferees.h"
 #include "config/Instrument.h"
+#include "config/Concert.h"
 #include "diag/SurveillantFlash.h"
 #include "diag/JournalAvant.h"
 #include "diag/Activite.h"
@@ -1362,6 +1363,7 @@ void nidmi_begin() {
        ouverte, donc ou la source, les cues et la chaine se lisent. */
     Repertoire::demarrer();
     Instrument::demarrer();         // son nom (§188), hors de l'interface
+    Concert::demarrer();            // le verrou de concert, relu AVANT le serveur (§197)
     // La composition que la carte garde pour l'app (MESURES §156) : lue en PSRAM
     // AVANT que le serveur ne reponde — une page chargee pendant le demarrage
     // recevrait sinon « aucune », et repartirait vide.

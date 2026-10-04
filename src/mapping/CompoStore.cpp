@@ -2,8 +2,10 @@
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "Repertoire.h"
+#include "../server/ServerCore.h"     // nidmi_ws_pousser : les onglets apprennent qu'une source est arrivee
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
+#include <esp_rom_crc.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -18,6 +20,14 @@ constexpr const char* BASE      = Stockage::BASE;
 SemaphoreHandle_t verrou = nullptr;
 std::shared_ptr<char> actuelle;
 size_t octetsActuels = 0;
+uint32_t revisionActuelle = 0;     // le CRC32 de `actuelle` ; 0 : pas de source (sous `verrou`)
+
+/* LE CRC32 de la source. Jamais 0 pour un contenu : 0 dit « pas de source ». */
+uint32_t crc(const char* d, size_t n) {
+  if (!d || !n) return 0;
+  const uint32_t r = esp_rom_crc32_le(0, (const uint8_t*)d, (uint32_t)n);
+  return r ? r : 1;
+}
 
 std::shared_ptr<char> tamponPsram(size_t n) {
   char* p = (char*)heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -83,22 +93,35 @@ void recharger() {
   if (!fichier.length() || !Differe::lire(fichier.c_str(), t, n) || !n || n > MAX_OCTETS) {
     t.reset(); n = 0;
   }
+  const uint32_t rev = crc(t.get(), n);       // hors du verrou : c'est un parcours du tampon
   xSemaphoreTake(verrou, portMAX_DELAY);
   actuelle = t;
   octetsActuels = n;
+  revisionActuelle = rev;
   xSemaphoreGive(verrou);
 }
 
-std::shared_ptr<char> courante(size_t& octets) {
-  if (!verrou) { octets = 0; return nullptr; }
+std::shared_ptr<char> courante(size_t& octets, uint32_t* revision) {
+  if (!verrou) { octets = 0; if (revision) *revision = 0; return nullptr; }
   xSemaphoreTake(verrou, portMAX_DELAY);
   auto t = actuelle;
   octets = octetsActuels;
+  if (revision) *revision = revisionActuelle;
   xSemaphoreGive(verrou);
   return t;
 }
 
-bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison) {
+uint32_t revision() {
+  if (!verrou) return 0;
+  xSemaphoreTake(verrou, portMAX_DELAY);
+  const uint32_t r = revisionActuelle;
+  xSemaphoreGive(verrou);
+  return r;
+}
+
+bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison,
+             bool aBase, uint32_t base, bool* obsolete, uint32_t* revision) {
+  if (obsolete) *obsolete = false;
   if (!verrou) { raison = "magasin non demarre"; return false; }
   const String titre = titreDe(tampon.get(), octets);
   if (!Repertoire::assurerOuverte(titre, raison)) return false;
@@ -112,14 +135,39 @@ bool adopter(std::shared_ptr<char> tampon, size_t octets, String& raison) {
     String pourquoi;
     if (Repertoire::nomValide(titre, pourquoi)) Repertoire::renommer(Repertoire::numeroOuvert(), titre, pourquoi);
   }
+  const uint32_t nouvelle = crc(tampon.get(), octets);
+  /* COMPARER, PUIS POSER, SOUS LE MEME VERROU (MESURES §198). Posee avant la
+   * comparaison, une source refusee partirait quand meme en flash au silence ;
+   * deux envois qui se croisent laissaient aussi la flash a l'un et la memoire
+   * a l'autre. Differe ne rappelle jamais ce magasin : l'ordre des verrous est
+   * toujours celui-ci, puis le sien. */
+  xSemaphoreTake(verrou, portMAX_DELAY);
+  if (aBase && revisionActuelle && base != revisionActuelle) {
+    if (obsolete) *obsolete = true;
+    if (revision) *revision = revisionActuelle;
+    xSemaphoreGive(verrou);
+    raison = "la composition a change ailleurs (un autre onglet, un autre appareil)";
+    return false;
+  }
   if (!Differe::poserFichier(Repertoire::chemin(Repertoire::SOURCE).c_str(), tampon, octets)) {
+    xSemaphoreGive(verrou);
     raison = "file des ecritures differees pleine : reessayer";
     return false;
   }
-  xSemaphoreTake(verrou, portMAX_DELAY);
   actuelle = tampon;          // l'ancienne est rendue quand son dernier lecteur la lache
   octetsActuels = octets;
+  revisionActuelle = nouvelle;
   xSemaphoreGive(verrou);
+  if (revision) *revision = nouvelle;
+  /* LES AUTRES ONGLETS L'APPRENNENT — un evenement, jamais un sondage. Ils ne
+   * reprennent rien d'eux-memes : ils disent qu'ils sont en retard, et c'est
+   * l'operateur qui decide quand (une scene ne doit pas changer d'un coup). */
+  if (nidmi_ws_quelqu_un_ecoute()) {
+    char trame[40];
+    snprintf(trame, sizeof trame, "NIDMI_COMPO:%u:%08x",
+             (unsigned)Repertoire::numeroOuvert(), (unsigned)nouvelle);
+    nidmi_ws_pousser(trame);
+  }
   return true;
 }
 
@@ -130,8 +178,12 @@ String etatJson() {
   size_t na = 0;
   bool supprime = false;
   const bool attend = Differe::attente(Repertoire::chemin(Repertoire::SOURCE).c_str(), t, na, supprime);
+  char rev[9];
+  snprintf(rev, sizeof rev, "%08x", (unsigned)revision());
   String j = "{\"octets\":" + String((unsigned)n);
-  j += ",\"en_attente\":";
+  j += ",\"revision\":\"";
+  j += rev;
+  j += "\",\"en_attente\":";
   j += attend ? "true" : "false";
   j += "}";
   return j;

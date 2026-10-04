@@ -176,4 +176,20 @@ void nidmi_ws_file_init();                 // appele par ServerCore::begin()
 void nidmi_ws_client_arrive(AsyncWebSocketClient* client);   // WS_EVT_CONNECT (async_tcp)
 void nidmi_ws_client_parti(AsyncWebSocketClient* client);    // WS_EVT_DISCONNECT (async_tcp)
 
+/* ── QUI EST CONNECTE (MESURES §199) ────────────────────────────────────────
+ *
+ * Le registre savait combien d'onglets il y avait, pas lesquels. Chaque onglet
+ * DIT maintenant ce qu'il est — « CLIENT:<jeton>|<nom>|<mode>|<visible>|<rev> »,
+ * une trame a l'ouverture de sa socket puis une par changement (il passe en
+ * arriere-plan, il change de mode, il reprend une composition) : jamais un
+ * sondage. La carte y ajoute ce qu'elle sait seule — son adresse, si c'est le
+ * cable ou le WiFi, depuis quand — et le rend a la demande (GET /api/clients).
+ * Elle n'annonce que « la liste a change » (NIDMI_CLIENTS:<n>:<generation>) : la
+ * trame est minuscule, et l'onglet qui n'affiche pas la liste n'a rien a lire.
+ *
+ * Les informations sont en PSRAM (une quinzaine d'octets par onglet n'ont pas a
+ * peser sur le plus gros bloc contigu), sous le verrou du registre. */
+void nidmi_ws_client_etat(uint32_t id, const char* texte);     // async_tcp : ce que l'onglet dit de lui
+void nidmi_ws_clients_ecrire(String& j);                       // « "n":…,"generation":…,"clients":[…] », sans accolades
+
 // Note: L'instance globale serverCore est déclarée dans Globals.h

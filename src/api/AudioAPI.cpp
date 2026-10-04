@@ -14,6 +14,7 @@
 #include "../mapping/CompoStore.h"
 #include "../mapping/Repertoire.h"
 #include "../config/Instrument.h"
+#include "../config/Concert.h"       // le verrou de concert : les routes mixtes (§197)
 
 /* LE SUIVI S'ADRESSE A UNE COMPOSITION (CONVERGENCE §9.7, MESURES §186). Un
  * onglet qui ecrit dit laquelle il croit ouverte (`compo=N`) ; si un bouton ou
@@ -113,6 +114,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"plantages_consecutifs\":" + String(m.bootEssais) + ",";
         json += "\"boot_disabled\":"     + String(m.bootCoupe ? "true" : "false") + ",";
         json += "\"gated\":"             + String(m.silence ? "true" : "false") + ",";
+        // Le verrou de concert (§197) : la page de secours le dit, et les bancs le lisent.
+        json += "\"verrouillee\":"       + String(Concert::verrouille() ? "true" : "false") + ",";
         json += "\"niveau\":"            + String(m.niveau) + ",";
         json += "\"derniere_note\":"     + String(m.derniereNote) + ",";
         /* CE QUE CETTE CARTE SAIT FAIRE — l'app demande, elle ne suppose pas.
@@ -257,6 +260,16 @@ void setupAudioAPI(AsyncWebServer& server) {
      * paramètres sont optionnels : on ne change que ce qui est envoyé.
      * Mêmes noms et mêmes plages que engines/core/plaits/web/index.js. */
     server.on("/api/audio/params", HTTP_POST, [](AsyncWebServerRequest *request){
+        /* VERROUILLEE (§197) : les paramètres continus et le volume sont des
+         * gestes de jeu, ils passent ; CHANGER DE MOTEUR est de la structure —
+         * l'allocation remet le patch a ses defauts —, il ne se fait pas en
+         * concert. Redire le moteur qui est deja le bon n'est pas un changement :
+         * l'app joint `engine` a chaque lot de paramètres, et un bouton de
+         * synthese doit continuer de tourner. Une requete refusee l'est en entier :
+         * la moitie appliquee serait pire. */
+        if (request->hasParam("engine", true)
+            && request->getParam("engine", true)->value().toInt() != AudioEngine::engine()
+            && Concert::refuse(request, "le moteur ne change pas en concert : la carte est verrouillee")) return;
         bool _redemarrageRequis = false;
         // ORDRE IMPORTANT : le moteur D'ABORD. setEngine() peut déclencher
         // l'allocation de Plaits, dont l'initialisation repose le patch sur ses
@@ -678,9 +691,18 @@ void setupAudioAPI(AsyncWebServer& server) {
      * morceau ; rendu aussitot, ecrit en flash au premier silence. */
     server.on("/api/compo", HTTP_GET, [](AsyncWebServerRequest *request){
         size_t n = 0;
-        auto t = Compo::courante(n);
+        uint32_t rev = 0;
+        auto t = Compo::courante(n, &rev);
         if (!t || !n) { request->send(204); return; }
-        request->send(nidmi_reponse_tampon(request, "application/json", t, n));
+        /* LA REVISION DE CE QU'ON LIT, dans la meme reponse : le client sait de
+         * quelle version est la source qu'il reprend, et la dit a l'ecriture
+         * suivante (`base`). Prise sous le meme verrou que le tampon — une
+         * seconde requete pourrait tomber apres l'ecriture d'un autre onglet. */
+        AsyncWebServerResponse* rep = nidmi_reponse_tampon(request, "application/json", t, n);
+        char h[9];
+        snprintf(h, sizeof h, "%08x", (unsigned)rev);
+        rep->addHeader("X-Nidmi-Rev", h);
+        request->send(rep);
     });
     server.on("/api/compo", HTTP_POST,
         [](AsyncWebServerRequest *request){
@@ -701,15 +723,43 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
             request->_tempObject = nullptr;   // la carte le garde : le serveur ne le liberera pas
+            /* `base` : la revision d'ou l'ecriture derive (MESURES §198), en hexa —
+             * en parametre de formulaire ou d'adresse, comme `compo`. Absente :
+             * les outils, les bancs. */
+            bool aBase = false;
+            uint32_t base = 0;
+            {
+                String b;
+                if (request->hasParam("base", true))      b = request->getParam("base", true)->value();
+                else if (request->hasParam("base"))       b = request->getParam("base")->value();
+                if (b.length()) { aBase = true; base = (uint32_t)strtoul(b.c_str(), nullptr, 16); }
+            }
             String raison;
-            if (!Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n, raison)) {
+            bool obsolete = false;
+            uint32_t rev = 0;
+            if (!Compo::adopter(std::shared_ptr<char>(p, [](char* q) { heap_caps_free(q); }), n, raison,
+                                aBase, base, &obsolete, &rev)) {
                 raison.replace("\"", "'");
+                char h[9];
+                snprintf(h, sizeof h, "%08x", (unsigned)rev);
+                if (obsolete) {
+                    /* 409, et DIT pourquoi : ce n'est pas la composition ouverte
+                     * qui a change (`ouverte`), c'est son contenu (`obsolete`). */
+                    request->send(409, "application/json",
+                        "{\"status\":\"error\",\"obsolete\":true,\"message\":\"" + raison
+                        + "\",\"revision\":\"" + String(h) + "\",\"ouverte\":"
+                        + String((unsigned)Repertoire::numeroOuvert()) + "}");
+                    return;
+                }
                 request->send(503, "application/json",
                     "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
                 return;
             }
+            char h[9];
+            snprintf(h, sizeof h, "%08x", (unsigned)rev);
             request->send(200, "application/json",
                 String("{\"status\":\"ok\",\"octets\":") + String((unsigned)n)
+                + ",\"revision\":\"" + String(h) + "\""
                 + ",\"message\":\"rendue tout de suite, ecrite en flash au premier silence\"}");
         },
         nullptr,
@@ -781,7 +831,14 @@ void setupAudioAPI(AsyncWebServer& server) {
      * les dossiers : la carte la lit a chaque appel — un geste, jamais un
      * sondage. */
     server.on("/api/compositions", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(200, "application/json", Repertoire::listerJson());
+        /* `verrouillee` (§197) : la barre de titre le lit ici, au demarrage et a
+         * chaque annonce du repertoire — pas de requete de plus. */
+        String j = Repertoire::listerJson();
+        j.remove(j.length() - 1);                       // le « } » final
+        j += ",\"verrouillee\":";
+        j += Concert::verrouille() ? "true" : "false";
+        j += "}";
+        request->send(200, "application/json", j);
     });
 
     /* L'INSTRUMENT : son nom (CONVERGENCE §9.7, MESURES §188) — en tete de la
@@ -1050,6 +1107,10 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
 
     server.on("/api/midi/script", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!compositionAttendue(request)) return;
+        /* VERROUILLEE (§197) : les REGLAGES d'un script (un potentiometre) sont un
+         * geste de jeu ; son CODE est de la structure. */
+        if (request->hasParam("script", true)
+            && Concert::refuse(request, "le code d'un script ne change pas en concert : la carte est verrouillee")) return;
         // `script` ABSENT = on ne touche pas au code. Auparavant l'absence
         // valait chaine vide et EFFACAIT le script : impossible d'envoyer les
         // seuls reglages. Or un tour de potentiometre en produit une douzaine,
