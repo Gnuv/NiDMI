@@ -372,6 +372,11 @@ void ComponentInitializer::setupGpio(uint8_t gpio, ComponentType type, Component
      * vaut ici aussi. */
     if (type == ComponentType::DAC_I2S) return;
 
+    /* La carte SD : pas de sondage non plus. Le CS est mis en sortie, haut, par
+     * la bibliotheque SD au montage (CarteSd) ; un pinMode en INPUT d'abord le
+     * laisserait flotter — et la carte pourrait se croire selectionnee. */
+    if (type == ComponentType::SD_SPI) return;
+
     bool is_touch_type = (type == ComponentType::TOUCH);
 
     if (is_touch_type) {

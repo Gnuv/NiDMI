@@ -1619,10 +1619,12 @@ static void rendreApresLecture(int i) {
  * l'etait qu'apres un redemarrage (MESURES §177) — liste, marque ● dans
  * l'inspecteur, il repondait « absent de la carte » ; un son REMPLACE gardait
  * l'ancien. Appele par le serveur web : les 30 a 70 ms de lecture en flash sont
- * les siennes, pas celles de l'audio ni du MIDI. */
-bool echantillonArrive(const char* nom, String& raison) {
+ * les siennes, pas celles de l'audio ni du MIDI. `carteSd` : le son vient de la
+ * carte SD, et c'est la tache de CarteSd qui l'appelle — jamais le serveur web :
+ * la lecture de plusieurs Mo y prendrait des secondes. */
+bool echantillonArrive(const char* nom, String& raison, bool carteSd) {
   int ancien = -1;
-  if (!SampleStore::installer(nom, raison, ancien)) return false;
+  if (!SampleStore::installer(nom, raison, ancien, carteSd)) return false;
   rendreApresLecture(ancien);
   _reresoudre();                      // un clip qui le nomme le trouve (§196)
   return true;

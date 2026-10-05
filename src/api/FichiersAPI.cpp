@@ -26,6 +26,7 @@
 // qu'il ne la lit pas encore — l'app n'a pas a l'inventer.
 #include "APICommon.h"
 #include "../config/Stockage.h"
+#include "../config/CarteSd.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "../audio/AudioEngine.h"
@@ -126,7 +127,8 @@ const char* typeDe(const String& chemin) {
 }
 
 /* Le support vise par la requete ; storage si rien n'est dit. Un autre : refuse
- * (501) — la SD n'est pas encore lue par ce firmware. */
+ * (501) — la SD ne fait que se LIRE (ses sons, par le magasin) : elle se remplit
+ * depuis un ordinateur, rien d'autre n'y passe par la carte. */
 bool volumeInterne(AsyncWebServerRequest* r) {
   return !r->hasParam("volume") || r->getParam("volume")->value() == VOLUME_INTERNE;
 }
@@ -248,6 +250,19 @@ template <typename F> void parcourir(F voir) {
   }, &ctx);
 }
 
+/* LES SONS DE LA CARTE SD : /samples/*.wav, la meme forme que storage. Rien d'autre
+ * n'y est liste — elle ne porte, pour ce firmware, que des sons (CarteSd.h). */
+template <typename F> void parcourirCarteSd(F voir) {
+  File d = CarteSd::ouvrir(CarteSd::DOSSIER);
+  if (!d || !d.isDirectory()) return;
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    if (f.isDirectory()) continue;
+    const String nom = baseDe(f.path());
+    if (genreTeleverse(nom) != Genre::Son) continue;
+    voir(String(SampleStore::DOSSIER) + "/" + nom, (size_t)f.size());
+  }
+}
+
 }  // namespace
 
 void setupFichiersAPI(AsyncWebServer& server) {
@@ -267,11 +282,21 @@ void setupFichiersAPI(AsyncWebServer& server) {
     size_t fichiers, scripts, contenu, utilises, total;
     ScriptStore::infos(fichiers, scripts, contenu, utilises, total);
     const bool charges = SampleStore::charge();
+    /* LA CARTE SD : declaree par le composant `sd_spi` (I/O), montee dans sa
+     * tache. Branchee apres coup, elle se reconnait a l'ouverture de cette liste
+     * (un nouvel essai, sans attendre ici). `utilise` = la taille des sons qu'on
+     * en liste : l'occupation reelle d'une FAT demande de relire toute sa table. */
+    if (CarteSd::declaree() && !CarteSd::monte()) CarteSd::reessayer();
+    const bool sdMontee = CarteSd::monte();
+    uint64_t sdUtilise = 0;
+    if (sdMontee) parcourirCarteSd([&](const String&, size_t octets) { sdUtilise += octets; });
     e.formater("{\"volumes\":[{\"id\":\"%s\",\"nom\":\"Mémoire interne\",\"type\":\"littlefs\","
                "\"prise_en_charge\":true,\"presente\":true,\"total\":%u,\"utilise\":%u},"
-               "{\"id\":\"sd\",\"nom\":\"Carte SD\",\"type\":\"sd\","
-               "\"prise_en_charge\":false,\"presente\":false}],",
-               VOLUME_INTERNE, (unsigned)total, (unsigned)utilises);
+               "{\"id\":\"%s\",\"nom\":\"Carte SD\",\"type\":\"sd\","
+               "\"prise_en_charge\":true,\"declaree\":%s,\"presente\":%s,\"total\":%llu,\"utilise\":%llu}],",
+               VOLUME_INTERNE, (unsigned)total, (unsigned)utilises,
+               CarteSd::VOLUME, CarteSd::declaree() ? "true" : "false", sdMontee ? "true" : "false",
+               (unsigned long long)CarteSd::total(), (unsigned long long)sdUtilise);
     e.formater("\"televersables\":[{\"extension\":\".wav\",\"genre\":\"son\",\"volume\":\"%s\",\"dossier\":\"%s\"},"
                "{\"extension\":\".interface\",\"genre\":\"interface\",\"volume\":\"%s\",\"dossier\":\"%s\"}],",
                VOLUME_INTERNE, SampleStore::DOSSIER, VOLUME_INTERNE, Interface::DOSSIER_ENREGISTREES);
@@ -302,6 +327,20 @@ void setupFichiersAPI(AsyncWebServer& server) {
       }
       e.ajouter("}");
     });
+    if (sdMontee) parcourirCarteSd([&](const String& chemin, size_t octets) {
+      const String nom = baseDe(chemin);
+      if (!premier) e.ajouter(",");
+      premier = false;
+      n++;
+      e.ajouter("{\"chemin\":"); e.chaine(chemin.c_str());
+      e.formater(",\"volume\":\"%s\",\"octets\":%u,\"genre\":\"son\",\"supprimable\":false,\"en_attente\":false",
+                 CarteSd::VOLUME, (unsigned)octets);
+      if (charges)
+        e.formater(",\"lisible\":%s", SampleStore::indexDe(nom.c_str()) >= 0 ? "true" : "false");
+      const char* par = usageDe(u, nu, nom);
+      if (par) { e.ajouter(",\"utilise_par\":"); e.chaine(par); }
+      e.ajouter("}");
+    });
     heap_caps_free(u);
     e.formater("],\"fichiers\":%d}", n);   // le compte, tous supports
     if (e.deborde) { repondre(request, 507, "liste trop longue pour sa reponse"); return; }
@@ -312,7 +351,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * recent), sinon depuis la flash — lu d'un coup en PSRAM, puis servi. */
   server.on("/api/fichier", HTTP_GET, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
-    if (!volumeInterne(request)) { repondre(request, 501, "ce firmware ne lit pas encore de carte SD"); return; }
+    if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
     if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     std::shared_ptr<char> t; size_t n = 0; bool sup = false;
@@ -341,7 +380,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
     [](AsyncWebServerRequest* request) {
       const String nom = request->hasParam("nom") ? request->getParam("nom")->value() : String();
       String raison;
-      if (!volumeInterne(request)) { repondre(request, 501, "ce firmware ne lit pas encore de carte SD"); return; }
+      if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
       switch (genreTeleverse(nom)) {
         case Genre::Son: {
           if (!SampleStore::ecrireFin(request, raison)) { repondre(request, 422, raison); return; }
@@ -402,7 +441,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * un script ou une interface enregistree s'effacent au silence (Differe). */
   server.on("/api/fichier", HTTP_DELETE, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
-    if (!volumeInterne(request)) { repondre(request, 501, "ce firmware ne lit pas encore de carte SD"); return; }
+    if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
     const Genre g = genreDe(chemin);
     if (!supprimable(g)) {

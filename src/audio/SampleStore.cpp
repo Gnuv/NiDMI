@@ -1,6 +1,7 @@
 #include "SampleStore.h"
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
+#include "../config/CarteSd.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -72,6 +73,10 @@ const char* _base(const char* nom) {
   return b ? b + 1 : nom;
 }
 String _chemin(const char* nom) { return String(DOSSIER) + "/" + _base(nom); }
+bool _estWav(const char* nom) {
+  const size_t n = strlen(nom);
+  return n > 4 && !strcasecmp(nom + n - 4, ".wav");
+}
 
 uint32_t _le32(const uint8_t* p) { return p[0] | (p[1]<<8) | (p[2]<<16) | ((uint32_t)p[3]<<24); }
 uint16_t _le16(const uint8_t* p) { return p[0] | (p[1]<<8); }
@@ -142,12 +147,17 @@ bool _lireEntete(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& tailleData
   return true;
 }
 
-/* Lit UN fichier dans `dest`, qui n'est encore visible de personne. */
-bool _lire(const char* nom, Echantillon& dest, String& raison) {
+/* Lit UN fichier dans `dest`, qui n'est encore visible de personne. `carteSd` :
+ * le son est sur la carte SD (CarteSd) et non dans storage — il se lit alors par
+ * morceaux, en cedant le processeur entre deux : un son de plusieurs Mo prend des
+ * secondes en SPI, et la tache qui le lit ne doit pas affamer l'IDLE (chien de
+ * garde) ni rien d'autre. */
+bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = false) {
   if (strlen(nom) >= NOM_MAX) {
     raison = "nom trop long (" + String(NOM_MAX - 1) + " caracteres au plus)"; return false;
   }
-  File f = LittleFS.open(_chemin(nom), FILE_READ);
+  File f = carteSd ? CarteSd::ouvrir((String(CarteSd::DOSSIER) + "/" + _base(nom)).c_str())
+                   : LittleFS.open(_chemin(nom), FILE_READ);
   if (!f) { raison = "fichier introuvable"; return false; }
   uint16_t canaux; uint32_t freq, tailleData;
   if (!_lireEntete(f, canaux, freq, tailleData, raison)) { f.close(); return false; }
@@ -158,7 +168,19 @@ bool _lire(const char* nom, Echantillon& dest, String& raison) {
     raison = "PSRAM insuffisante pour " + String(tailleData) + " o";
     f.close(); return false;
   }
-  const size_t lus = f.read((uint8_t*)pcm, tailleData);
+  size_t lus = 0;
+  if (!carteSd) {
+    lus = f.read((uint8_t*)pcm, tailleData);
+  } else {
+    constexpr size_t MORCEAU = 16384;
+    while (lus < tailleData) {
+      const size_t pas = (tailleData - lus < MORCEAU) ? tailleData - lus : MORCEAU;
+      const size_t n = f.read((uint8_t*)pcm + lus, pas);
+      if (!n) break;
+      lus += n;
+      vTaskDelay(1);                   // cede : l'IDLE du coeur 0 doit tourner
+    }
+  }
   f.close();
   if (lus != tailleData) { heap_caps_free(pcm); raison = "lecture incomplete"; return false; }
 
@@ -168,8 +190,8 @@ bool _lire(const char* nom, Echantillon& dest, String& raison) {
   dest.freq   = freq ? freq : 48000;
   dest.trames = tailleData / (2 * canaux);
   strlcpy(dest.nom, nom, sizeof(dest.nom));
-  Serial.printf("[samples] %s charge : %u trames, %u Hz, %s, %u o en PSRAM\n",
-                dest.nom, (unsigned)dest.trames, (unsigned)dest.freq,
+  Serial.printf("[samples] %s charge%s : %u trames, %u Hz, %s, %u o en PSRAM\n",
+                dest.nom, carteSd ? " (carte SD)" : "", (unsigned)dest.trames, (unsigned)dest.freq,
                 dest.stereo ? "stereo" : "mono", (unsigned)tailleData);
   return true;
 }
@@ -218,6 +240,25 @@ String listerJson() {
         out += "}";
       }
       f = d.openNextFile();
+    }
+  }
+  /* Les sons de la carte SD, a la suite — « volume » dit d'ou ils viennent. Un nom
+   * que storage porte deja l'emporte, et ne se liste pas deux fois. */
+  File s = CarteSd::ouvrir(CarteSd::DOSSIER);
+  if (s && s.isDirectory()) {
+    bool premier = out.length() == 1;
+    for (File f = s.openNextFile(); f; f = s.openNextFile()) {
+      if (f.isDirectory()) continue;
+      const char* base = _base(f.path());
+      if (!_estWav(base) || LittleFS.exists(_chemin(base))) continue;
+      if (!premier) out += ",";
+      premier = false;
+      out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size())
+           + ",\"volume\":\"" + CarteSd::VOLUME + "\"";
+      const int i = _index(base);
+      if (i >= 0 && _ech[i].freq)
+        out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
+      out += "}";
     }
   }
   out += "]";
@@ -320,14 +361,17 @@ bool supprimer(const char* nom) {
 
 /* TOUT CHARGER, UNE FOIS : au demarrage (restaurerAuBoot), ou au premier son
  * demande. Un fichier refuse (mauvais format, PSRAM pleine) est DIT et saute :
- * un magasin qui echoue en silence est pire qu'un magasin vide. */
-uint8_t chargerTout() {
-  Verrou verrou;
-  if (_charge) return _prets;
-  _charge = true;
-  if (!monter()) return 0;
+ * un magasin qui echoue en silence est pire qu'un magasin vide.
+ *
+ * storage d'abord, ICI ; la carte SD ensuite, dans SA tache (CarteSd) : des Mo
+ * lus en SPI ne se lisent ni dans la boucle, ni dans le serveur web, ni sous le
+ * verrou du magasin. */
+namespace {
+// Sous le verrou.
+void _chargerStorage() {
+  if (!monter()) return;
   File d = LittleFS.open(DOSSIER);
-  if (!d || !d.isDirectory()) return 0;
+  if (!d || !d.isDirectory()) return;
   File f = d.openNextFile();
   int i;
   while (f && (i = _vide()) >= 0) {
@@ -345,10 +389,44 @@ uint8_t chargerTout() {
                          (unsigned)SAMPLES_MAX); f.close(); }
   Serial.printf("[samples] %u echantillons prets, %u o en PSRAM\n",
                 (unsigned)_prets, (unsigned)_octets);
+}
+}  // namespace
+
+uint8_t chargerTout() {
+  {
+    Verrou verrou;
+    if (_charge) return _prets;
+    _charge = true;
+    _chargerStorage();
+  }
+  CarteSd::chargerSons();              // sans effet si la carte n'est pas montee
+  Verrou verrou;
   return _prets;
 }
 
-bool installer(const char* nom, String& raison, int& retire) {
+/* Les sons de la carte SD qu'il reste a lire : ses `.wav` de /samples dont le nom
+ * n'est pas deja dans le magasin (storage l'emporte). Les noms que `nomValide`
+ * refuse sont dits et sautes — une cue ne pourrait pas les nommer. */
+uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
+  uint8_t n = 0;
+  File d = CarteSd::ouvrir(CarteSd::DOSSIER);
+  if (!d || !d.isDirectory()) {
+    Serial.printf("[SD] pas de dossier %s sur la carte : rien a lire\n", CarteSd::DOSSIER);
+    return 0;
+  }
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    if (f.isDirectory()) continue;
+    const char* base = _base(f.path());
+    if (!_estWav(base) || indexDe(base) >= 0) continue;
+    String raison;
+    if (!nomValide(base, raison)) { Serial.printf("[SD] %s ignore : %s\n", base, raison.c_str()); continue; }
+    if (n >= max) { Serial.printf("[SD] au-dela de %u sons, le reste est ignore\n", (unsigned)max); break; }
+    strlcpy(noms[n++], base, NOM_MAX);
+  }
+  return n;
+}
+
+bool installer(const char* nom, String& raison, int& retire, bool carteSd) {
   retire = -1;
   const char* base = _base(nom);
   {
@@ -358,7 +436,7 @@ bool installer(const char* nom, String& raison, int& retire) {
   /* Lu HORS du verrou : 30 a 70 ms de flash, pendant lesquelles une cue qui
    * arme le lecteur (setSampler → chargerTout) ne doit pas attendre. */
   Echantillon neuf;
-  if (!monter() || !_lire(base, neuf, raison)) {
+  if (!monter() || !_lire(base, neuf, raison, carteSd)) {
     if (!raison.length()) raison = "storage non monte";
     return false;
   }

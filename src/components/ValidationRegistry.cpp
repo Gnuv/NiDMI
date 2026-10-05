@@ -1,6 +1,7 @@
 #include "../audio/AudioEngine.h"   // broches imposees du bus I2S
 #include "ValidationRegistry.h"
 #include "ComponentRegistry.h"
+#include "storage/SdSpiDef.h"       // le bus SPI de la carte SD
 #include "../utils/PinMapper.h"
 #include "../managers/MuxValidator.h"
 #include "../managers/MuxManager.h"
@@ -333,6 +334,33 @@ static ValidationResult validateDacComplex(const ComplexComponentData& data) {
     return result;
 }
 
+/* La carte SD : le CS (broche principale) se choisit, le bus SPI non — SCK,
+ * MISO et MOSI sont ceux de la variante, et le CS ne peut pas en etre un. */
+static ValidationResult validateSdComplex(const ComplexComponentData& data) {
+    ValidationResult result;
+    if (!data.def) return ValidationResult(false, "Définition du composant manquante");
+    if (!Components::SdSpi::validate(data.mainPinGpio))
+        return ValidationResult(false, "Le CS de la carte SD doit être une broche libre, pas celle du bus SPI "
+                                       "(SCK=" + String(Components::SdSpi::BUS_SCK)
+                                       + ", MISO=" + String(Components::SdSpi::BUS_MISO)
+                                       + ", MOSI=" + String(Components::SdSpi::BUS_MOSI) + ")");
+    uint8_t sck = 255, miso = 255, mosi = 255;
+    for (uint8_t i = 0; i < data.additionalPinCount; i++) {
+        const char* id = data.additionalPins[i].id;
+        if (!id) continue;
+        if      (!strcmp(id, "sdSck"))  sck  = data.additionalPins[i].gpio;
+        else if (!strcmp(id, "sdMiso")) miso = data.additionalPins[i].gpio;
+        else if (!strcmp(id, "sdMosi")) mosi = data.additionalPins[i].gpio;
+    }
+    if (sck != Components::SdSpi::BUS_SCK)
+        return ValidationResult(false, "SCK doit être le GPIO " + String(Components::SdSpi::BUS_SCK));
+    if (miso != Components::SdSpi::BUS_MISO)
+        return ValidationResult(false, "MISO doit être le GPIO " + String(Components::SdSpi::BUS_MISO));
+    if (mosi != Components::SdSpi::BUS_MOSI)
+        return ValidationResult(false, "MOSI doit être le GPIO " + String(Components::SdSpi::BUS_MOSI));
+    return result;
+}
+
 void ValidationRegistry::init() {
     // Note: Les composants simples (potentiomètre, bouton, LED, velostat) sont maintenant
     // validés dynamiquement via ComponentDefinition::pinType dans validate().
@@ -348,4 +376,5 @@ void ValidationRegistry::init() {
     registerComplexValidator("joystick", validateJoystickComplex);
     registerComplexValidator("joystick3", validateJoystick3Complex);
     registerComplexValidator("dac_i2s", validateDacComplex);
+    registerComplexValidator("sd_spi", validateSdComplex);
 }

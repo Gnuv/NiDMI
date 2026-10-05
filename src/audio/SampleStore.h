@@ -16,6 +16,11 @@
  * bloquer le temps qu'un cache s'aligne, et ça s'entendrait. Le fichier est
  * copié en PSRAM au chargement, une fois pour toutes.
  *
+ * LA CARTE SD (CarteSd, composant `sd_spi`) est un troisième lieu : ses sons
+ * `/samples/*.wav` se lisent en PSRAM comme ceux de storage, dans le même magasin
+ * et sous leur nom de base — mais par la tâche de la carte, pas la nôtre (des Mo
+ * en SPI, par morceaux). Un nom que storage porte déjà l'emporte.
+ *
  * Coût en RAM interne : quelques centaines d'octets. À comparer aux 26 632 o de
  * Plaits — c'est ce qui permet au lecteur d'échantillons de cohabiter avec le
  * service de l'interface sans la dégrader.
@@ -85,6 +90,9 @@ bool supprimer(const char* nom);
 // Charge tout ce que storage contient, la première fois ; les appels suivants
 // ne relisent rien. Retourne le nombre d'échantillons prêts.
 uint8_t chargerTout();
+// Les sons de la CARTE SD (CarteSd) que le magasin n'a pas encore : leurs noms,
+// pour que la tâche de la carte les installe un à un (installer(…, true)).
+uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max);
 bool    charge();                      // chargerTout() est passé : lisible() dit vrai
 
 // ── Changer le magasin pendant que la tâche audio le lit ───────────────────
@@ -97,10 +105,11 @@ bool    charge();                      // chargerTout() est passé : lisible() d
 // que l'appelant ne fait qu'une fois la tâche audio sortie du bloc qui a pu la
 // lire (AudioEngine::echantillonArrive / echantillonParti).
 //
-// installer() : lit `nom` (30 à 70 ms de flash, hors verrou) et le publie ;
+// installer() : lit `nom` (30 à 70 ms de flash, hors verrou — `carteSd` : sur la
+// carte SD, par morceaux, depuis SA tâche seulement) et le publie ;
 // `retire` = l'emplacement de l'ancien, -1 s'il n'y en avait pas. Magasin pas
 // encore chargé : rien à faire, chargerTout() le lira avec les autres.
-bool installer(const char* nom, String& raison, int& retire);
+bool installer(const char* nom, String& raison, int& retire, bool carteSd = false);
 int  retirer(const char* nom);                 // l'emplacement retiré, -1 si absent
 void liberer(int i);
 
