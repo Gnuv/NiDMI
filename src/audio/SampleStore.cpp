@@ -1,7 +1,7 @@
 #include "SampleStore.h"
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
-#include "../config/CarteSd.h"
+#include "../config/SdCard.h"
 #include "../server/WebDebugConsole.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -48,9 +48,9 @@ struct Echantillon {
   bool     stereo = false;
   uint32_t freq   = 48000;
   char     nom[NOM_MAX] = {0};
-  bool     sd     = false;      // lu depuis la carte SD (CarteSd), pas depuis storage
-  bool     flux   = false;      // lu EN FLUX (FluxSD) : aucune donnee en PSRAM, pcm nul
-  uint32_t offset = 0;          // flux : l'octet ou commencent les donnees dans le fichier
+  bool     sd     = false;      // read from the SD card (SdCard), not from storage
+  bool     streamed = false;    // read as a STREAM (SdStream): no data in PSRAM, pcm is null
+  uint32_t dataOffset = 0;      // streamed: the byte where the data begins in the file
   volatile bool pret = false;
 };
 Echantillon      _ech[SAMPLES_MAX];
@@ -77,9 +77,9 @@ const char* _base(const char* nom) {
   return b ? b + 1 : nom;
 }
 String _chemin(const char* nom) { return String(DOSSIER) + "/" + _base(nom); }
-/* Un .wav a lire : pas un fichier cache. macOS pose a cote de chaque fichier copie
- * sur une carte FAT un « ._nom.wav » de metadonnees (4 Ko) — jamais un son. */
-bool _estWav(const char* nom) {
+/* A .wav to read: not a hidden file. macOS puts next to every file copied to a FAT
+ * card a "._name.wav" of metadata (4 KB) — never a sound. */
+bool _isWav(const char* nom) {
   const size_t n = strlen(nom);
   return n > 4 && nom[0] != '.' && !strcasecmp(nom + n - 4, ".wav");
 }
@@ -100,7 +100,7 @@ int _vide() {
 void _publier(int i, const Echantillon& e) {
   Echantillon& d = _ech[i];
   d.pcm = e.pcm; d.trames = e.trames; d.octets = e.octets;
-  d.stereo = e.stereo; d.freq = e.freq; d.sd = e.sd; d.flux = e.flux; d.offset = e.offset;
+  d.stereo = e.stereo; d.freq = e.freq; d.sd = e.sd; d.streamed = e.streamed; d.dataOffset = e.dataOffset;
   memcpy(d.nom, e.nom, sizeof(d.nom));
   __sync_synchronize();
   d.pret = true;
@@ -153,32 +153,31 @@ bool _lireEntete(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& tailleData
   return true;
 }
 
-/* Lit UN fichier dans `dest`, qui n'est encore visible de personne. `carteSd` :
- * le son est sur la carte SD (CarteSd) et non dans storage — il se lit alors par
- * morceaux, en cedant le processeur entre deux : un son de plusieurs Mo prend des
- * secondes en SPI, et la tache qui le lit ne doit pas affamer l'IDLE (chien de
- * garde) ni rien d'autre. */
-bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = false) {
+/* Reads ONE file into `dest`, which nobody can see yet. `fromSdCard`: the sound is
+ * on the SD card (SdCard) and not in storage — it is then read in chunks, yielding
+ * the CPU between two: a multi-MB sound takes seconds over SPI, and the task that
+ * reads it must not starve the IDLE task (watchdog) nor anything else. */
+bool _lire(const char* nom, Echantillon& dest, String& raison, bool fromSdCard = false) {
   if (strlen(nom) >= NOM_MAX) {
     raison = "nom trop long (" + String(NOM_MAX - 1) + " caracteres au plus)"; return false;
   }
-  File f = carteSd ? CarteSd::ouvrir((String(CarteSd::DOSSIER) + "/" + _base(nom)).c_str())
-                   : LittleFS.open(_chemin(nom), FILE_READ);
+  File f = fromSdCard ? SdCard::open((String(SdCard::FOLDER) + "/" + _base(nom)).c_str())
+                      : LittleFS.open(_chemin(nom), FILE_READ);
   if (!f) { raison = "fichier introuvable"; return false; }
   uint16_t canaux; uint32_t freq, tailleData;
   if (!_lireEntete(f, canaux, freq, tailleData, raison)) { f.close(); return false; }
 
-  /* UN SON DE LA SD QUI NE TIENT PAS EN PSRAM se joue EN FLUX : on n'en garde que
-   * l'en-tete (sa duree, sa frequence, ou commencent les donnees), aucune donnee. La
-   * PSRAM est commune — tampons du serveur web, banques de play list, console — : la
-   * SD ne doit pas la vider. Plus gros que PRECHARGE_SON_MAX, ou au-dela de
-   * PRECHARGE_SD_MAX en tout. Seule une play list sait le jouer (FluxSD.h). */
-  if (carteSd) {
-    size_t cumul = 0;
-    for (int j = 0; j < SAMPLES_MAX; j++) if (_ech[j].pret && _ech[j].sd && !_ech[j].flux) cumul += _ech[j].octets;
-    if (tailleData > PRECHARGE_SON_MAX || cumul + tailleData > PRECHARGE_SD_MAX) {
-      dest.pcm = nullptr; dest.octets = 0; dest.flux = true; dest.sd = true;
-      dest.offset = (uint32_t)f.position();
+  /* AN SD SOUND THAT DOES NOT FIT IN PSRAM is played as a STREAM: we only keep its
+   * header (its length, its frequency, where the data begins), no data. PSRAM is
+   * shared — web server buffers, playlist banks, console —: the SD must not empty
+   * it. Bigger than PRELOAD_SOUND_MAX, or beyond PRELOAD_SD_MAX in total. Only a
+   * playlist can play it (SdStream.h). */
+  if (fromSdCard) {
+    size_t preloaded = 0;
+    for (int j = 0; j < SAMPLES_MAX; j++) if (_ech[j].pret && _ech[j].sd && !_ech[j].streamed) preloaded += _ech[j].octets;
+    if (tailleData > PRELOAD_SOUND_MAX || preloaded + tailleData > PRELOAD_SD_MAX) {
+      dest.pcm = nullptr; dest.octets = 0; dest.streamed = true; dest.sd = true;
+      dest.dataOffset = (uint32_t)f.position();
       dest.stereo = (canaux == 2);
       dest.freq   = freq ? freq : 48000;
       dest.trames = tailleData / (2 * canaux);
@@ -198,16 +197,16 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
     f.close(); return false;
   }
   size_t lus = 0;
-  if (!carteSd) {
+  if (!fromSdCard) {
     lus = f.read((uint8_t*)pcm, tailleData);
   } else {
-    constexpr size_t MORCEAU = 16384;
+    constexpr size_t CHUNK = 16384;
     while (lus < tailleData) {
-      const size_t pas = (tailleData - lus < MORCEAU) ? tailleData - lus : MORCEAU;
-      const size_t n = f.read((uint8_t*)pcm + lus, pas);
+      const size_t step = (tailleData - lus < CHUNK) ? tailleData - lus : CHUNK;
+      const size_t n = f.read((uint8_t*)pcm + lus, step);
       if (!n) break;
       lus += n;
-      vTaskDelay(1);                   // cede : l'IDLE du coeur 0 doit tourner
+      vTaskDelay(1);                   // yield: core 0's IDLE task must run
     }
   }
   f.close();
@@ -215,13 +214,13 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
 
   dest.pcm    = pcm;
   dest.octets = tailleData;
-  dest.sd     = carteSd;
+  dest.sd     = fromSdCard;
   dest.stereo = (canaux == 2);
   dest.freq   = freq ? freq : 48000;
   dest.trames = tailleData / (2 * canaux);
   strlcpy(dest.nom, nom, sizeof(dest.nom));
   NIDMI_WEB_LOG("[samples] %s charge%s : %u trames, %u Hz, %s, %u o en PSRAM",
-                dest.nom, carteSd ? " (carte SD)" : "", (unsigned)dest.trames, (unsigned)dest.freq,
+                dest.nom, fromSdCard ? " (carte SD)" : "", (unsigned)dest.trames, (unsigned)dest.freq,
                 dest.stereo ? "stereo" : "mono", (unsigned)tailleData);
   return true;
 }
@@ -230,7 +229,7 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
 
 bool estMonte() { return _monte; }
 
-bool enteteWav(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison) {
+bool wavHeader(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison) {
   return _lireEntete(f, canaux, freq, octetsData, raison);
 }
 
@@ -276,20 +275,20 @@ String listerJson() {
       f = d.openNextFile();
     }
   }
-  /* Les sons de la carte SD, a la suite — « volume » dit d'ou ils viennent. Un nom
-   * que storage porte deja l'emporte, et ne se liste pas deux fois. */
-  File s = CarteSd::ouvrir(CarteSd::DOSSIER);
+  /* The SD card's sounds, after them — "volume" says where they come from. A name
+   * that storage already holds wins, and is not listed twice. */
+  File s = SdCard::open(SdCard::FOLDER);
   if (s && s.isDirectory()) {
-    bool premier = out.length() == 1;
+    bool isFirst = out.length() == 1;
     for (File f = s.openNextFile(); f; f = s.openNextFile()) {
       if (f.isDirectory()) continue;
       const char* base = _base(f.path());
-      if (!_estWav(base) || LittleFS.exists(_chemin(base))) continue;
-      if (!premier) out += ",";
-      premier = false;
+      if (!_isWav(base) || LittleFS.exists(_chemin(base))) continue;
+      if (!isFirst) out += ",";
+      isFirst = false;
       out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size())
-           + ",\"volume\":\"" + CarteSd::VOLUME + "\"";
-      { const int fi = _index(base); if (fi >= 0 && _ech[fi].flux) out += ",\"flux\":true"; }
+           + ",\"volume\":\"" + SdCard::VOLUME_ID + "\"";
+      { const int fi = _index(base); if (fi >= 0 && _ech[fi].streamed) out += ",\"streamed\":true"; }
       const int i = _index(base);
       if (i >= 0 && _ech[i].freq)
         out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
@@ -398,12 +397,11 @@ bool supprimer(const char* nom) {
  * demande. Un fichier refuse (mauvais format, PSRAM pleine) est DIT et saute :
  * un magasin qui echoue en silence est pire qu'un magasin vide.
  *
- * storage d'abord, ICI ; la carte SD ensuite, dans SA tache (CarteSd) : des Mo
- * lus en SPI ne se lisent ni dans la boucle, ni dans le serveur web, ni sous le
- * verrou du magasin. */
+ * Storage first, HERE; the SD card next, in ITS task (SdCard): MBs read over SPI
+ * are read neither in the loop, nor in the web server, nor under the store's lock. */
 namespace {
-// Sous le verrou.
-void _chargerStorage() {
+// Under the lock.
+void _loadStorage() {
   if (!monter()) return;
   File d = LittleFS.open(DOSSIER);
   if (!d || !d.isDirectory()) return;
@@ -432,29 +430,29 @@ uint8_t chargerTout() {
     Verrou verrou;
     if (_charge) return _prets;
     _charge = true;
-    _chargerStorage();
+    _loadStorage();
   }
-  CarteSd::chargerSons();              // sans effet si la carte n'est pas montee
+  SdCard::loadSounds();                // no effect if the card is not mounted
   Verrou verrou;
   return _prets;
 }
 
-/* Les sons de la carte SD qu'il reste a INSTALLER : ses `.wav` de /samples dont le
- * nom n'est pas deja dans le magasin (storage l'emporte). Chacun s'installe par
- * _lire(…, carteSd), qui decide : precharge en PSRAM s'il est petit, sinon EN FLUX
- * (aucune donnee gardee — voir _lire). Les noms que `nomValide` refuse sont dits et
- * sautes : une cue ne saurait pas les nommer. */
-uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
+/* The SD card sounds still to INSTALL: its `.wav` files in /samples whose name is
+ * not already in the store (storage wins). Each is installed through
+ * _lire(..., fromSdCard), which decides: preloaded in PSRAM if small, otherwise AS A
+ * STREAM (no data kept — see _lire). Names that `nomValide` rejects are reported and
+ * skipped: a cue could not name them. */
+uint8_t sdSoundNames(char noms[][NOM_MAX], uint8_t max) {
   uint8_t n = 0;
-  File d = CarteSd::ouvrir(CarteSd::DOSSIER);
+  File d = SdCard::open(SdCard::FOLDER);
   if (!d || !d.isDirectory()) {
-    NIDMI_WEB_LOG("[SD] pas de dossier %s sur la carte : rien a lire", CarteSd::DOSSIER);
+    NIDMI_WEB_LOG("[SD] pas de dossier %s sur la carte : rien a lire", SdCard::FOLDER);
     return 0;
   }
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
     const char* base = _base(f.path());
-    if (!_estWav(base) || indexDe(base) >= 0) continue;
+    if (!_isWav(base) || indexDe(base) >= 0) continue;
     String raison;
     if (!nomValide(base, raison)) { NIDMI_WEB_LOG("[SD] %s ignore : %s", base, raison.c_str()); continue; }
     if (n >= max) { NIDMI_WEB_LOG("[SD] au-dela de %u sons, le reste est ignore", (unsigned)max); break; }
@@ -463,7 +461,7 @@ uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
   return n;
 }
 
-bool installer(const char* nom, String& raison, int& retire, bool carteSd) {
+bool installer(const char* nom, String& raison, int& retire, bool fromSdCard) {
   retire = -1;
   const char* base = _base(nom);
   {
@@ -473,7 +471,7 @@ bool installer(const char* nom, String& raison, int& retire, bool carteSd) {
   /* Lu HORS du verrou : 30 a 70 ms de flash, pendant lesquelles une cue qui
    * arme le lecteur (setSampler → chargerTout) ne doit pas attendre. */
   Echantillon neuf;
-  if (!monter() || !_lire(base, neuf, raison, carteSd)) {
+  if (!monter() || !_lire(base, neuf, raison, fromSdCard)) {
     if (!raison.length()) raison = "storage non monte";
     return false;
   }
@@ -507,7 +505,7 @@ void liberer(int i) {
   int16_t* pcm = e.pcm;
   _octets -= e.octets;
   e.pcm = nullptr; e.trames = 0; e.octets = 0; e.stereo = false; e.freq = 48000;
-  e.nom[0] = 0; e.sd = false; e.flux = false; e.offset = 0;
+  e.nom[0] = 0; e.sd = false; e.streamed = false; e.dataOffset = 0;
   __sync_synchronize();
   heap_caps_free(pcm);
 }
@@ -519,8 +517,8 @@ const int16_t* donnees(uint8_t i)   { return lisible(i) ? _ech[i].pcm    : nullp
 size_t         trames(uint8_t i)    { return lisible(i) ? _ech[i].trames : 0; }
 bool           stereo(uint8_t i)    { return (i < SAMPLES_MAX) ? _ech[i].stereo : false; }
 uint32_t       frequence(uint8_t i) { return (i < SAMPLES_MAX) ? _ech[i].freq   : 48000; }
-bool           estFlux(uint8_t i)        { return i < SAMPLES_MAX && _ech[i].pret && _ech[i].flux; }
-uint32_t       offsetDonnees(uint8_t i)  { return (i < SAMPLES_MAX) ? _ech[i].offset : 0; }
+bool           isStreamed(uint8_t i)     { return i < SAMPLES_MAX && _ech[i].pret && _ech[i].streamed; }
+uint32_t       dataOffset(uint8_t i)     { return (i < SAMPLES_MAX) ? _ech[i].dataOffset : 0; }
 
 /* Retrouver un echantillon par son NOM — c'est ce que porte une ligne de cue.
  * Seuls les lisibles : un son retire ne se declenche plus. */

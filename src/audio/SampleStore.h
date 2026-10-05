@@ -16,10 +16,11 @@
  * bloquer le temps qu'un cache s'aligne, et ça s'entendrait. Le fichier est
  * copié en PSRAM au chargement, une fois pour toutes.
  *
- * LA CARTE SD (CarteSd, composant `sd_spi`) est un troisième lieu : ses sons
- * `/samples/*.wav` se lisent en PSRAM comme ceux de storage, dans le même magasin
- * et sous leur nom de base — mais par la tâche de la carte, pas la nôtre (des Mo
- * en SPI, par morceaux). Un nom que storage porte déjà l'emporte.
+ * THE SD CARD (SdCard, component `sd_spi`) is a third place: its sounds
+ * `/samples/*.wav` are read into PSRAM like those of storage, in the same store
+ * and under their base name — but by the card's task, not ours (MBs over SPI,
+ * in chunks). A name that storage already holds wins. Sounds too long for PSRAM
+ * are STREAMED (SdStream.h) and keep only their header here.
  *
  * Coût en RAM interne : quelques centaines d'octets. À comparer aux 26 632 o de
  * Plaits — c'est ce qui permet au lecteur d'échantillons de cohabiter avec le
@@ -91,15 +92,15 @@ bool supprimer(const char* nom);
 // Charge tout ce que storage contient, la première fois ; les appels suivants
 // ne relisent rien. Retourne le nombre d'échantillons prêts.
 uint8_t chargerTout();
-// Les sons de la CARTE SD (CarteSd) que le magasin n'a pas encore : leurs noms,
-// pour que la tâche de la carte les installe un à un (installer(…, true)).
-uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max);
-/* Le plafond du PRECHARGEMENT depuis la SD : un son, et tous ensemble. Au-dela, un son
- * se joue en flux (FluxSD.h) plutot que d'etre garde en PSRAM. */
-constexpr size_t PRECHARGE_SON_MAX = 1536 * 1024;
-constexpr size_t PRECHARGE_SD_MAX  = 3 * 1024 * 1024;
-// L'en-tete d'un WAV : f reste au debut des donnees. Faux (et `raison`) si ce n'est pas du PCM 16 bits.
-bool enteteWav(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison);
+// The names of the SD CARD sounds (SdCard) that the store does not have yet, so that
+// the card's task installs them one by one (installer(..., true)).
+uint8_t sdSoundNames(char noms[][NOM_MAX], uint8_t max);
+/* The PRELOAD ceiling from the SD: one sound, and all of them together. Beyond that, a
+ * sound is streamed (SdStream.h) instead of being kept in PSRAM. */
+constexpr size_t PRELOAD_SOUND_MAX = 1536 * 1024;
+constexpr size_t PRELOAD_SD_MAX    = 3 * 1024 * 1024;
+// A WAV header: `f` is left at the start of the data. False (and `raison`) if it is not 16-bit PCM.
+bool wavHeader(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison);
 bool    charge();                      // chargerTout() est passé : lisible() dit vrai
 
 // ── Changer le magasin pendant que la tâche audio le lit ───────────────────
@@ -112,21 +113,21 @@ bool    charge();                      // chargerTout() est passé : lisible() d
 // que l'appelant ne fait qu'une fois la tâche audio sortie du bloc qui a pu la
 // lire (AudioEngine::echantillonArrive / echantillonParti).
 //
-// installer() : lit `nom` (30 à 70 ms de flash, hors verrou — `carteSd` : sur la
-// carte SD, par morceaux, depuis SA tâche seulement) et le publie ;
+// installer() : lit `nom` (30 à 70 ms de flash, hors verrou — `fromSdCard`: on the
+// SD card, in chunks, from ITS task only) et le publie ;
 // `retire` = l'emplacement de l'ancien, -1 s'il n'y en avait pas. Magasin pas
 // encore chargé : rien à faire, chargerTout() le lira avec les autres.
-bool installer(const char* nom, String& raison, int& retire, bool carteSd = false);
+bool installer(const char* nom, String& raison, int& retire, bool fromSdCard = false);
 int  retirer(const char* nom);                 // l'emplacement retiré, -1 si absent
 void liberer(int i);
 
 uint8_t         nombreCharges();               // les emplacements lisibles
 int             indexDe(const char* nom);      // -1 si absent
 bool            lisible(uint8_t i);            // faux : retiré, ou vide
-// Un son de la SD lu EN FLUX (FluxSD) : lisible, des trames, une fréquence — mais pas de
-// données en PSRAM (`donnees` rend nul). `offsetDonnees` : l'octet où elles commencent.
-bool            estFlux(uint8_t i);
-uint32_t        offsetDonnees(uint8_t i);
+// An SD sound read AS A STREAM (SdStream): readable, with frames and a frequency — but no
+// data in PSRAM (`donnees` returns null). `dataOffset`: the byte where the data begins.
+bool            isStreamed(uint8_t i);
+uint32_t        dataOffset(uint8_t i);
 const int16_t*  donnees(uint8_t i);            // en PSRAM ; nul si pas lisible
 size_t          trames(uint8_t i);
 bool            stereo(uint8_t i);

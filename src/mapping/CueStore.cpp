@@ -355,20 +355,20 @@ void _appliquer(const Cue& c) {
    * BufferSource cote navigateur. */
   if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String()); }
 
-  /* « PRECHARGER » (option d'un bloc play-list), sur TOUTE cue — une cue muette prepare aussi la
-   * suivante. La cue SUIVANTE — celle que GO jouerait, la premiere apres la derniere si la liste
-   * boucle — voit les tetes de ses listes marquees lues d'avance. On ne
-   * sait pas ou l'usager ira (les sauts sont libres) : c'est une OPTION, par bloc, pour les
-   * compositions lineaires. Le budget la borne (FluxSD.h) ; si on saute ailleurs, ces tetes s'evincent. */
+  /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
+   * one too. The NEXT cue — the one GO would play, the first after the last if the list
+   * loops — gets the heads of its marked lists read ahead. We do not know where the user
+   * will go (jumps are free): it is an OPTION, per block, for linear compositions. The
+   * budget bounds it (SdStream.h); if we jump elsewhere, these heads evict themselves. */
   {
     const int n = nombre();
-    const int suivante = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
-    /* TOUJOURS appelee : une suivante qui n'en veut pas EFFACE l'anticipation d'avant. */
-    Cue prochaine;
-    if (suivante >= 0 && suivante != _index && lire(suivante, prochaine) && prochaine.engine == -2)
-      AudioEngine::prechargerListes(prochaine.params);
+    const int nextIndex = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
+    /* ALWAYS called: a next cue that wants none CLEARS the previous preload. */
+    Cue next;
+    if (nextIndex >= 0 && nextIndex != _index && lire(nextIndex, next) && next.engine == -2)
+      AudioEngine::preloadLists(next.params);
     else
-      AudioEngine::prechargerListes(String());
+      AudioEngine::preloadLists(String());
   }
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et

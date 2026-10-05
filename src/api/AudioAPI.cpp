@@ -138,11 +138,11 @@ void setupAudioAPI(AsyncWebServer& server) {
             for (int i = 0; i < n; i++) {
                 json += String(i ? "," : "") + "{\"bloc\":" + String(blocs[i]) + ",\"clip\":"
                       + String(clips[i]) + ",\"n\":" + String(nombres[i]);
-                /* Ses clips lus en flux : combien, combien ont leur tete, combien n'en auront jamais. */
-                uint8_t fl, pr, sa;
-                if (AudioEngine::etatTetes(blocs[i], fl, pr, sa) && fl)
-                    json += ",\"tetes\":{\"flux\":" + String(fl) + ",\"pretes\":" + String(pr)
-                          + ",\"sans\":" + String(sa) + "}";
+                /* Its streamed clips: how many, how many have their head, how many never will. */
+                uint8_t st, rd, wo;
+                if (AudioEngine::headsState(blocs[i], st, rd, wo) && st)
+                    json += ",\"heads\":{\"streamed\":" + String(st) + ",\"ready\":" + String(rd)
+                          + ",\"without\":" + String(wo) + "}";
                 json += "}";
             }
             json += "],";
@@ -391,7 +391,7 @@ void setupAudioAPI(AsyncWebServer& server) {
      * par le suivi, la redira a la prochaine arrivee sur la cue. */
     server.on("/api/audio/liste", HTTP_POST, [](AsyncWebServerRequest *request){
         static const char* const CLES[] = { "liste", "lbloc", "lnote", "lsuite",
-                                            "lgain", "ldebut", "lfin", "lboucle", "lprec" };
+                                            "lgain", "ldebut", "lfin", "lboucle", "lpreload" };
         String params;
         for (const char* cle : CLES)
             if (request->hasParam(cle, true))
@@ -407,8 +407,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         }
         String absents;
         uint32_t bloc = 0;
-        uint8_t enFlux = 0, sansTete = 0;
-        const int n = AudioEngine::poserListe(params, absents, bloc, &enFlux, &sansTete);
+        uint8_t streamedClips = 0, clipsWithoutHead = 0;
+        const int n = AudioEngine::poserListe(params, absents, bloc, &streamedClips, &clipsWithoutHead);
         if (n < 0) {
             request->send(bloc ? 507 : 400, "application/json", bloc
                 ? "{\"status\":\"error\",\"message\":\"plus de place : "
@@ -416,10 +416,10 @@ void setupAudioAPI(AsyncWebServer& server) {
                 : String("{\"status\":\"error\",\"message\":\"lbloc requis\"}"));
             return;
         }
-        /* `tetes_sans` : les clips lus en flux qui n'auront JAMAIS de tete — le budget des tetes de la
-         * carte est plein : ils ne joueront pas. L'app le dit (inspecteur de la play-list). */
+        /* `clips_without_head`: the streamed clips that will NEVER get a head — the board's
+         * head budget is full: they will not play. The app says so (playlist inspector). */
         String json = "{\"status\":\"ok\",\"bloc\":" + String(bloc) + ",\"clips\":" + String(n)
-                    + ",\"tetes_flux\":" + String(enFlux) + ",\"tetes_sans\":" + String(sansTete)
+                    + ",\"streamed_clips\":" + String(streamedClips) + ",\"clips_without_head\":" + String(clipsWithoutHead)
                     + ",\"absents\":[";
         for (int i = 0, debut = 0; debut < (int)absents.length(); i++) {
             int fin = absents.indexOf(',', debut); if (fin < 0) fin = absents.length();

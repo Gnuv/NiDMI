@@ -32,7 +32,7 @@ enum class ComponentType : uint8_t {
     NOISE_SAMPLER = 12, // Source signal : bruit blanc externe échantillonné sur ADC (famille SIGNAL)
     JOYSTICK3     = 13, // Joystick 3 axes analogiques (X/Y/Z)
     DAC_I2S       = 14, // Sortie audio I2S (BCK/LRCK/DIN) : un peripherique qu'on DECLARE
-    SD_SPI        = 15  // Carte SD sur le bus SPI (CS + SCK/MISO/MOSI) : declaree comme le DAC
+    SD_SPI        = 15  // SD card on the SPI bus (CS + SCK/MISO/MOSI): declared like the DAC
     // Facilement extensible pour de nouveaux types
 };
 

@@ -35,7 +35,7 @@ void registerBuiltinDefinitions(std::vector<ComponentDefinition>& defs) {
     addIfMissing(Components::DacI2s::createDefinition());
     addIfMissing(Components::Ultrasonic::createDefinition());
 
-    // STOCKAGE
+    // STORAGE
     addIfMissing(Components::SdSpi::createDefinition());
 
     // MULTIPLEXER

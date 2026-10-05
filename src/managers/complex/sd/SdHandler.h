@@ -4,12 +4,12 @@
 
 /**
  * @file SdHandler.h
- * @brief Handler de la carte SD (SPI) — comme le DAC, il DÉCLARE.
+ * @brief Handler of the SD card (SPI) — like the DAC, it DECLARES.
  *
- * `isGpioUsed()` répond pour ses quatre broches (CS, SCK, MISO, MOSI) : l'inventaire
- * les montre prises et `/api/pins/set` les refuse à un autre composant. Rien d'autre
- * à la main : monter la carte est l'affaire de `CarteSd` (sa tâche, jamais celle de
- * la requête qui déclare ni la boucle).
+ * `isGpioUsed()` answers for its four pins (CS, SCK, MISO, MOSI): the inventory shows
+ * them taken and `/api/pins/set` refuses them to another component. Nothing else by
+ * hand: mounting the card is `SdCard`'s business (its own task, never the declaring
+ * request's nor the loop's).
  */
 class SdHandler : public ComplexHandler {
 public:

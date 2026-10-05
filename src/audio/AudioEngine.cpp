@@ -16,7 +16,7 @@
 #include <new>
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
-#include "FluxSD.h"
+#include "SdStream.h"
 #include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
@@ -277,14 +277,14 @@ struct VoixEch {
   uint32_t debutT = 0;
   uint32_t finT   = 0;
   float    fondu  = 0.0f;
-  /* UN CLIP LU DEPUIS LA CARTE SD, EN FLUX (FluxSD.h) : `tete` (>= 0) dit qu'il vient
-   * de sa tete — [teteD, teteD + teteN), en PSRAM —, puis du tampon du flux `flux`
-   * (-1 : la tete suffit, le clip est plus court). Une voix a PSRAM (tete < 0) lit le
-   * magasin comme avant. */
-  int8_t          flux   = -1;
-  int8_t          tete   = -1;
-  const int16_t*  tetePcm = nullptr;
-  uint32_t        teteD  = 0, teteN = 0;
+  /* A CLIP READ FROM THE SD CARD, AS A STREAM (SdStream.h): `head` (>= 0) says it comes
+   * from its head — [headStart, headStart + headFrames), in PSRAM —, then from the buffer
+   * of stream `stream` (-1: the head is enough, the clip is shorter). A PSRAM voice
+   * (head < 0) reads the store as before. */
+  int8_t          stream = -1;
+  int8_t          head   = -1;
+  const int16_t*  headPcm = nullptr;
+  uint32_t        headStart = 0, headFrames = 0;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
@@ -320,7 +320,7 @@ struct Clip {
   float    debutS, finS;                 // ce que dit la cue, en secondes
   bool     boucle;
   int8_t   iEch;                         // resolu : -1, la carte n'a pas ce son
-  int8_t   tete;                         // un son en flux : sa tete (FluxSD), -1 sinon
+  int8_t   head;                         // a streamed sound: its head (SdStream), -1 otherwise
   uint32_t debut, fin;                   // resolus, en trames du fichier (fin 0 : au bout)
 };
 struct Liste {
@@ -329,7 +329,7 @@ struct Liste {
   uint8_t  suite;                        // 0 s'arreter, 1 enchainer, 2 enchainer et reboucler
   uint8_t  n;                            // nombre de clips
   uint8_t  courant;                      // le clip qui joue (0 : aucun), tenu par la tache audio
-  uint8_t  prec;                         // 1 : « Precharger » — sur la cue d'avant, ses tetes se lisent d'avance
+  uint8_t  preload;                      // 1: "Preload" — on the cue before, its heads are read ahead
   float    gain;
   Clip     clips[CLIPS_MAX];
 };
@@ -389,9 +389,9 @@ bool _clipJouable(const Liste& L, uint8_t k) {
   if (k == 0 || k > L.n) return false;
   const Clip& c = L.clips[k - 1];
   if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch)) return false;
-  /* Un son lu en flux ne part que de sa TETE, deja en PSRAM : sans elle (pas encore lue
-   * par la tache de la carte), le clip ne se joue pas — du silence, pas une attente. */
-  if (SampleStore::estFlux((uint8_t)c.iEch) && !FluxSD::tetePrete(c.tete)) return false;
+  /* A streamed sound only starts from its HEAD, already in PSRAM: without it (not read
+   * yet by the SD-card task) the clip does not play — silence, not a wait. */
+  if (SampleStore::isStreamed((uint8_t)c.iEch) && !SdStream::headReady(c.head)) return false;
   const size_t n = SampleStore::trames((uint8_t)c.iEch);
   const size_t fin = (c.fin > c.debut && c.fin < n) ? c.fin : n;
   return (size_t)c.debut + 2 <= fin;
@@ -400,39 +400,40 @@ bool _clipJouable(const Liste& L, uint8_t k) {
 /* Pose sur la voix le son et la selection du clip k — pas son gain. Faux, et
  * la voix intacte, si le clip ne se joue pas.
  *
- * UN SON EN FLUX (FluxSD.h) : la voix part de la TETE du clip, deja en PSRAM, et un flux
- * se place derriere — a la fin de la tete — pour remplir le tampon. La voix qui enchaine
- * d'un clip en flux a un autre garde son flux et le replace ; vers un son en PSRAM, elle
- * le rend. Plus de flux disponible : le clip ne part pas (faux). */
+ * A STREAMED SOUND (SdStream.h): the voice starts from the clip's HEAD, already in PSRAM,
+ * and a stream positions itself behind it — at the end of the head — to fill the buffer.
+ * A voice that chains from one streamed clip to another keeps its stream and repositions
+ * it; towards a PSRAM sound, it gives it back. No stream available: the clip does not
+ * start (false). */
 bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   if (!_clipJouable(L, k)) return false;
   const Clip& c = L.clips[k - 1];
   const size_t n = SampleStore::trames((uint8_t)c.iEch);
-  const uint8_t idx = (uint8_t)(&vo - voixEch);
-  int8_t flux = FluxSD::possede(vo.flux, idx) ? vo.flux : (int8_t)-1;
-  FluxSD::TeteVue tv{nullptr, 0, 0};
-  if (SampleStore::estFlux((uint8_t)c.iEch)) {
-    FluxSD::teteVue(c.tete, tv);                       // prete : _clipJouable l'a verifiee
-    const uint32_t finClip = (c.fin > c.debut && c.fin < n) ? c.fin : (uint32_t)n;
-    if (tv.debut + tv.trames < finClip) {              // le clip depasse sa tete : il lui faut un flux
-      if (flux < 0) flux = FluxSD::acquerir(idx);
-      if (flux < 0) {
+  const uint8_t voiceIndex = (uint8_t)(&vo - voixEch);
+  int8_t stream = SdStream::owns(vo.stream, voiceIndex) ? vo.stream : (int8_t)-1;
+  SdStream::HeadView hv{nullptr, 0, 0};
+  if (SampleStore::isStreamed((uint8_t)c.iEch)) {
+    SdStream::headView(c.head, hv);                    // ready: _clipJouable checked it
+    const uint32_t clipEnd = (c.fin > c.debut && c.fin < n) ? c.fin : (uint32_t)n;
+    if (hv.start + hv.frames < clipEnd) {              // the clip outlasts its head: it needs a stream
+      if (stream < 0) stream = SdStream::acquire(voiceIndex);
+      if (stream < 0) {
         NIDMI_WEB_LOG("[audio] %s : plus de flux SD disponible (%u au plus) — clip non joue",
-                      c.son, (unsigned)FluxSD::FLUX_MAX);
+                      c.son, (unsigned)SdStream::MAX_STREAMS);
         return false;
       }
-      FluxSD::demarrer(flux, c.son, tv.debut + tv.trames, finClip,
-                       SampleStore::stereo((uint8_t)c.iEch) ? 2 : 1,
-                       SampleStore::offsetDonnees((uint8_t)c.iEch));
-    } else if (flux >= 0) {                            // la tete suffit : le flux est rendu
-      FluxSD::liberer(flux); flux = -1;
+      SdStream::start(stream, c.son, hv.start + hv.frames, clipEnd,
+                      SampleStore::stereo((uint8_t)c.iEch) ? 2 : 1,
+                      SampleStore::dataOffset((uint8_t)c.iEch));
+    } else if (stream >= 0) {                          // the head is enough: the stream is given back
+      SdStream::release(stream); stream = -1;
     }
-  } else if (flux >= 0) {                              // un son en PSRAM : plus de flux
-    FluxSD::liberer(flux); flux = -1;
+  } else if (stream >= 0) {                            // a PSRAM sound: no stream any more
+    SdStream::release(stream); stream = -1;
   }
-  vo.flux = flux;
-  vo.tete = SampleStore::estFlux((uint8_t)c.iEch) ? c.tete : (int8_t)-1;
-  vo.tetePcm = tv.pcm; vo.teteD = tv.debut; vo.teteN = tv.trames;
+  vo.stream = stream;
+  vo.head = SampleStore::isStreamed((uint8_t)c.iEch) ? c.head : (int8_t)-1;
+  vo.headPcm = hv.pcm; vo.headStart = hv.start; vo.headFrames = hv.frames;
   vo.iEch   = (uint8_t)c.iEch;
   vo.pas    = double(SampleStore::frequence(vo.iEch)) / double(srReel);
   vo.pos    = double(c.debut);
@@ -443,40 +444,40 @@ bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   return true;
 }
 
-/* LA NOTE QUI ATTEND SA TETE. Un clip lu en flux ne part que de sa tete, lue par la tache de
- * la carte SD (~0,1 a 0,16 s). Une note qui arrive avant qu'elle soit prete n'est PAS perdue :
- * elle est gardee, et le clip part des que sa tete l'est. La derniere note d'une liste l'emporte
- * (un clip a la fois), la note qui arrete l'efface, et on y renonce au bout de ATTENTE_TETE_MS
- * (tete en echec, carte absente) — un clip qui partirait des secondes apres sa note est pire
- * qu'un silence. La tete du clip attendu passe devant les autres a la lecture (FluxSD).
- * Tout ceci ne vit que dans la tache audio : pas de verrou, et jamais un journal. */
-struct Attente { uint32_t bloc; uint32_t t0; uint8_t clip; };
-Attente           attentes[LISTES_MAX] = {};
-volatile bool     attentesAEffacer = false;
-constexpr uint32_t ATTENTE_TETE_MS = 2000;
+/* THE NOTE THAT WAITS FOR ITS HEAD. A streamed clip only starts from its head, read by the
+ * SD-card task (~0.1 to 0.16 s). A note that arrives before it is ready is NOT lost: it is
+ * kept, and the clip starts as soon as its head is. The last note of a list wins (one clip
+ * at a time), the stop note clears it, and it is given up after HEAD_WAIT_MS (head failed,
+ * card absent) — a clip that would start seconds after its note is worse than silence. The
+ * awaited clip's head goes ahead of the others in the read order (SdStream). All of this
+ * lives in the audio task only: no lock, and never a log. */
+struct PendingNote { uint32_t bloc; uint32_t t0; uint8_t clip; };
+PendingNote       pendingNotes[LISTES_MAX] = {};
+volatile bool     clearPendingNotes = false;
+constexpr uint32_t HEAD_WAIT_MS = 2000;
 
-// Le clip k ne se joue-t-il pas PARCE QUE sa tete se charge encore ? (et nulle autre raison)
-bool _teteEnCours(const Liste& L, uint8_t k) {
+// Is clip k unplayable ONLY because its head is still loading? (and for no other reason)
+bool _headLoading(const Liste& L, uint8_t k) {
   if (k == 0 || k > L.n) return false;
   const Clip& c = L.clips[k - 1];
-  if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch) || !SampleStore::estFlux((uint8_t)c.iEch)) return false;
+  if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch) || !SampleStore::isStreamed((uint8_t)c.iEch)) return false;
   const size_t n = SampleStore::trames((uint8_t)c.iEch);
   const size_t fin = (c.fin > c.debut && c.fin < n) ? c.fin : n;
   if ((size_t)c.debut + 2 > fin) return false;
-  return FluxSD::teteEnCours(c.tete);
+  return SdStream::headLoading(c.head);
 }
 
-void _attendre(uint32_t bloc, uint8_t k, int8_t tete) {
-  Attente* a = nullptr;
-  for (auto& e : attentes) if (e.bloc == bloc) { a = &e; break; }
-  if (!a) for (auto& e : attentes) if (!e.bloc) { a = &e; break; }
+void _waitForHead(uint32_t bloc, uint8_t k, int8_t head) {
+  PendingNote* a = nullptr;
+  for (auto& e : pendingNotes) if (e.bloc == bloc) { a = &e; break; }
+  if (!a) for (auto& e : pendingNotes) if (!e.bloc) { a = &e; break; }
   if (!a) return;
   a->bloc = bloc; a->clip = k; a->t0 = millis();
-  FluxSD::prioriser(tete);
+  SdStream::prioritize(head);
 }
 
-void _annulerAttente(uint32_t bloc) {
-  for (auto& e : attentes) if (e.bloc == bloc) e.bloc = 0;
+void _cancelWait(uint32_t bloc) {
+  for (auto& e : pendingNotes) if (e.bloc == bloc) e.bloc = 0;
 }
 
 /* Lancer le clip k de la liste li — 0 : seulement l'arreter. Ce que la liste
@@ -485,19 +486,19 @@ void _annulerAttente(uint32_t bloc) {
 void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   const Liste& L = b.listes[li];
   if (k > 0 && !_clipJouable(L, k)) {
-    /* Sa tete se charge encore : la note attend. Ce qui jouait continue jusqu'au depart du
-     * nouveau clip. Pour toute autre raison (son absent, selection vide) : rien, comme avant. */
-    if (_teteEnCours(L, k)) _attendre(L.bloc, k, L.clips[k - 1].tete);
+    /* Its head is still loading: the note waits. What was playing continues until the new
+     * clip starts. For any other reason (sound absent, empty selection): nothing, as before. */
+    if (_headLoading(L, k)) _waitForHead(L.bloc, k, L.clips[k - 1].head);
     return;
   }
-  _annulerAttente(L.bloc);                // un depart, ou l'arret, remplace la note qui attendait
+  _cancelWait(L.bloc);                    // a start, or the stop note, replaces the note that was waiting
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (voixEch[v].actif && voixEch[v].liste == (int8_t)li) _eteindreEnDouceur(voixEch[v]);
   if (k == 0) return;
   VoixEch* vo = _voixLibre();
   vo->actif = false;                   // voir declencherEchantillon
   __sync_synchronize();
-  if (!_poserClip(*vo, L, k)) return;  // plus de flux : la voix reste eteinte, pas reprise a moitie
+  if (!_poserClip(*vo, L, k)) return;  // no stream left: the voice stays off, not half re-posed
   vo->liste = (int8_t)li;
   vo->bloc  = L.bloc;
   vo->velo  = 1.0f;                    // la velocite ne compte pas
@@ -550,27 +551,27 @@ void _clipDemande(uint32_t bloc, uint8_t k) {
     if (b.listes[li].bloc == bloc) { _lancerClip(b, li, k); return; }
 }
 
-/* LES NOTES QUI ATTENDENT, a chaque bloc : leur tete est-elle prete ? Le clip part. Abandon : la
- * liste n'existe plus, la tete a echoue, ou l'attente depasse ATTENTE_TETE_MS. */
-void _servirAttentes() {
-  if (attentesAEffacer) { attentesAEffacer = false; for (auto& e : attentes) e.bloc = 0; }
+/* THE WAITING NOTES, every block: is their head ready? The clip starts. Given up: the list
+ * no longer exists, the head failed, or the wait exceeds HEAD_WAIT_MS. */
+void _servePendingNotes() {
+  if (clearPendingNotes) { clearPendingNotes = false; for (auto& e : pendingNotes) e.bloc = 0; }
   if (!banques) return;
   const uint32_t now = millis();
   const Banque& b = banques[banqueActive];
-  for (auto& e : attentes) {
+  for (auto& e : pendingNotes) {
     if (!e.bloc) continue;
     int li = -1;
     for (uint8_t i = 0; i < b.n; i++) if (b.listes[i].bloc == e.bloc) { li = i; break; }
-    if (li < 0 || e.clip > b.listes[li].n) { e.bloc = 0; continue; }       // la liste est partie
+    if (li < 0 || e.clip > b.listes[li].n) { e.bloc = 0; continue; }       // the list is gone
     const Liste& L = b.listes[li];
     if (_clipJouable(L, e.clip)) {
       const uint8_t k = e.clip;
-      FluxSD::noterAttente(now - e.t0);
+      SdStream::recordWait(now - e.t0);
       e.bloc = 0;
       _lancerClip(b, (uint8_t)li, k);
       continue;
     }
-    if (!_teteEnCours(L, e.clip) || now - e.t0 > ATTENTE_TETE_MS) { FluxSD::noterAbandon(); e.bloc = 0; }
+    if (!_headLoading(L, e.clip) || now - e.t0 > HEAD_WAIT_MS) { SdStream::recordDrop(); e.bloc = 0; }
   }
 }
 
@@ -628,33 +629,33 @@ char echantillonClavier[48] = {0};
 volatile uint32_t blocClavier = 0;
 volatile float    gainClavier = 1.0f;
 
-/* Une trame d'une voix en flux : sa tete d'abord ([teteD, teteD + teteN), en PSRAM), puis
- * le tampon du flux. Faux : pas encore (ou plus) la — l'appelant rend du silence. */
-static inline bool _lireTete(const VoixEch& vo, uint32_t t, int16_t& g, int16_t& d) {
-  if (t >= vo.teteD && t - vo.teteD < vo.teteN) {
-    const uint32_t j = t - vo.teteD;
-    if (SampleStore::stereo(vo.iEch)) { g = vo.tetePcm[j * 2]; d = vo.tetePcm[j * 2 + 1]; }
-    else                              { g = d = vo.tetePcm[j]; }
+/* A frame of a streamed voice: its head first ([headStart, headStart + headFrames), in PSRAM),
+ * then the stream's buffer. False: not (or no longer) there — the caller yields silence. */
+static inline bool _readHead(const VoixEch& vo, uint32_t t, int16_t& g, int16_t& d) {
+  if (t >= vo.headStart && t - vo.headStart < vo.headFrames) {
+    const uint32_t j = t - vo.headStart;
+    if (SampleStore::stereo(vo.iEch)) { g = vo.headPcm[j * 2]; d = vo.headPcm[j * 2 + 1]; }
+    else                              { g = d = vo.headPcm[j]; }
     return true;
   }
-  return vo.flux >= 0 && FluxSD::lire(vo.flux, t, g, d);
+  return vo.stream >= 0 && SdStream::read(vo.stream, t, g, d);
 }
 
-/* LES FLUX, A CHAQUE BLOC (avant de rendre) : un flux dont la voix n'est plus — finie,
- * coupee, volee, ou le moteur change — est rendu, et le lecteur ferme son fichier ; et
- * chaque voix en flux dit ou elle en est, ce qui regle jusqu'ou le lecteur remplit. */
-void _balayerFlux() {
-  for (int8_t f = 0; f < (int8_t)FluxSD::FLUX_MAX; f++) {
-    if (!FluxSD::actif(f)) continue;
-    const VoixEch& vo = voixEch[FluxSD::voixDe(f)];
-    if (!(vo.actif && vo.flux == f)) FluxSD::liberer(f);
+/* THE STREAMS, EVERY BLOCK (before rendering): a stream whose voice is gone — finished,
+ * cut, stolen, or the engine changed — is given back, and the reader closes its file; and
+ * every streamed voice says where it is, which sets how far the reader fills. */
+void _sweepStreams() {
+  for (int8_t f = 0; f < (int8_t)SdStream::MAX_STREAMS; f++) {
+    if (!SdStream::active(f)) continue;
+    const VoixEch& vo = voixEch[SdStream::voiceOf(f)];
+    if (!(vo.actif && vo.stream == f)) SdStream::release(f);
   }
   for (uint8_t v = 0; v < VOIX_MAX; v++)
-    if (voixEch[v].actif && voixEch[v].flux >= 0) FluxSD::position(voixEch[v].flux, (uint32_t)voixEch[v].pos);
+    if (voixEch[v].actif && voixEch[v].stream >= 0) SdStream::position(voixEch[v].stream, (uint32_t)voixEch[v].pos);
 }
 
 void rendreSample() {
-  uint8_t manques = 0;                  // les voix en flux qui ont manque de donnees ce bloc
+  uint8_t underruns = 0;                // the streamed voices that ran short of data this block
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
@@ -664,11 +665,11 @@ void rendreSample() {
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
-      /* UNE VOIX EN FLUX n'a pas de PCM en memoire : elle lit sa tete, puis le tampon du
-       * flux (_lireTete). Les autres lisent le magasin, comme toujours. */
-      const int16_t* pcm = (vo.tete >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
+      /* A STREAMED VOICE has no PCM in memory: it reads its head, then the stream's
+       * buffer (_readHead). The others read the store, as always. */
+      const int16_t* pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
       size_t         n   = SampleStore::trames(vo.iEch);
-      if ((vo.tete < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
+      if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
       /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
        * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
        * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
@@ -679,11 +680,11 @@ void rendreSample() {
         if (vo.boucle) {
           vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
           if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
-          if (vo.flux >= 0) FluxSD::redemarrer(vo.flux);   // la voix repart de la tete : le flux se replace
+          if (vo.stream >= 0) SdStream::restart(vo.stream);   // the voice restarts from the head: the stream repositions
         } else if (vo.liste >= 0 && _clipSuivant(vo)) {
-          pcm = (vo.tete >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
+          pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
           n   = SampleStore::trames(vo.iEch);
-          if ((vo.tete < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
+          if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
         } else { vo.actif = false; continue; }
       }
       if (vo.fondu > 0.0f) {
@@ -702,12 +703,12 @@ void rendreSample() {
       const float  f = float(vo.pos - double(k));
       const bool  st = SampleStore::stereo(vo.iEch);
       int32_t eg, ed;
-      if (vo.tete >= 0) {
-        /* La tete, puis le tampon ; ce qui manque est du SILENCE — jamais une attente. */
+      if (vo.head >= 0) {
+        /* The head, then the buffer; what is missing is SILENCE — never a wait. */
         int16_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
-        const bool ok0 = _lireTete(vo, (uint32_t)k, l0, r0);
-        const bool ok1 = ok0 && _lireTete(vo, (uint32_t)k + 1, l1, r1);
-        if (!ok0)      manques |= (uint8_t)(1u << v);
+        const bool ok0 = _readHead(vo, (uint32_t)k, l0, r0);
+        const bool ok1 = ok0 && _readHead(vo, (uint32_t)k + 1, l1, r1);
+        if (!ok0)      underruns |= (uint8_t)(1u << v);
         else if (!ok1) { l1 = l0; r1 = r0; }
         eg = (int32_t)(l0 + f * (l1 - l0));
         ed = (int32_t)(r0 + f * (r1 - r0));
@@ -733,9 +734,9 @@ void rendreSample() {
     if (d >  32767) d =  32767; else if (d < -32768) d = -32768;
     entrelace[i * 2] = (int16_t)g; entrelace[i * 2 + 1] = (int16_t)d;
   }
-  if (manques)
+  if (underruns)
     for (uint8_t v = 0; v < VOIX_MAX; v++)
-      if (manques & (1u << v)) FluxSD::manque(voixEch[v].flux);
+      if (underruns & (1u << v)) SdStream::underrun(voixEch[v].stream);
 }
 
 void rendrePlaits() {
@@ -839,7 +840,7 @@ void boucleAudio(void*) {
     if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
-    _servirAttentes();                  // les notes dont la tete etait attendue partent des qu'elle est la
+    _servePendingNotes();               // notes whose head was awaited start as soon as it is there
     /* UN SON RETIRE (remplace, supprime — §177) se tait ici, au debut du bloc :
      * sa memoire ne se rend que deux blocs plus tard (rendreApresLecture). Sans
      * ce balayage, une voix restee sur un emplacement retire — magasin vide,
@@ -848,7 +849,7 @@ void boucleAudio(void*) {
     for (uint8_t v = 0; v < VOIX_MAX; v++)
       if (voixEch[v].actif && !SampleStore::lisible(voixEch[v].iEch)) voixEch[v].actif = false;
 
-    _balayerFlux();
+    _sweepStreams();
     const uint32_t t0 = millis();
     const uint32_t u0 = micros();
     const uint32_t e0 = ecrituresFlash;
@@ -1382,9 +1383,9 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   if (moteurCourant != -2) return false;
   const int i = SampleStore::indexDe(nom);
   if (i < 0) return false;
-  if (SampleStore::estFlux((uint8_t)i)) {
-    /* Un son lu en flux n'a pas de PCM en memoire : il ne se transpose pas, ne se joue pas
-     * sur une note — seule une play list le sait lire (FluxSD.h). Dit, pas muet. */
+  if (SampleStore::isStreamed((uint8_t)i)) {
+    /* A streamed sound has no PCM in memory: it cannot be transposed, nor played on a
+     * note — only a playlist can read it (SdStream.h). Said, not mute. */
     NIDMI_WEB_LOG("[audio] %s est lu en flux depuis la SD : seulement dans une play list", nom);
     return false;
   }
@@ -1396,7 +1397,7 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
    * interdit au compilateur de supprimer ou de deplacer l'extinction. */
   vo->actif  = false;
   __sync_synchronize();
-  vo->flux = -1; vo->tete = -1;        // une voix volee a un clip en flux ne garde ni son flux ni sa tete
+  vo->stream = -1; vo->head = -1;      // a voice stolen from a streamed clip keeps neither its stream nor its head
   vo->iEch   = (uint8_t)i;
   vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
              * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
@@ -1491,7 +1492,7 @@ void arreterEchantillonNomme(const char* nom) {
 /* Quitter la cue arrete le son — comme le `dispose()` du BufferSource cote
  * navigateur. Sans ca, une boucle survivrait a la cue qui l'a lancee. */
 void arreterEchantillon(bool listesComprises) {
-  if (listesComprises) attentesAEffacer = true;   // STOP : une note qui attendait ne repart pas apres
+  if (listesComprises) clearPendingNotes = true;   // STOP: a note that was waiting does not start afterwards
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (listesComprises || voixEch[v].liste < 0) voixEch[v].actif = false;
 }
@@ -1581,83 +1582,81 @@ String _partieCompletee(const String& s, char sep, int k) {
   return n ? _partie(s, sep, (k < n) ? k : n - 1) : String();
 }
 
-struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle, prec; };
+struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle, preload; };
 Champs _champs(const String& params) {
   return Champs{ _valeurParam(params, "liste"),  _valeurParam(params, "lbloc"),
                  _valeurParam(params, "lnote"),  _valeurParam(params, "lsuite"),
                  _valeurParam(params, "lgain"),  _valeurParam(params, "ldebut"),
                  _valeurParam(params, "lfin"),   _valeurParam(params, "lboucle"),
-                 _valeurParam(params, "lprec") };
+                 _valeurParam(params, "lpreload") };
 }
 
 /* Le son d'un clip, cherche dans le magasin ; ses secondes, en trames DU
  * FICHIER. Refait quand un son arrive ou part (_reresoudre). */
-/* La tete d'un clip en flux — demandee a la tache de la carte, qui la lit (FluxSD.h).
- * La table est pleine : on eleve d'abord les tetes que plus rien ne nomme (aucune banque,
- * aucune voix) et qui ne sont plus demandees depuis 5 s, puis on redemande. Sous
- * verrouListes, comme tous les appelants de _resoudre. */
-bool _teteReferencee(int8_t t) {
-  for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif && voixEch[v].tete == t) return true;
+/* THE HEAD OF A STREAMED CLIP — requested from the SD-card task, which reads it (SdStream.h).
+ * Under listsLock, like every caller of _resoudre. A head is "referenced" while a bank
+ * or a voice names it. */
+bool _headReferenced(int8_t h) {
+  for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif && voixEch[v].head == h) return true;
   if (banques)
     for (int b = 0; b < 2; b++)
       for (uint8_t li = 0; li < banques[b].n; li++)
         for (uint8_t k = 0; k < banques[b].listes[li].n; k++)
-          if (banques[b].listes[li].clips[k].tete == t) return true;
+          if (banques[b].listes[li].clips[k].head == h) return true;
   return false;
 }
 
-/* La tete a evincer pour faire de la place a une demande — jamais une tete qu'une banque ou une voix
- * nomme, jamais une tete en cours de lecture par la tache de la carte (elle ecrirait dans une entree
- * rendue).
- *   Demande COURANTE : d'abord une tete ANTICIPEE (la cue suivante : sans valeur tant qu'on n'y est
- *   pas — et une demande courante qui la nomme l'aurait deja promue), la plus ancienne ; puis la plus
- *   ancienne des autres non demandee depuis 5 s (la banque en construction n'est pas encore nommee :
- *   ses tetes toutes fraiches sont protegees par ce delai).
- *   Demande ANTICIPEE : la meme chose, mais le delai de 5 s vaut pour TOUTES — on n'evince pas ce que la
- *   meme passe vient de demander (les premiers clips de la cue suivante pour charger les derniers) —,
- *   et `seulementAnticipees` quand c'est le demi-budget qui manque : evincer des tetes courantes n'y
- *   changerait rien. -1 : rien a evincer. */
-int8_t _teteAEvincer(bool pourAnticipee, bool seulementAnticipees) {
-  int8_t choix = -1; bool choixAnticipee = false; uint32_t choixAge = 0;
-  for (int8_t i = 0; i < (int8_t)FluxSD::TETES_MAX; i++) {
-    if (!FluxSD::teteEvincable(i) || _teteReferencee(i)) continue;
-    const bool ant = FluxSD::teteAnticipee(i);
-    if (seulementAnticipees && !ant) continue;
-    const uint32_t age = FluxSD::teteAgeMs(i);
-    if ((!ant || pourAnticipee) && age <= 5000) continue;
-    if (choix < 0 || (ant && !choixAnticipee) || (ant == choixAnticipee && age > choixAge)) {
-      choix = i; choixAnticipee = ant; choixAge = age;
+/* The head to evict to make room for a request — never a head that a bank or a voice
+ * names, never a head being read by the SD-card task (it would write into a released
+ * entry).
+ *   CURRENT request: first an ANTICIPATED head (the next cue: worthless until we get there
+ *   — and a current request naming it would already have promoted it), the oldest; then
+ *   the oldest of the others not requested for 5 s (the bank under construction is not
+ *   named yet: its brand-new heads are protected by that delay).
+ *   ANTICIPATED request: the same, but the 5 s delay applies to ALL of them — we do not
+ *   evict what the same pass has just requested (the first clips of the next cue to load
+ *   the last ones) —, and `onlyAnticipated` when it is the half-budget that is short:
+ *   evicting current heads would not change anything. -1: nothing to evict. */
+int8_t _headToEvict(bool forAnticipated, bool onlyAnticipated) {
+  int8_t pick = -1; bool pickAnticipated = false; uint32_t pickAge = 0;
+  for (int8_t i = 0; i < (int8_t)SdStream::MAX_HEADS; i++) {
+    if (!SdStream::headEvictable(i) || _headReferenced(i)) continue;
+    const bool anticipated = SdStream::headAnticipated(i);
+    if (onlyAnticipated && !anticipated) continue;
+    const uint32_t age = SdStream::headAgeMs(i);
+    if ((!anticipated || forAnticipated) && age <= 5000) continue;
+    if (pick < 0 || (anticipated && !pickAnticipated) || (anticipated == pickAnticipated && age > pickAge)) {
+      pick = i; pickAnticipated = anticipated; pickAge = age;
     }
   }
-  return choix;
+  return pick;
 }
 
-/* La tete d'un clip en flux — demandee a la tache de la carte, qui la lit (FluxSD.h). Le budget est
- * plein : on eleve, une a une, ce qui peut l'etre (_teteAEvincer), puis on redemande ; au bout, un
- * REFUS, compte et dit — pour une demande COURANTE ce clip ne se jouera pas, et l'usager doit pouvoir le
- * savoir (etatTetes) ; pour une ANTICIPEE ce n'est qu'un rattrapage manque (« la note attend »). Sous
- * verrouListes, comme tous les appelants de _resoudre. */
-int8_t _teteDe(const char* son, uint32_t debut, bool anticipee = false) {
-  int8_t t = FluxSD::demanderTete(son, debut, anticipee);
-  while (t == FluxSD::TETE_BUDGET_PLEIN || t == FluxSD::TETE_ANTICIPE_PLEIN) {
-    const int8_t v = _teteAEvincer(anticipee, t == FluxSD::TETE_ANTICIPE_PLEIN);
-    if (v < 0) break;
-    FluxSD::libererTete(v);
-    t = FluxSD::demanderTete(son, debut, anticipee);
+/* The budget is full: we evict, one by one, what can be (_headToEvict), then ask again; in
+ * the end, a REFUSAL, counted and said — for a CURRENT request that clip will not play, and
+ * the user must be able to know it (headsState); for an ANTICIPATED one it is only a missed
+ * catch-up ("the note waits"). */
+int8_t _headFor(const char* name, uint32_t start, bool anticipated = false) {
+  int8_t h = SdStream::requestHead(name, start, anticipated);
+  while (h == SdStream::HEAD_BUDGET_FULL || h == SdStream::HEAD_ANTICIPATED_FULL) {
+    const int8_t victim = _headToEvict(anticipated, h == SdStream::HEAD_ANTICIPATED_FULL);
+    if (victim < 0) break;
+    SdStream::releaseHead(victim);
+    h = SdStream::requestHead(name, start, anticipated);
   }
-  if (t == FluxSD::TETE_BUDGET_PLEIN || t == FluxSD::TETE_ANTICIPE_PLEIN) {
-    if (anticipee) FluxSD::noterRefusAnticipe();
+  if (h == SdStream::HEAD_BUDGET_FULL || h == SdStream::HEAD_ANTICIPATED_FULL) {
+    if (anticipated) SdStream::recordAnticipatedRefusal();
     else {
-      FluxSD::noterRefus();
+      SdStream::recordRefusal();
       NIDMI_WEB_LOG("[SD] %s @%lu : budget des tetes plein (%u Ko) — ce clip ne se jouera pas",
-                    son, (unsigned long)debut, (unsigned)(FluxSD::TETES_BUDGET_OCTETS / 1024));
+                    name, (unsigned long)start, (unsigned)(SdStream::HEADS_BUDGET_BYTES / 1024));
     }
   }
-  return t < 0 ? (int8_t)-1 : t;
+  return h < 0 ? (int8_t)-1 : h;
 }
 
-void _resoudre(Clip& c, bool anticipe = false) {
-  c.iEch = -1; c.debut = 0; c.fin = 0; c.tete = -1;
+void _resoudre(Clip& c, bool anticipated = false) {
+  c.iEch = -1; c.debut = 0; c.fin = 0; c.head = -1;
   if (!c.son[0]) return;
   const int i = SampleStore::indexDe(c.son);
   if (i < 0) return;
@@ -1665,13 +1664,13 @@ void _resoudre(Clip& c, bool anticipe = false) {
   c.iEch  = (int8_t)i;
   c.debut = (c.debutS > 0.0f) ? (uint32_t)(c.debutS * f + 0.5f) : 0;
   c.fin   = (c.finS   > 0.0f) ? (uint32_t)(c.finS   * f + 0.5f) : 0;
-  if (SampleStore::estFlux((uint8_t)i)) c.tete = _teteDe(c.son, c.debut, anticipe);
+  if (SampleStore::isStreamed((uint8_t)i)) c.head = _headFor(c.son, c.debut, anticipated);
 }
 
 /* La liste i des champs, dans L — tous ses champs poses. Les sons que la
  * carte n'a pas vont dans `absents` (une fois chacun). Rend vrai si au moins
  * un clip porte un son (une liste sans aucun son n'en est pas une). */
-bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anticipe = false) {
+bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anticipated = false) {
   memset(&L, 0, sizeof(Liste));
   L.bloc = (uint32_t)_partie(ch.bloc, ',', i).toInt();
   const String n = _partieCompletee(ch.note,  ',', i);
@@ -1680,7 +1679,7 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anti
   L.note  = n.length() ? (uint8_t)constrain(n.toInt(), 0, 127) : 60;
   L.suite = s.length() ? (uint8_t)constrain(s.toInt(), 0, 2)   : 0;
   L.gain  = g.length() ? _borneGain(g.toFloat()) : 1.0f;
-  L.prec  = (_partie(ch.prec, ',', i).toInt() != 0) ? 1 : 0;      // absent : non
+  L.preload = (_partie(ch.preload, ',', i).toInt() != 0) ? 1 : 0;      // absent: no
   const String noms = _partie(ch.liste, ',', i), debs = _partie(ch.debut,  ',', i),
                fins = _partie(ch.fin,   ',', i), bcls = _partie(ch.boucle, ',', i);
   const int nc = _nbParties(noms, '/');
@@ -1695,7 +1694,7 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anti
     c.debutS = _partie(debs, '/', k).toFloat();
     c.finS   = _partie(fins, '/', k).toFloat();
     c.boucle = _partie(bcls, '/', k).toFloat() >= 0.5f;
-    _resoudre(c, anticipe);
+    _resoudre(c, anticipated);
     if (c.son[0]) unSon = true;
     if (absents && c.son[0] && c.iEch < 0
         && ("," + *absents + ",").indexOf("," + String(c.son) + ",") < 0)
@@ -1707,30 +1706,30 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anti
 
 /* Un son est arrive ou parti : les index des clips se recalculent — un clip
  * ne garde jamais l'emplacement d'un son retire. */
-/* L'ANTICIPATION EN COURS : les params de la cue SUIVANTE, gardes (en PSRAM) pour etre REJOUES quand un
- * son arrive. Au demarrage, la cue 1 part seule et prepare la 2 AVANT que la SD soit montee et que ses
- * sons existent : la demande ne trouvait pas le son, et rien ne la rejouait — a chaque allumage d'une
- * composition qui joue au demarrage. Ecrit et lu sous verrouListes. */
-char* anticipationParams = nullptr;
+/* THE PRELOAD IN PROGRESS: the NEXT cue's params, kept (in PSRAM) to be REPLAYED when a sound
+ * arrives. At boot, cue 1 starts on its own and prepares cue 2 BEFORE the SD is mounted and
+ * its sounds exist: the request did not find the sound, and nothing replayed it — at every
+ * power-up of a composition that plays at start. Written and read under listsLock. */
+char* preloadParams = nullptr;
 
-/* Les tetes des listes marquees `lprec` de `params` — classe ANTICIPEE, sans armer la liste. Sous
- * verrouListes. Idempotent : une tete deja demandee n'est pas redemandee. */
-void _anticiper(const char* params) {
+/* The heads of the lists marked `lpreload` in `params` — ANTICIPATED class, without arming
+ * the list. Under listsLock. Idempotent: a head already requested is not requested again. */
+void _preloadFromParams(const char* params) {
   if (!params || !*params) return;
   const String p(params);
   const Champs ch = _champs(p);
   const int nl = _nbParties(ch.liste, ',');
-  if (!nl || !ch.prec.length()) return;
+  if (!nl || !ch.preload.length()) return;
   Liste* tmp = (Liste*)heap_caps_malloc(sizeof(Liste), MALLOC_CAP_SPIRAM);
   if (!tmp) return;
   for (int i = 0; i < nl && i < (int)LISTES_MAX; i++)
-    if (_partie(ch.prec, ',', i).toInt() != 0) _remplirListe(*tmp, ch, i, nullptr, /*anticipe=*/true);
+    if (_partie(ch.preload, ',', i).toInt() != 0) _remplirListe(*tmp, ch, i, nullptr, /*anticipated=*/true);
   heap_caps_free(tmp);
 }
 
 void _reresoudre() {
   VerrouListes v;
-  _anticiper(anticipationParams);      // un son vient d'arriver : la cue suivante le trouve peut-etre
+  _preloadFromParams(preloadParams);   // a sound has just arrived: the next cue may find it
   if (!banques || !banques[banqueActive].n) return;
   Banque* b = _banqueLibre();
   if (!b) return;
@@ -1739,18 +1738,18 @@ void _reresoudre() {
     for (uint8_t k = 0; k < b->listes[li].n; k++) _resoudre(b->listes[li].clips[k]);
   _proposer(b);
 }
-/* Les clips d'une liste lus en flux, ceux qui ont leur tete, ceux qui n'en auront jamais. */
-void _comptesTetes(const Liste& L, uint8_t& flux, uint8_t& pretes, uint8_t& sans) {
-  flux = pretes = sans = 0;
+/* A list's clips read as streams, those that have their head, those that never will. */
+void _headCounts(const Liste& L, uint8_t& streamed, uint8_t& ready, uint8_t& without) {
+  streamed = ready = without = 0;
   for (uint8_t k = 0; k < L.n; k++) {
     const Clip& c = L.clips[k];
-    if (c.iEch < 0 || !SampleStore::estFlux((uint8_t)c.iEch)) continue;
-    flux++;
-    if (c.tete < 0)                              sans++;       // le budget etait plein : jamais de tete
-    else if (FluxSD::tetePrete(c.tete))          pretes++;
-    else if (!FluxSD::teteUtilisee(c.tete))      sans++;       // rendue : plus de tete
-    else if (FluxSD::teteEvincable(c.tete))      sans++;       // lecture en echec
-    // sinon : demandee, la tache de la carte la lit — ce clip attend, il n'est pas perdu
+    if (c.iEch < 0 || !SampleStore::isStreamed((uint8_t)c.iEch)) continue;
+    streamed++;
+    if (c.head < 0)                              without++;       // the budget was full: never a head
+    else if (SdStream::headReady(c.head))        ready++;
+    else if (!SdStream::headInUse(c.head))       without++;       // released: no head any more
+    else if (SdStream::headEvictable(c.head))    without++;       // the read failed
+    // otherwise: requested, the SD-card task is reading it — this clip waits, it is not lost
   }
 }
 
@@ -1776,11 +1775,11 @@ void poserListes(const String& params) {
   _proposer(b);
 }
 
-int poserListe(const String& params, String& absents, uint32_t& bloc, uint8_t* enFlux, uint8_t* sansTete) {
+int poserListe(const String& params, String& absents, uint32_t& bloc, uint8_t* streamedClips, uint8_t* clipsWithoutHead) {
   VerrouListes v;
   absents = "";
-  if (enFlux) *enFlux = 0;
-  if (sansTete) *sansTete = 0;
+  if (streamedClips) *streamedClips = 0;
+  if (clipsWithoutHead) *clipsWithoutHead = 0;
   const Champs ch = _champs(params);
   bloc = (uint32_t)_partie(ch.bloc, ',', 0).toInt();
   if (!bloc) return -1;
@@ -1795,9 +1794,9 @@ int poserListe(const String& params, String& absents, uint32_t& bloc, uint8_t* e
   }
   const bool unSon = _remplirListe(b->listes[li], ch, 0, &absents);
   const int n = b->listes[li].n;
-  { uint8_t fl, pr, sa; _comptesTetes(b->listes[li], fl, pr, sa);       // la liste qu'on VIENT de poser
-    if (enFlux) *enFlux = fl;
-    if (sansTete) *sansTete = sa; }
+  { uint8_t st, rd, wo; _headCounts(b->listes[li], st, rd, wo);        // the list we JUST posed
+    if (streamedClips) *streamedClips = st;
+    if (clipsWithoutHead) *clipsWithoutHead = wo; }
   if (!unSon) {                                      // sans aucun son : retiree
     for (int k = li; k + 1 < b->n; k++) memcpy(&b->listes[k], &b->listes[k + 1], sizeof(Liste));
     b->n--;
@@ -1815,8 +1814,8 @@ bool jouerClip(uint32_t bloc, uint8_t k) {
     int li = -1;
     for (uint8_t i = 0; i < b.n; i++) if (b.listes[i].bloc == bloc) { li = i; break; }
     if (li < 0) return false;
-    /* Un clip dont la tete se charge encore s'accepte : la note attendra (_lancerClip). */
-    if (k > 0 && !_clipJouable(b.listes[li], k) && !_teteEnCours(b.listes[li], k)) return false;
+    /* A clip whose head is still loading is accepted: the note will wait (_lancerClip). */
+    if (k > 0 && !_clipJouable(b.listes[li], k) && !_headLoading(b.listes[li], k)) return false;
   }
   Evenement e{};
   e.sorte = SORTE_CLIP; e.bloc = bloc; e.clip = k;
@@ -1836,34 +1835,34 @@ int etatListes(uint32_t* blocs, uint8_t* clips, uint8_t* nombres, uint8_t max, b
   return n;
 }
 
-/* « PRECHARGER » (option d'un BLOC play-list, cle `lprec` de la cue) : appelee a l'arrivee sur une
- * cue avec les params de la cue SUIVANTE. Pour chacune de ses listes marquees, les tetes des clips en
- * flux sont demandees d'avance — classe ANTICIPEE, sous son demi-budget, derriere celles de la cue
- * qui joue, evincees en premier — SANS armer la liste : ni banque, ni voix. Si l'usager saute ailleurs,
- * elles s'evincent d'elles-memes. Ce qui ne rentre pas retombe sur « la note attend ». */
-void prechargerListes(const String& params) {
+/* "PRELOAD" (a playlist BLOCK's option, cue key `lpreload`): called on arrival at a cue with
+ * the NEXT cue's params. For each of its marked lists, the heads of the streamed clips are
+ * requested ahead of time — ANTICIPATED class, under its half-budget, behind those of the
+ * playing cue, evicted first — WITHOUT arming the list: no bank, no voice. If the user jumps
+ * elsewhere, they evict themselves. What does not fit falls back on "the note waits". */
+void preloadLists(const String& params) {
   VerrouListes v;
-  if (anticipationParams) { heap_caps_free(anticipationParams); anticipationParams = nullptr; }
-  if (params.indexOf("lprec=") < 0) return;                    // la cue suivante n'en veut pas : rien a garder
-  anticipationParams = (char*)heap_caps_malloc(params.length() + 1, MALLOC_CAP_SPIRAM);
-  if (!anticipationParams) return;
-  memcpy(anticipationParams, params.c_str(), params.length() + 1);
-  _anticiper(anticipationParams);
+  if (preloadParams) { heap_caps_free(preloadParams); preloadParams = nullptr; }
+  if (params.indexOf("lpreload=") < 0) return;                 // the next cue wants none: nothing to keep
+  preloadParams = (char*)heap_caps_malloc(params.length() + 1, MALLOC_CAP_SPIRAM);
+  if (!preloadParams) return;
+  memcpy(preloadParams, params.c_str(), params.length() + 1);
+  _preloadFromParams(preloadParams);
 }
 
-/* L'ETAT DES TETES d'une liste armee : combien de ses clips sont lus en flux, combien ont leur tete
- * (`pretes`), combien n'en auront JAMAIS (`sans` : le budget etait plein, ou la lecture a echoue —
- * ces clips-la ne jouent pas). Le reste attend sa lecture. Faux : la liste n'est pas armee, ou le
- * verrou est pris (on ne l'attend pas : c'est une lecture d'etat). */
-bool etatTetes(uint32_t bloc, uint8_t& flux, uint8_t& pretes, uint8_t& sans) {
-  flux = pretes = sans = 0;
+/* THE HEADS STATE of an armed list: how many of its clips are read as streams, how many
+ * have their head (`ready`), how many NEVER will (`without`: the budget was full, or the
+ * read failed — those clips do not play). The rest waits for its read. False: the list is
+ * not armed, or the lock is taken (we do not wait for it: this is a state read). */
+bool headsState(uint32_t bloc, uint8_t& streamed, uint8_t& ready, uint8_t& without) {
+  streamed = ready = without = 0;
   if (!banques || xSemaphoreTake(verrouListes, 0) != pdTRUE) return false;
   const Banque& b = banques[banqueActive];
-  bool trouvee = false;
-  for (uint8_t li = 0; li < b.n && !trouvee; li++)
-    if (b.listes[li].bloc == bloc) { trouvee = true; _comptesTetes(b.listes[li], flux, pretes, sans); }
+  bool found = false;
+  for (uint8_t li = 0; li < b.n && !found; li++)
+    if (b.listes[li].bloc == bloc) { found = true; _headCounts(b.listes[li], streamed, ready, without); }
   xSemaphoreGive(verrouListes);
-  return trouvee;
+  return found;
 }
 
 uint32_t generationListes() { return genListes; }
@@ -1921,12 +1920,12 @@ static void rendreApresLecture(int i) {
  * l'etait qu'apres un redemarrage (MESURES §177) — liste, marque ● dans
  * l'inspecteur, il repondait « absent de la carte » ; un son REMPLACE gardait
  * l'ancien. Appele par le serveur web : les 30 a 70 ms de lecture en flash sont
- * les siennes, pas celles de l'audio ni du MIDI. `carteSd` : le son vient de la
- * carte SD, et c'est la tache de CarteSd qui l'appelle — jamais le serveur web :
- * la lecture de plusieurs Mo y prendrait des secondes. */
-bool echantillonArrive(const char* nom, String& raison, bool carteSd) {
+ * les siennes, pas celles de l'audio ni du MIDI. `fromSdCard`: the sound comes from the
+ * SD card, and it is SdCard's task that calls it — never the web server: reading several
+ * MB there would take seconds. */
+bool echantillonArrive(const char* nom, String& raison, bool fromSdCard) {
   int ancien = -1;
-  if (!SampleStore::installer(nom, raison, ancien, carteSd)) return false;
+  if (!SampleStore::installer(nom, raison, ancien, fromSdCard)) return false;
   rendreApresLecture(ancien);
   _reresoudre();                      // un clip qui le nomme le trouve (§196)
   return true;

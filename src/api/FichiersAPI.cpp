@@ -26,7 +26,7 @@
 // qu'il ne la lit pas encore — l'app n'a pas a l'inventer.
 #include "APICommon.h"
 #include "../config/Stockage.h"
-#include "../config/CarteSd.h"
+#include "../config/SdCard.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "../audio/AudioEngine.h"
@@ -126,9 +126,9 @@ const char* typeDe(const String& chemin) {
   return "text/plain; charset=utf-8";
 }
 
-/* Le support vise par la requete ; storage si rien n'est dit. Un autre : refuse
- * (501) — la SD ne fait que se LIRE (ses sons, par le magasin) : elle se remplit
- * depuis un ordinateur, rien d'autre n'y passe par la carte. */
+/* The medium the request aims at; storage if none is said. Another one: refused
+ * (501) — the SD is READ only (its sounds, through the store): it is filled from a
+ * computer, nothing else goes through the board. */
 bool volumeInterne(AsyncWebServerRequest* r) {
   return !r->hasParam("volume") || r->getParam("volume")->value() == VOLUME_INTERNE;
 }
@@ -250,15 +250,15 @@ template <typename F> void parcourir(F voir) {
   }, &ctx);
 }
 
-/* LES SONS DE LA CARTE SD : /samples/*.wav, la meme forme que storage. Rien d'autre
- * n'y est liste — elle ne porte, pour ce firmware, que des sons (CarteSd.h). */
-template <typename F> void parcourirCarteSd(F voir) {
-  File d = CarteSd::ouvrir(CarteSd::DOSSIER);
+/* THE SD CARD'S SOUNDS: /samples/*.wav, the same layout as storage. Nothing else is
+ * listed — for this firmware it only holds sounds (SdCard.h). */
+template <typename F> void walkSdCard(F voir) {
+  File d = SdCard::open(SdCard::FOLDER);
   if (!d || !d.isDirectory()) return;
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
     const String nom = baseDe(f.path());
-    if (nom.startsWith(".") || genreTeleverse(nom) != Genre::Son) continue;   // « ._x.wav » de macOS : pas un son
+    if (nom.startsWith(".") || genreTeleverse(nom) != Genre::Son) continue;   // macOS "._x.wav": not a sound
     voir(String(SampleStore::DOSSIER) + "/" + nom, (size_t)f.size());
   }
 }
@@ -267,21 +267,21 @@ template <typename F> void parcourirCarteSd(F voir) {
 
 void setupFichiersAPI(AsyncWebServer& server) {
 
-  /* LE DIAGNOSTIC DE LA CARTE SD — la carte n'a pas de port serie : c'est ici qu'elle
-   * dit pourquoi la SD ne se monte pas (CMD0/CMD8 sondes a la main) et ce que vaut sa
-   * lecture. `?essai=1` : un nouvel essai tout de suite. `?cablage=1` : sonde le cablage d'une carte qui ne monte pas. `?mesure=<nom.wav>[&hz=…]` :
-   * lit ce son de bout en bout, dans la tache de la carte (jamais ici), et chronometre
-   * chaque morceau ; on relit ensuite jusqu'a `mesure.etat == "finie"`. Un geste, a la
-   * demande : rien ne le sonde. */
+  /* THE SD CARD DIAGNOSTICS — the board has no serial port: this is where it says why
+   * the SD does not mount (CMD0/CMD8 probed by hand) and what its reading is worth.
+   * `?retry=1`: a new attempt right now. `?wiring=1`: probes the wiring of a card that
+   * will not mount. `?measure=<name.wav>[&hz=...]`: reads that sound end to end, in the
+   * card's task (never here), and times every chunk; read again afterwards until
+   * `measure.state == "finished"`. A gesture, on demand: nothing polls it. */
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
-    if (request->hasParam("essai")) CarteSd::essayer();
-    if (request->hasParam("cablage")) CarteSd::sonderCablage();
-    if (request->hasParam("mesure")) {
+    if (request->hasParam("retry")) SdCard::tryMount();
+    if (request->hasParam("wiring")) SdCard::probeWiring();
+    if (request->hasParam("measure")) {
       uint32_t hz = request->hasParam("hz") ? (uint32_t)request->getParam("hz")->value().toInt() : 0;
       if (hz && (hz < 400000 || hz > 40000000)) hz = 0;
-      CarteSd::mesurer(request->getParam("mesure")->value().c_str(), hz);
+      SdCard::measure(request->getParam("measure")->value().c_str(), hz);
     }
-    request->send(200, "application/json", CarteSd::diagnostic());
+    request->send(200, "application/json", SdCard::diagnostics());
   });
 
   /* LA LISTE. Parcourt storage a chaque appel : c'est un GESTE (ouvrir la colonne,
@@ -299,21 +299,21 @@ void setupFichiersAPI(AsyncWebServer& server) {
     size_t fichiers, scripts, contenu, utilises, total;
     ScriptStore::infos(fichiers, scripts, contenu, utilises, total);
     const bool charges = SampleStore::charge();
-    /* LA CARTE SD : declaree par le composant `sd_spi` (I/O), montee dans sa
-     * tache. Branchee apres coup, elle se reconnait a l'ouverture de cette liste
-     * (un nouvel essai, sans attendre ici). `utilise` = la taille des sons qu'on
-     * en liste : l'occupation reelle d'une FAT demande de relire toute sa table. */
-    if (CarteSd::declaree() && !CarteSd::monte()) CarteSd::reessayer();
-    const bool sdMontee = CarteSd::monte();
-    uint64_t sdUtilise = 0;
-    if (sdMontee) parcourirCarteSd([&](const String&, size_t octets) { sdUtilise += octets; });
+    /* THE SD CARD: declared by the `sd_spi` component (I/O), mounted in its own task.
+     * Plugged in afterwards, it is recognised when this list is opened (a new attempt,
+     * without waiting here). `utilise` = the size of the sounds listed: a FAT's real
+     * occupancy would require reading its whole table. */
+    if (SdCard::declared() && !SdCard::mounted()) SdCard::retryIfDue();
+    const bool sdMounted = SdCard::mounted();
+    uint64_t sdUsed = 0;
+    if (sdMounted) walkSdCard([&](const String&, size_t octets) { sdUsed += octets; });
     e.formater("{\"volumes\":[{\"id\":\"%s\",\"nom\":\"Mémoire interne\",\"type\":\"littlefs\","
                "\"prise_en_charge\":true,\"presente\":true,\"total\":%u,\"utilise\":%u},"
                "{\"id\":\"%s\",\"nom\":\"Carte SD\",\"type\":\"sd\","
-               "\"prise_en_charge\":true,\"declaree\":%s,\"presente\":%s,\"total\":%llu,\"utilise\":%llu}],",
+               "\"prise_en_charge\":true,\"declared\":%s,\"presente\":%s,\"total\":%llu,\"utilise\":%llu}],",
                VOLUME_INTERNE, (unsigned)total, (unsigned)utilises,
-               CarteSd::VOLUME, CarteSd::declaree() ? "true" : "false", sdMontee ? "true" : "false",
-               (unsigned long long)CarteSd::total(), (unsigned long long)sdUtilise);
+               SdCard::VOLUME_ID, SdCard::declared() ? "true" : "false", sdMounted ? "true" : "false",
+               (unsigned long long)SdCard::capacityBytes(), (unsigned long long)sdUsed);
     e.formater("\"televersables\":[{\"extension\":\".wav\",\"genre\":\"son\",\"volume\":\"%s\",\"dossier\":\"%s\"},"
                "{\"extension\":\".interface\",\"genre\":\"interface\",\"volume\":\"%s\",\"dossier\":\"%s\"}],",
                VOLUME_INTERNE, SampleStore::DOSSIER, VOLUME_INTERNE, Interface::DOSSIER_ENREGISTREES);
@@ -344,18 +344,18 @@ void setupFichiersAPI(AsyncWebServer& server) {
       }
       e.ajouter("}");
     });
-    if (sdMontee) parcourirCarteSd([&](const String& chemin, size_t octets) {
+    if (sdMounted) walkSdCard([&](const String& chemin, size_t octets) {
       const String nom = baseDe(chemin);
       if (!premier) e.ajouter(",");
       premier = false;
       n++;
       e.ajouter("{\"chemin\":"); e.chaine(chemin.c_str());
       e.formater(",\"volume\":\"%s\",\"octets\":%u,\"genre\":\"son\",\"supprimable\":false,\"en_attente\":false",
-                 CarteSd::VOLUME, (unsigned)octets);
+                 SdCard::VOLUME_ID, (unsigned)octets);
       if (charges)
         e.formater(",\"lisible\":%s", SampleStore::indexDe(nom.c_str()) >= 0 ? "true" : "false");
       { const int fi = SampleStore::indexDe(nom.c_str());
-        if (fi >= 0 && SampleStore::estFlux((uint8_t)fi)) e.ajouter(",\"flux\":true"); }   // lu en flux, jamais en PSRAM
+        if (fi >= 0 && SampleStore::isStreamed((uint8_t)fi)) e.ajouter(",\"streamed\":true"); }   // read as a stream, never in PSRAM
       const char* par = usageDe(u, nu, nom);
       if (par) { e.ajouter(",\"utilise_par\":"); e.chaine(par); }
       e.ajouter("}");

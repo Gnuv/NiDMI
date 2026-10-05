@@ -1,25 +1,25 @@
 #pragma once
 
-#include <Arduino.h>                 // SCK, MISO, MOSI : le brochage de la variante
+#include <Arduino.h>                 // SCK, MISO, MOSI: the variant's pinout
 #include "../ComponentDefinition.h"
 #include "../FormFieldHelpers.h"
 #include "../MidiMessageCatalog.h"   // makeFlashDef
 
 /**
  * @file SdSpiDef.h
- * @brief La carte SD (SPI) — un périphérique qu'on DÉCLARE, comme le DAC.
+ * @brief The SD card (SPI) — a peripheral you DECLARE, like the DAC.
  *
- * Même mécanisme que `dac_i2s` (DacI2sDef.h) : pas de carte déclarée = aucune
- * broche prise et aucun accès SPI ; la déclarer réserve ses quatre broches (le
- * handler répond `isGpioUsed`) et la carte la monte, dans sa propre tâche — ni
- * la boucle ni le serveur web n'attendent après elle (src/config/CarteSd.h).
+ * Same mechanism as `dac_i2s` (DacI2sDef.h): no declared card = no pin taken and no
+ * SPI access; declaring it reserves its four pins (the handler answers `isGpioUsed`)
+ * and the board mounts it, in its own task — neither the loop nor the web server
+ * waits for it (src/config/SdCard.h).
  *
- * LA BROCHE PRINCIPALE EST LE CS (sélection de la carte) : c'est la seule qu'on
- * choisit, parmi celles que rien n'occupe. SCK, MISO et MOSI sont celles du bus
- * SPI de la carte (D8, D9, D10 sur la XIAO S3) : données en `defaultValue`, et
- * imposées par la validation — le LIS3DH en SPI s'y branche aussi, sur son propre CS.
+ * THE MAIN PIN IS THE CS (card select): it is the only one you choose, among those
+ * nothing occupies. SCK, MISO and MOSI are the SPI bus of the card (D8, D9, D10 on
+ * the XIAO S3): given as `defaultValue`, and imposed by the validation — the LIS3DH
+ * in SPI mode plugs into it too, on its own CS.
  *
- * Elle n'émet ni MIDI ni OSC : pas de script (l'app le lit dans la définition).
+ * It sends neither MIDI nor OSC: no script (the app reads that in the definition).
  */
 
 namespace Components {
@@ -27,7 +27,7 @@ namespace Components {
 struct SdSpi {
     static constexpr const char* ID           = "sd_spi";
     static constexpr const char* DISPLAY_NAME = "Carte SD (SPI)";
-    static constexpr const char* FAMILY_NAME  = "Stockage";
+    static constexpr const char* FAMILY_NAME  = "Stockage";   // shown to the user: stays French
 
     static constexpr ComponentFamily FAMILY = ComponentFamily::BASIC;
     static constexpr ComponentType   TYPE   = ComponentType::SD_SPI;
@@ -42,7 +42,7 @@ struct SdSpi {
     static constexpr uint8_t BUS_MISO = (uint8_t)MISO;
     static constexpr uint8_t BUS_MOSI = (uint8_t)MOSI;
 
-    /* Le CS est n'importe quelle broche numérique, sauf celles du bus. */
+    /* The CS is any digital pin, except those of the bus. */
     static bool validate(uint8_t gpio) {
         return gpio < 48 && gpio != BUS_SCK && gpio != BUS_MISO && gpio != BUS_MOSI;
     }

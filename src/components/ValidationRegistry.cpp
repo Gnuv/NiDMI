@@ -1,7 +1,7 @@
 #include "../audio/AudioEngine.h"   // broches imposees du bus I2S
 #include "ValidationRegistry.h"
 #include "ComponentRegistry.h"
-#include "storage/SdSpiDef.h"       // le bus SPI de la carte SD
+#include "storage/SdSpiDef.h"       // the SD card's SPI bus
 #include "../utils/PinMapper.h"
 #include "../managers/MuxValidator.h"
 #include "../managers/MuxManager.h"
@@ -334,8 +334,8 @@ static ValidationResult validateDacComplex(const ComplexComponentData& data) {
     return result;
 }
 
-/* La carte SD : le CS (broche principale) se choisit, le bus SPI non — SCK,
- * MISO et MOSI sont ceux de la variante, et le CS ne peut pas en etre un. */
+/* The SD card: the CS (main pin) is chosen, the SPI bus is not — SCK, MISO and
+ * MOSI are the variant's, and the CS cannot be one of them. */
 static ValidationResult validateSdComplex(const ComplexComponentData& data) {
     ValidationResult result;
     if (!data.def) return ValidationResult(false, "Définition du composant manquante");

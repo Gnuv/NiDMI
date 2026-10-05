@@ -1,10 +1,10 @@
 /**
  * @file SdHandlerRegister.cpp
- * @brief Enregistrement automatique du SdHandler (voir DacHandlerRegister).
+ * @brief Automatic registration of SdHandler (see DacHandlerRegister).
  */
 #include "SdHandler.h"
 #include "../ComplexHandlerRegistry.h"
 
-static ComplexHandler* creerSdHandler() { return new SdHandler(); }
+static ComplexHandler* createSdHandler() { return new SdHandler(); }
 
-static bool enregistre_sd = ComplexHandlerRegistry::registerHandler("sd_spi", creerSdHandler);
+static bool registered_sd = ComplexHandlerRegistry::registerHandler("sd_spi", createSdHandler);

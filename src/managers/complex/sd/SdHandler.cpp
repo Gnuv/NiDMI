@@ -3,7 +3,7 @@
 #include <cstring>
 
 #include "../../../components/storage/SdSpiDef.h"
-#include "../../../config/CarteSd.h"
+#include "../../../config/SdCard.h"
 #include "../../../server/WebDebugConsole.h"
 
 bool SdHandler::addComponent(const ComplexComponentData& data) {
@@ -20,14 +20,14 @@ bool SdHandler::addComponent(const ComplexComponentData& data) {
     }
     NIDMI_WEB_LOG("[SD] declaree : CS=%u SCK=%u MISO=%u MOSI=%u",
                   (unsigned)cs_, (unsigned)sck_, (unsigned)miso_, (unsigned)mosi_);
-    CarteSd::declarer(cs_, sck_, miso_, mosi_);     // monte dans SA tache : on ne l'attend pas
+    SdCard::declare(cs_, sck_, miso_, mosi_);       // mounts in ITS task: we do not wait for it
     return true;
 }
 
 bool SdHandler::removeComponent(const char*, uint8_t) {
     NIDMI_WEB_LOG("[SD] retiree : les broches sont liberees");
     cs_ = sck_ = miso_ = mosi_ = 255;
-    CarteSd::retirer();
+    SdCard::undeclare();
     return true;
 }
 
