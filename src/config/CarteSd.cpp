@@ -26,6 +26,7 @@ volatile bool     _aDemonter = false;
 volatile bool     _aMonter   = false;
 volatile bool     _aCharger  = false;
 volatile bool     _aMesurer  = false;
+volatile bool     _aCablage  = false;
 volatile uint32_t _actif     = 0;          // la tache vit : une seule a la fois
 volatile uint32_t _dernierEssaiMs = 0;
 volatile uint32_t _essais    = 0;
@@ -36,6 +37,9 @@ char          _raison[112] = "";           // pourquoi le dernier montage a echo
 volatile int  _cmd0 = -1;                  // R1 de CMD0 (0x01 : la carte repond), -1 : pas sonde
 volatile int  _cmd8 = -1;                  // R1 de CMD8
 volatile uint32_t _cmd8Echo = 0;           // les 4 octets suivants (0x000001AA : SD v2)
+volatile int  _misoBas = -1, _misoHaut = -1;   // niveau de MISO au repos, tire vers le bas / le haut
+volatile int  _invCmd0 = -1;               // R1 de CMD0 avec MISO et MOSI echanges
+volatile bool _cablageFait = false;
 
 /* LA MESURE DE LECTURE. Etat : 0 jamais, 1 en cours, 2 finie. Le JSON se pose
  * d'un coup, l'etat en dernier. */
@@ -58,43 +62,74 @@ void _demonter() {
   NIDMI_WEB_LOG("[SD] demontee");
 }
 
-/* UN OCTET SUR LE BUS. */
-uint8_t _echanger(uint8_t o) { return SPI.transfer(o); }
-
-/* Une commande SD a la main : 0xFF d'amorce, six octets, puis jusqu'a dix octets
- * d'attente de la reponse R1 (le bit 7 retombe). */
-uint8_t _commande(uint8_t cmd, uint32_t arg, uint8_t crc) {
-  _echanger(0xFF);
-  _echanger(0x40 | cmd);
-  _echanger((uint8_t)(arg >> 24)); _echanger((uint8_t)(arg >> 16));
-  _echanger((uint8_t)(arg >> 8));  _echanger((uint8_t)arg);
-  _echanger(crc);
+/* UNE COMMANDE SD A LA MAIN sur le bus `b` : 0xFF d'amorce, six octets, puis
+ * jusqu'a dix octets d'attente de la reponse R1 (le bit 7 retombe). */
+uint8_t _commande(SPIClass& b, uint8_t cmd, uint32_t arg, uint8_t crc) {
+  b.transfer(0xFF);
+  b.transfer(0x40 | cmd);
+  b.transfer((uint8_t)(arg >> 24)); b.transfer((uint8_t)(arg >> 16));
+  b.transfer((uint8_t)(arg >> 8));  b.transfer((uint8_t)arg);
+  b.transfer(crc);
   uint8_t r = 0xFF;
-  for (int i = 0; i < 10 && (r & 0x80); i++) r = _echanger(0xFF);
+  for (int i = 0; i < 10 && (r & 0x80); i++) r = b.transfer(0xFF);
   return r;
 }
 
-/* SONDER LE BUS, a 400 kHz, comme le fait l'initialisation d'une carte : 80
+/* SONDER LE BUS `b`, a 400 kHz, comme le fait l'initialisation d'une carte : 80
  * impulsions CS haut, CMD0 (retour au repos), CMD8 (SD v2). Ce que la
  * bibliotheque SD sait mais ne dit pas : jusqu'ou la conversation va. */
-void _sonder() {
-  _cmd0 = _cmd8 = -1; _cmd8Echo = 0;
+void _sonderSur(SPIClass& b, int& r0, int& r8, uint32_t& echo) {
+  r0 = r8 = -1; echo = 0;
   pinMode(_cs, OUTPUT);
   digitalWrite(_cs, HIGH);
-  SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
-  for (int i = 0; i < 10; i++) _echanger(0xFF);
+  b.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+  for (int i = 0; i < 10; i++) b.transfer(0xFF);
   digitalWrite(_cs, LOW);
-  _cmd0 = _commande(0, 0, 0x95);
-  digitalWrite(_cs, HIGH); _echanger(0xFF);
+  r0 = _commande(b, 0, 0, 0x95);
+  digitalWrite(_cs, HIGH); b.transfer(0xFF);
   digitalWrite(_cs, LOW);
-  const uint8_t r8 = _commande(8, 0x1AA, 0x87);
-  uint32_t echo = 0;
-  if (!(r8 & 0x80) && !(r8 & 0x04)) for (int i = 0; i < 4; i++) echo = (echo << 8) | _echanger(0xFF);
-  digitalWrite(_cs, HIGH); _echanger(0xFF);
-  SPI.endTransaction();
-  _cmd8 = r8; _cmd8Echo = echo;
+  const uint8_t v8 = _commande(b, 8, 0x1AA, 0x87);
+  if (!(v8 & 0x80) && !(v8 & 0x04)) for (int i = 0; i < 4; i++) echo = (echo << 8) | b.transfer(0xFF);
+  digitalWrite(_cs, HIGH); b.transfer(0xFF);
+  b.endTransaction();
+  r8 = v8;
+}
+
+void _sonder() {
+  int r0, r8; uint32_t echo;
+  _sonderSur(SPI, r0, r8, echo);
+  _cmd0 = r0; _cmd8 = r8; _cmd8Echo = echo;
   NIDMI_WEB_LOG("[SD] sonde du bus : CMD0 -> 0x%02X, CMD8 -> 0x%02X (0x%08lX)",
                 (unsigned)_cmd0, (unsigned)_cmd8, (unsigned long)echo);
+}
+
+/* LA SONDE DE CABLAGE, sur demande, carte non montee. Trois questions que CMD0 a
+ * 0xFF ne tranche pas :
+ *   - MISO : au repos, avec un tirage vers le bas puis vers le haut. S'il suit le
+ *     tirage, rien ne le tient — fil non branche, ou module hors tension sans
+ *     tirage propre ; s'il reste haut malgre le tirage vers le bas, quelque chose
+ *     le tient (module sous tension).
+ *   - MISO et MOSI INVERSES : un second bus (HSPI), les deux fils de donnees
+ *     echanges — la confusion classique entre DI/DO et MOSI/MISO. Une carte qui
+ *     repond ainsi est branchee a l'envers.
+ * Le bus principal est ferme le temps de la sonde, puis rouvert. */
+void _sonderCablage() {
+  SPI.end();
+  pinMode(_miso, INPUT_PULLDOWN); delay(3); _misoBas  = digitalRead(_miso);
+  pinMode(_miso, INPUT_PULLUP);   delay(3); _misoHaut = digitalRead(_miso);
+  pinMode(_miso, INPUT);
+  {
+    SPIClass inv(HSPI);
+    inv.begin(_sck, _mosi, _miso, -1);            // la broche MOSI lit, la broche MISO ecrit
+    int r0, r8; uint32_t echo;
+    _sonderSur(inv, r0, r8, echo);
+    _invCmd0 = r0;
+    inv.end();
+  }
+  SPI.begin(_sck, _miso, _mosi, -1);
+  NIDMI_WEB_LOG("[SD] cablage : MISO tire vers le bas -> %d, vers le haut -> %d ; MISO/MOSI inverses : CMD0 -> 0x%02X",
+                _misoBas, _misoHaut, (unsigned)_invCmd0);
+  _cablageFait = true;
 }
 
 void _monter() {
@@ -232,12 +267,13 @@ void _tache(void*) {
     if (_aDemonter) { _aDemonter = false; _demonter();  continue; }
     if (_aMonter)   { _aMonter   = false; _monter();    continue; }
     if (_aMesurer)  { _aMesurer  = false; _mesurer();   continue; }
+    if (_aCablage)  { _aCablage  = false; if (_declaree && !_monte) _sonderCablage(); continue; }
     if (_aCharger)  { _aCharger  = false; _chargerSons(); continue; }
     break;
   }
   __sync_lock_release(&_actif);
   // Un drapeau leve entre le dernier tour et la liberation : on repart.
-  if (_aDemonter || _aMonter || _aCharger || _aMesurer) _lancer();
+  if (_aDemonter || _aMonter || _aCharger || _aMesurer || _aCablage) _lancer();
   vTaskDelete(nullptr);
 }
 
@@ -286,6 +322,12 @@ void reessayer() {
   _lancer();
 }
 
+void sonderCablage() {
+  if (!_declaree || _monte) return;
+  _aCablage = true;
+  _lancer();
+}
+
 void essayer() {
   if (!_declaree || _monte) return;
   _aMonter = true;
@@ -327,6 +369,16 @@ String diagnostic() {
   if (_cmd0 >= 0)
     j += ",\"sonde\":{\"cmd0\":" + String(_cmd0) + ",\"cmd8\":" + String(_cmd8)
        + ",\"cmd8_echo\":" + String((unsigned long)_cmd8Echo) + "}";
+  if (_cablageFait) {
+    const char* verdict =
+        _invCmd0 >= 0 && _invCmd0 != 0xFF
+            ? "la carte repond MISO et MOSI echanges : les deux fils de donnees sont inverses"
+        : _misoBas == 1
+            ? "MISO est tenu haut par quelque chose (module sous tension ?) mais la carte ne repond pas : verifier le fil CS, la carte, GND"
+            : "MISO flotte (suit le tirage) : fil MISO non branche, ou module hors tension";
+    j += ",\"cablage\":{\"miso_tire_bas\":" + String(_misoBas) + ",\"miso_tire_haut\":" + String(_misoHaut)
+       + ",\"cmd0_miso_mosi_inverses\":" + String(_invCmd0) + ",\"verdict\":\"" + String(verdict) + "\"}";
+  }
   j += ",\"mesure\":";
   if (_mesEtat == 0)      j += "null";
   else if (_mesEtat == 1) j += "{\"etat\":\"en cours\"}";

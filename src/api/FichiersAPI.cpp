@@ -269,12 +269,13 @@ void setupFichiersAPI(AsyncWebServer& server) {
 
   /* LE DIAGNOSTIC DE LA CARTE SD — la carte n'a pas de port serie : c'est ici qu'elle
    * dit pourquoi la SD ne se monte pas (CMD0/CMD8 sondes a la main) et ce que vaut sa
-   * lecture. `?essai=1` : un nouvel essai tout de suite. `?mesure=<nom.wav>[&hz=…]` :
+   * lecture. `?essai=1` : un nouvel essai tout de suite. `?cablage=1` : sonde le cablage d'une carte qui ne monte pas. `?mesure=<nom.wav>[&hz=…]` :
    * lit ce son de bout en bout, dans la tache de la carte (jamais ici), et chronometre
    * chaque morceau ; on relit ensuite jusqu'a `mesure.etat == "finie"`. Un geste, a la
    * demande : rien ne le sonde. */
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (request->hasParam("essai")) CarteSd::essayer();
+    if (request->hasParam("cablage")) CarteSd::sonderCablage();
     if (request->hasParam("mesure")) {
       uint32_t hz = request->hasParam("hz") ? (uint32_t)request->getParam("hz")->value().toInt() : 0;
       if (hz && (hz < 400000 || hz > 40000000)) hz = 0;

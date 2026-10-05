@@ -63,6 +63,7 @@ File ouvrir(const char* chemin);
  * vivante repond 0x01 a CMD0 ; 0xFF, c'est le silence (carte absente, MISO ou
  * alimentation ou CS mal cables). Ce que /api/diag/sd rend.
  *   essai   : force un nouvel essai tout de suite (sans les 5 s).
+ *   cablage : sonde le cablage (MISO au repos, MISO/MOSI inverses) quand elle ne monte pas.
  *   mesure  : le nom d'un .wav de /samples dont on mesure la lecture sequentielle
  *             (debit, pire latence d'un morceau de 16 ko, un saut au milieu) —
  *             ce qui dimensionne la lecture en flux. `hz` : la frequence du bus.
@@ -70,6 +71,8 @@ File ouvrir(const char* chemin);
  * diagnostic jusqu'a `mesure.etat == "finie"`. */
 String diagnostic();
 void   essayer();
+// La sonde de cablage (niveau de MISO, MISO/MOSI inverses) — carte NON montee seulement.
+void   sonderCablage();
 bool   mesurer(const char* nom, uint32_t hz);
 
 }  // namespace CarteSd
