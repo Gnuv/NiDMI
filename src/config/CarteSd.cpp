@@ -73,6 +73,7 @@ void _demonter() {
   if (!_monte) return;
   _monte = false;
   _total = 0;
+  FluxSD::arreterTout();                 // aucun fichier ouvert sous le demontage
   SdSpiDisque::demonter();
   NIDMI_WEB_LOG("[SD] demontee");
 }

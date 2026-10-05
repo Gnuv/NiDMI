@@ -4,6 +4,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <new>
 
 #include "SampleStore.h"
 #include "../config/CarteSd.h"
@@ -21,7 +22,7 @@ struct Tete {
   int16_t*       pcm     = nullptr;
   volatile uint8_t etat  = 0;           // 0 libre, 1 demandee, 2 prete, 3 en echec
 };
-Tete _tetes[TETES_MAX];
+Tete* _tetes = nullptr;               // TETES_MAX, en PSRAM, pris au premier besoin (voir _prendreTables)
 
 /* La table des tetes change sous plusieurs taches (la cue, le serveur web, la tache de
  * la carte) : un verrou court, jamais tenu pendant une lecture. */
@@ -98,9 +99,28 @@ struct Flux {
   char             ouvert[SampleStore::NOM_MAX] = {0};
   uint32_t         finLue = 0;          // la fin qu'il vise (copie de `fin` a la derniere demande)
 };
-Flux _fl[FLUX_MAX];
+Flux* _fl = nullptr;                  // FLUX_MAX, idem
 volatile uint32_t _manquesTotal = 0;
 volatile uint32_t _lecteurVit = 0;
+volatile bool     _arretLecteur = false;
+
+/* LES TABLES SONT EN PSRAM. Quelques centaines d'octets chacune, mais le plus gros bloc
+ * contigu de la RAM interne est la ressource rare (RESSOURCES_CARTE.md) : un `.bss` de
+ * plus d'un ko lui coutait 1 024 o, mesure. Prises au premier clip en flux — jamais par
+ * la tache audio —, sous verrou, et jamais rendues. */
+bool _prendreTables() {
+  if (_tetes && _fl) return true;
+  if (!_verrouT) return false;
+  xSemaphoreTake(_verrouT, portMAX_DELAY);
+  if (!_tetes) _tetes = (Tete*)heap_caps_calloc(TETES_MAX, sizeof(Tete), MALLOC_CAP_SPIRAM);
+  if (!_fl) {
+    void* m = heap_caps_calloc(FLUX_MAX, sizeof(Flux), MALLOC_CAP_SPIRAM);
+    if (m) _fl = new (m) Flux[FLUX_MAX];            // File a un constructeur : on le lance
+  }
+  const bool ok = _tetes && _fl;
+  xSemaphoreGive(_verrouT);
+  return ok;
+}
 
 void _lancerLecteur();
 
@@ -167,6 +187,7 @@ bool _servir(Flux& x) {
 void _tacheLecteur(void*) {
   uint32_t inactifDepuis = millis();
   for (;;) {
+    if (_arretLecteur || !_fl) break;                      // la carte se demonte : on rend tout
     bool actif = false, travail = false;
     for (uint8_t i = 0; i < FLUX_MAX; i++) {
       Flux& x = _fl[i];
@@ -177,10 +198,10 @@ void _tacheLecteur(void*) {
     else if (millis() - inactifDepuis > 1500) break;
     vTaskDelay(travail ? 1 : pdMS_TO_TICKS(4));            // jamais de tour a vide
   }
-  for (uint8_t i = 0; i < FLUX_MAX; i++) if (_fl[i].f) { _fl[i].f.close(); _fl[i].ouvert[0] = 0; }
+  if (_fl) for (uint8_t i = 0; i < FLUX_MAX; i++) if (_fl[i].f) { _fl[i].f.close(); _fl[i].ouvert[0] = 0; }
   __sync_lock_release(&_lecteurVit);
   bool reste = false;
-  for (uint8_t i = 0; i < FLUX_MAX; i++) if (_fl[i].etat == 1) reste = true;
+  if (_fl && !_arretLecteur) for (uint8_t i = 0; i < FLUX_MAX; i++) if (_fl[i].etat == 1) reste = true;
   if (reste) _lancerLecteur();
   vTaskDelete(nullptr);
 }
@@ -200,6 +221,7 @@ void _lancerLecteur() {
 
 // ── Les tetes : API ──────────────────────────────────────────────────────────
 int8_t demanderTete(const char* son, uint32_t debut) {
+  if (!_prendreTables()) return -1;
   int8_t idx = -1;
   bool neuve = false;
   {
@@ -223,7 +245,7 @@ int8_t demanderTete(const char* son, uint32_t debut) {
   return idx;
 }
 
-bool tetePrete(int8_t i) { return i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat == 2; }
+bool tetePrete(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat == 2; }
 
 bool teteVue(int8_t i, TeteVue& v) {
   if (!tetePrete(i)) return false;
@@ -232,13 +254,13 @@ bool teteVue(int8_t i, TeteVue& v) {
 }
 
 uint32_t teteAgeMs(int8_t i) {
-  if (i < 0 || i >= (int8_t)TETES_MAX || _tetes[i].etat == 0) return 0;
+  if (!_tetes || i < 0 || i >= (int8_t)TETES_MAX || _tetes[i].etat == 0) return 0;
   return millis() - _tetes[i].vuMs;
 }
-bool teteUtilisee(int8_t i) { return i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat != 0; }
+bool teteUtilisee(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat != 0; }
 
 void libererTete(int8_t i) {
-  if (i < 0 || i >= (int8_t)TETES_MAX) return;
+  if (!_tetes || i < 0 || i >= (int8_t)TETES_MAX) return;
   VerrouT v;
   Tete& t = _tetes[i];
   int16_t* pcm = t.pcm;
@@ -249,12 +271,14 @@ void libererTete(int8_t i) {
 }
 
 void chargerTetes() {
+  if (!_tetes) return;
   for (uint8_t i = 0; i < TETES_MAX; i++)
     if (_tetes[i].etat == 1) _chargerTete(i);
 }
 
 // ── Les flux : API ───────────────────────────────────────────────────────────
 int8_t acquerir(uint8_t voix) {
+  if (!_fl) return -1;
   for (int8_t i = 0; i < (int8_t)FLUX_MAX; i++) {
     Flux& x = _fl[i];
     if (x.etat != 0) continue;
@@ -272,17 +296,17 @@ int8_t acquerir(uint8_t voix) {
   return -1;
 }
 
-bool    possede(int8_t f, uint8_t voix) { return f >= 0 && f < (int8_t)FLUX_MAX && _fl[f].etat == 1 && _fl[f].voix == voix; }
-bool    actif(int8_t f)   { return f >= 0 && f < (int8_t)FLUX_MAX && _fl[f].etat == 1; }
-uint8_t voixDe(int8_t f)  { return (f >= 0 && f < (int8_t)FLUX_MAX) ? _fl[f].voix : 0; }
+bool    possede(int8_t f, uint8_t voix) { return _fl && f >= 0 && f < (int8_t)FLUX_MAX && _fl[f].etat == 1 && _fl[f].voix == voix; }
+bool    actif(int8_t f)   { return _fl && f >= 0 && f < (int8_t)FLUX_MAX && _fl[f].etat == 1; }
+uint8_t voixDe(int8_t f)  { return (_fl && f >= 0 && f < (int8_t)FLUX_MAX) ? _fl[f].voix : 0; }
 
 void liberer(int8_t f) {
-  if (f < 0 || f >= (int8_t)FLUX_MAX) return;
+  if (!_fl || f < 0 || f >= (int8_t)FLUX_MAX) return;
   _fl[f].etat = 0;                       // le lecteur ferme son fichier a son prochain tour
 }
 
 void demarrer(int8_t f, const char* son, uint32_t depart, uint32_t fin, uint8_t canaux, uint32_t offsetOctets) {
-  if (f < 0 || f >= (int8_t)FLUX_MAX) return;
+  if (!_fl || f < 0 || f >= (int8_t)FLUX_MAX) return;
   Flux& x = _fl[f];
   strlcpy(x.son, son, sizeof(x.son));
   x.offset = offsetOctets; x.canaux = canaux;
@@ -294,7 +318,7 @@ void demarrer(int8_t f, const char* son, uint32_t depart, uint32_t fin, uint8_t 
 }
 
 void redemarrer(int8_t f) {
-  if (f < 0 || f >= (int8_t)FLUX_MAX) return;
+  if (!_fl || f < 0 || f >= (int8_t)FLUX_MAX) return;
   Flux& x = _fl[f];
   x.cons = 0;
   __sync_synchronize();
@@ -303,11 +327,11 @@ void redemarrer(int8_t f) {
 }
 
 void position(int8_t f, uint32_t trame) {
-  if (f >= 0 && f < (int8_t)FLUX_MAX) _fl[f].cons = trame;
+  if (_fl && f >= 0 && f < (int8_t)FLUX_MAX) _fl[f].cons = trame;
 }
 
 bool lire(int8_t f, uint32_t trame, int16_t& g, int16_t& d) {
-  if (f < 0 || f >= (int8_t)FLUX_MAX) return false;
+  if (!_fl || f < 0 || f >= (int8_t)FLUX_MAX) return false;
   const Flux& x = _fl[f];
   if (x.seqVue != x.seq || !x.anneau) return false;
   const uint32_t hi = x.hi, lo = x.lo;
@@ -318,8 +342,19 @@ bool lire(int8_t f, uint32_t trame, int16_t& g, int16_t& d) {
   return true;
 }
 
+/* La carte se demonte : plus aucun flux, plus aucun fichier ouvert. FatFs ne tient pas
+ * qu'on demonte sous un fichier ouvert ; le lecteur ferme les siens et s'arrete. Les voix
+ * qui jouaient finissent ce que leur tampon contient, puis se taisent. */
+void arreterTout() {
+  if (_fl) for (uint8_t i = 0; i < FLUX_MAX; i++) _fl[i].etat = 0;
+  if (!_lecteurVit) return;
+  _arretLecteur = true;
+  for (int i = 0; i < 50 && _lecteurVit; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  _arretLecteur = false;
+}
+
 void manque(int8_t f) {
-  if (f >= 0 && f < (int8_t)FLUX_MAX) _fl[f].sousAlim = _fl[f].sousAlim + 1;
+  if (_fl && f >= 0 && f < (int8_t)FLUX_MAX) _fl[f].sousAlim = _fl[f].sousAlim + 1;
   _manquesTotal = _manquesTotal + 1;
 }
 
@@ -327,7 +362,7 @@ String diagnostic() {
   String j = "{\"lecteur\":" + String(_lecteurVit ? "true" : "false")
            + ",\"manques_total\":" + String((unsigned long)_manquesTotal) + ",\"flux\":[";
   bool premier = true;
-  for (uint8_t i = 0; i < FLUX_MAX; i++) {
+  for (uint8_t i = 0; _fl && i < FLUX_MAX; i++) {
     const Flux& x = _fl[i];
     if (x.etat != 1) continue;
     if (!premier) j += ",";
@@ -340,7 +375,7 @@ String diagnostic() {
   }
   j += "],\"tetes\":[";
   premier = true;
-  for (uint8_t i = 0; i < TETES_MAX; i++) {
+  for (uint8_t i = 0; _tetes && i < TETES_MAX; i++) {
     const Tete& t = _tetes[i];
     if (t.etat == 0) continue;
     if (!premier) j += ",";

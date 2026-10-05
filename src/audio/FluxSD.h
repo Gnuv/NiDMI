@@ -74,6 +74,7 @@ void     position(int8_t f, uint32_t trame);            // ou en est la voix
 /* Une trame du tampon. Faux : pas encore (ou plus) dans le tampon — silence. */
 bool     lire(int8_t f, uint32_t trame, int16_t& g, int16_t& d);
 void     manque(int8_t f);                              // un bloc qui a manque de donnees
+void     arreterTout();                                 // la carte se demonte : rendre les flux et fermer les fichiers
 
 String   diagnostic();
 
