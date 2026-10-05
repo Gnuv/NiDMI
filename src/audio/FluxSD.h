@@ -57,6 +57,10 @@ uint32_t teteAgeMs(int8_t i);                           // depuis la derniere de
 bool     teteUtilisee(int8_t i);                        // la table l'a (prete, demandee ou en echec)
 void     libererTete(int8_t i);                         // l'appelant a verifie que rien ne la nomme
 void     chargerTetes();                                // par la tache de la carte SD
+bool     teteEnCours(int8_t i);                         // demandee, pas encore lue (ni en echec)
+void     prioriser(int8_t i);                           // une note l'attend : a lire avant les autres
+void     noterAttente(uint32_t ms);                     // une note a attendu sa tete (compteurs de diagnostic)
+void     noterAbandon();                                // ... ou on y a renonce
 
 // ── Les flux ─────────────────────────────────────────────────────────────────
 // Appeles par la TACHE AUDIO, et elle seule (sauf diagnostic).

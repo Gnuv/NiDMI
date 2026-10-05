@@ -442,19 +442,61 @@ bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   return true;
 }
 
+/* LA NOTE QUI ATTEND SA TETE. Un clip lu en flux ne part que de sa tete, lue par la tache de
+ * la carte SD (~0,1 a 0,16 s). Une note qui arrive avant qu'elle soit prete n'est PAS perdue :
+ * elle est gardee, et le clip part des que sa tete l'est. La derniere note d'une liste l'emporte
+ * (un clip a la fois), la note qui arrete l'efface, et on y renonce au bout de ATTENTE_TETE_MS
+ * (tete en echec, carte absente) — un clip qui partirait des secondes apres sa note est pire
+ * qu'un silence. La tete du clip attendu passe devant les autres a la lecture (FluxSD).
+ * Tout ceci ne vit que dans la tache audio : pas de verrou, et jamais un journal. */
+struct Attente { uint32_t bloc; uint32_t t0; uint8_t clip; };
+Attente           attentes[LISTES_MAX] = {};
+volatile bool     attentesAEffacer = false;
+constexpr uint32_t ATTENTE_TETE_MS = 2000;
+
+// Le clip k ne se joue-t-il pas PARCE QUE sa tete se charge encore ? (et nulle autre raison)
+bool _teteEnCours(const Liste& L, uint8_t k) {
+  if (k == 0 || k > L.n) return false;
+  const Clip& c = L.clips[k - 1];
+  if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch) || !SampleStore::estFlux((uint8_t)c.iEch)) return false;
+  const size_t n = SampleStore::trames((uint8_t)c.iEch);
+  const size_t fin = (c.fin > c.debut && c.fin < n) ? c.fin : n;
+  if ((size_t)c.debut + 2 > fin) return false;
+  return FluxSD::teteEnCours(c.tete);
+}
+
+void _attendre(uint32_t bloc, uint8_t k, int8_t tete) {
+  Attente* a = nullptr;
+  for (auto& e : attentes) if (e.bloc == bloc) { a = &e; break; }
+  if (!a) for (auto& e : attentes) if (!e.bloc) { a = &e; break; }
+  if (!a) return;
+  a->bloc = bloc; a->clip = k; a->t0 = millis();
+  FluxSD::prioriser(tete);
+}
+
+void _annulerAttente(uint32_t bloc) {
+  for (auto& e : attentes) if (e.bloc == bloc) e.bloc = 0;
+}
+
 /* Lancer le clip k de la liste li — 0 : seulement l'arreter. Ce que la liste
  * jouait se tait en 5 ms : un clip a la fois. Un clip qui ne se joue pas (sans
  * son) ne fait RIEN, pas meme arreter le precedent. */
 void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   const Liste& L = b.listes[li];
-  if (k > 0 && !_clipJouable(L, k)) return;
+  if (k > 0 && !_clipJouable(L, k)) {
+    /* Sa tete se charge encore : la note attend. Ce qui jouait continue jusqu'au depart du
+     * nouveau clip. Pour toute autre raison (son absent, selection vide) : rien, comme avant. */
+    if (_teteEnCours(L, k)) _attendre(L.bloc, k, L.clips[k - 1].tete);
+    return;
+  }
+  _annulerAttente(L.bloc);                // un depart, ou l'arret, remplace la note qui attendait
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (voixEch[v].actif && voixEch[v].liste == (int8_t)li) _eteindreEnDouceur(voixEch[v]);
   if (k == 0) return;
   VoixEch* vo = _voixLibre();
   vo->actif = false;                   // voir declencherEchantillon
   __sync_synchronize();
-  _poserClip(*vo, L, k);
+  if (!_poserClip(*vo, L, k)) return;  // plus de flux : la voix reste eteinte, pas reprise a moitie
   vo->liste = (int8_t)li;
   vo->bloc  = L.bloc;
   vo->velo  = 1.0f;                    // la velocite ne compte pas
@@ -505,6 +547,30 @@ void _clipDemande(uint32_t bloc, uint8_t k) {
   const Banque& b = banques[banqueActive];
   for (uint8_t li = 0; li < b.n; li++)
     if (b.listes[li].bloc == bloc) { _lancerClip(b, li, k); return; }
+}
+
+/* LES NOTES QUI ATTENDENT, a chaque bloc : leur tete est-elle prete ? Le clip part. Abandon : la
+ * liste n'existe plus, la tete a echoue, ou l'attente depasse ATTENTE_TETE_MS. */
+void _servirAttentes() {
+  if (attentesAEffacer) { attentesAEffacer = false; for (auto& e : attentes) e.bloc = 0; }
+  if (!banques) return;
+  const uint32_t now = millis();
+  const Banque& b = banques[banqueActive];
+  for (auto& e : attentes) {
+    if (!e.bloc) continue;
+    int li = -1;
+    for (uint8_t i = 0; i < b.n; i++) if (b.listes[i].bloc == e.bloc) { li = i; break; }
+    if (li < 0 || e.clip > b.listes[li].n) { e.bloc = 0; continue; }       // la liste est partie
+    const Liste& L = b.listes[li];
+    if (_clipJouable(L, e.clip)) {
+      const uint8_t k = e.clip;
+      FluxSD::noterAttente(now - e.t0);
+      e.bloc = 0;
+      _lancerClip(b, (uint8_t)li, k);
+      continue;
+    }
+    if (!_teteEnCours(L, e.clip) || now - e.t0 > ATTENTE_TETE_MS) { FluxSD::noterAbandon(); e.bloc = 0; }
+  }
 }
 
 /* L'ADOPTION d'une banque proposee, au debut d'un bloc — ou par l'ecrivain
@@ -772,6 +838,7 @@ void boucleAudio(void*) {
     if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
+    _servirAttentes();                  // les notes dont la tete etait attendue partent des qu'elle est la
     /* UN SON RETIRE (remplace, supprime — §177) se tait ici, au debut du bloc :
      * sa memoire ne se rend que deux blocs plus tard (rendreApresLecture). Sans
      * ce balayage, une voix restee sur un emplacement retire — magasin vide,
@@ -1423,6 +1490,7 @@ void arreterEchantillonNomme(const char* nom) {
 /* Quitter la cue arrete le son — comme le `dispose()` du BufferSource cote
  * navigateur. Sans ca, une boucle survivrait a la cue qui l'a lancee. */
 void arreterEchantillon(bool listesComprises) {
+  if (listesComprises) attentesAEffacer = true;   // STOP : une note qui attendait ne repart pas apres
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (listesComprises || voixEch[v].liste < 0) voixEch[v].actif = false;
 }
@@ -1664,7 +1732,8 @@ bool jouerClip(uint32_t bloc, uint8_t k) {
     int li = -1;
     for (uint8_t i = 0; i < b.n; i++) if (b.listes[i].bloc == bloc) { li = i; break; }
     if (li < 0) return false;
-    if (k > 0 && !_clipJouable(b.listes[li], k)) return false;
+    /* Un clip dont la tete se charge encore s'accepte : la note attendra (_lancerClip). */
+    if (k > 0 && !_clipJouable(b.listes[li], k) && !_teteEnCours(b.listes[li], k)) return false;
   }
   Evenement e{};
   e.sorte = SORTE_CLIP; e.bloc = bloc; e.clip = k;

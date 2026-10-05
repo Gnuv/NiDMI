@@ -21,6 +21,7 @@ struct Tete {
   uint32_t       vuMs    = 0;
   int16_t*       pcm     = nullptr;
   volatile uint8_t etat  = 0;           // 0 libre, 1 demandee, 2 prete, 3 en echec
+  volatile bool  urgente = false;       // une note l'attend : a lire avant les autres
 };
 Tete* _tetes = nullptr;               // TETES_MAX, en PSRAM, pris au premier besoin (voir _prendreTables)
 
@@ -36,25 +37,25 @@ struct VerrouT {
 String _chemin(const char* son) { return String(CarteSd::DOSSIER) + "/" + son; }
 
 /* Lire la tete i : ouvrir, se placer, lire TETE_TRAMES — dans la tache de la carte. */
-void _chargerTete(uint8_t i) {
+bool _chargerTete(uint8_t i) {                       // faux : rien n'a change (la carte n'est pas la)
   Tete& t = _tetes[i];
-  if (!CarteSd::monte()) return;                    // la carte n'est pas la : on reste « demandee »
+  if (!CarteSd::monte()) return false;              // la carte n'est pas la : on reste « demandee »
   const int s = SampleStore::indexDe(t.son);
   if (s < 0 || !SampleStore::estFlux((uint8_t)s)) {
     NIDMI_WEB_LOG("[SD] tete de %s : ce n'est pas un son lu en flux", t.son);
-    t.etat = 3; return;
+    t.etat = 3; return true;
   }
   const uint32_t total = (uint32_t)SampleStore::trames((uint8_t)s);
   const uint8_t  ca    = SampleStore::stereo((uint8_t)s) ? 2 : 1;
   if (t.debut >= total) {
     NIDMI_WEB_LOG("[SD] tete de %s : le debut (trame %lu) est au-dela de la fin", t.son, (unsigned long)t.debut);
-    t.etat = 3; return;
+    t.etat = 3; return true;
   }
   const uint32_t n = (total - t.debut < TETE_TRAMES) ? total - t.debut : TETE_TRAMES;
   File f = CarteSd::ouvrir(_chemin(t.son).c_str());
-  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", t.son); t.etat = 3; return; }
+  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", t.son); t.etat = 3; return true; }
   int16_t* pcm = (int16_t*)heap_caps_malloc((size_t)n * ca * 2, MALLOC_CAP_SPIRAM);
-  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", t.son); t.etat = 3; return; }
+  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", t.son); t.etat = 3; return true; }
   const uint32_t t0 = millis();
   const size_t   octets = (size_t)n * ca * 2;
   size_t lus = 0;
@@ -71,13 +72,14 @@ void _chargerTete(uint8_t i) {
   if (lus != octets) {
     heap_caps_free(pcm);
     NIDMI_WEB_LOG("[SD] tete de %s : lecture incomplete (%u / %u o)", t.son, (unsigned)lus, (unsigned)octets);
-    t.etat = 3; return;
+    t.etat = 3; return true;
   }
   t.pcm = pcm; t.trames = n;
   __sync_synchronize();
   t.etat = 2;
   NIDMI_WEB_LOG("[SD] tete de %s @%lu : %lu trames en %lu ms", t.son, (unsigned long)t.debut,
                 (unsigned long)n, (unsigned long)(millis() - t0));
+  return true;
 }
 
 // ── Les flux ─────────────────────────────────────────────────────────────────
@@ -101,6 +103,7 @@ struct Flux {
 };
 Flux* _fl = nullptr;                  // FLUX_MAX, idem
 volatile uint32_t _manquesTotal = 0;
+volatile uint32_t _notesRetardees = 0, _notesAbandonnees = 0, _attentePireMs = 0;
 volatile uint32_t _lecteurVit = 0;
 volatile bool     _arretLecteur = false;
 
@@ -270,11 +273,30 @@ void libererTete(int8_t i) {
   if (pcm) heap_caps_free(pcm);
 }
 
+/* Une tete a la fois, L'URGENTE D'ABORD : celle qu'une note attend passe devant les autres
+ * (elle attend alors une tete en cours de lecture, au plus, plus la sienne). Une carte absente
+ * arrete la boucle — les tetes restent « demandees ». */
 void chargerTetes() {
   if (!_tetes) return;
-  for (uint8_t i = 0; i < TETES_MAX; i++)
-    if (_tetes[i].etat == 1) _chargerTete(i);
+  for (;;) {
+    int8_t choix = -1;
+    for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1 && _tetes[i].urgente) choix = (int8_t)i;
+    for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1) choix = (int8_t)i;
+    if (choix < 0) break;
+    if (!_chargerTete((uint8_t)choix)) break;
+  }
 }
+
+bool teteEnCours(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat == 1; }
+void prioriser(int8_t i)   { if (teteEnCours(i)) _tetes[i].urgente = true; }
+
+/* Les notes qui ont attendu leur tete : combien, la plus longue attente, et celles qu'on a dues
+ * abandonner. Ecrits par la tache audio — de simples compteurs, jamais un journal. */
+void noterAttente(uint32_t ms) {
+  _notesRetardees = _notesRetardees + 1;
+  if (ms > _attentePireMs) _attentePireMs = ms;
+}
+void noterAbandon() { _notesAbandonnees = _notesAbandonnees + 1; }
 
 // ── Les flux : API ───────────────────────────────────────────────────────────
 int8_t acquerir(uint8_t voix) {
@@ -360,7 +382,10 @@ void manque(int8_t f) {
 
 String diagnostic() {
   String j = "{\"lecteur\":" + String(_lecteurVit ? "true" : "false")
-           + ",\"manques_total\":" + String((unsigned long)_manquesTotal) + ",\"flux\":[";
+           + ",\"manques_total\":" + String((unsigned long)_manquesTotal)
+           + ",\"notes_retardees\":" + String((unsigned long)_notesRetardees)
+           + ",\"attente_pire_ms\":" + String((unsigned long)_attentePireMs)
+           + ",\"notes_abandonnees\":" + String((unsigned long)_notesAbandonnees) + ",\"flux\":[";
   bool premier = true;
   for (uint8_t i = 0; _fl && i < FLUX_MAX; i++) {
     const Flux& x = _fl[i];
