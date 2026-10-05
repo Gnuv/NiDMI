@@ -35,6 +35,24 @@ volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
  * `_failStreak`: reads that failed after all their attempts, in a row — the signature of a
  * card that was pulled out or lost its contact (SdCard watches it). */
 volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 0;
+/* THE BUS SPEED FALLS BACK BY ITSELF: a flaky wire at 20 MHz shows as reads that must be done
+ * again. TROUBLE_LIMIT of them within TROUBLE_WINDOW_MS and the clock is HALVED (down to
+ * MIN_HZ) — slower, but the streams hold; a card that answers badly at 5 MHz is another
+ * problem. It never climbs back by itself (a stable concert beats a fast one). */
+constexpr uint32_t TROUBLE_LIMIT = 3, TROUBLE_WINDOW_MS = 3000, MIN_HZ = 5000000;
+uint32_t _troubleStartMs = 0, _troubleCount = 0;
+volatile uint32_t _fallbacks = 0;
+void _noteTrouble() {
+  const uint32_t now = millis();
+  if (!_troubleCount || now - _troubleStartMs > TROUBLE_WINDOW_MS) { _troubleStartMs = now; _troubleCount = 0; }
+  if (++_troubleCount < TROUBLE_LIMIT || _hz / 2 < MIN_HZ) return;
+  _troubleCount = 0;
+  _hz = _hz / 2;
+  _fallbacks = _fallbacks + 1;
+  NIDMI_WEB_LOG("[SD] lectures a refaire en rafale : l'horloge du bus passe a %lu MHz", (unsigned long)(_hz / 1000000UL));
+}
+volatile uint32_t _forceBad = 0;        // BENCH: the next reads each have their FIRST block corrupted (a noisy bus: one retry each)
+bool              _corruptNext = false;
 volatile bool     _outage = false;      // the bench simulates a card pulled out: every read fails until...
 volatile uint32_t _outageEndMs = 0;     // ... this time (a window, like a real outage: whoever reads, fails)
 constexpr uint32_t CRC_PROVEN = 64;
@@ -113,7 +131,8 @@ bool _block(uint8_t* buf, size_t n) {
   if (tok != DATA_TOKEN) return false;
   _spi->transferBytes(nullptr, buf, n);
   const uint16_t received = _spi->transfer16(0xFFFF);
-  if (received == _crc16(buf, n)) { _crcGood = _crcGood + 1; return true; }
+  if (_corruptNext && n == 512) { _corruptNext = false; }                        // simulated corruption: falls through
+  else if (received == _crc16(buf, n)) { _crcGood = _crcGood + 1; return true; }
   _crcErrors = _crcErrors + 1;
   if (_crcGood >= CRC_PROVEN) { _crcRejected = _crcRejected + 1; return false; }
   return true;
@@ -208,7 +227,8 @@ bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
   _spi->beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
   bool ok = false;
   for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-    if (attempt) _retries = _retries + 1;
+    if (attempt) { _retries = _retries + 1; _noteTrouble(); }
+    else if (_forceBad) { _forceBad = _forceBad - 1; _corruptNext = true; }          // bench: this read's first block is corrupted
     _select();
     if (!_waitReady(300)) { _deselect(); continue; }
     const uint32_t address = _hc ? sector : (sector << 9);
@@ -254,6 +274,7 @@ bool mount(SPIClass& spi, uint8_t cs, uint32_t hz, const char* mountPoint, Strin
   _spi = &spi; _cs = cs; _hz = hz;
   _blocksRead = _crcErrors = _retries = 0;
   _crcGood = _crcRejected = _failStreak = _failTotal = 0;
+  _troubleCount = 0; _fallbacks = 0;
   if (!_initialise(reason)) return false;
 
   if (ff_diskio_get_drive(&_pdrv) != ESP_OK || _pdrv == 0xFF) {
@@ -305,9 +326,12 @@ uint32_t    cmd8Echo()      { return _cmd8Echo; }
 uint32_t    blocksRead()    { return _blocksRead; }
 uint32_t    crcErrors()     { return _crcErrors; }
 uint32_t    retries()       { return _retries; }
+uint32_t    frequency()     { return _hz; }
+uint32_t    fallbacks()     { return _fallbacks; }
 uint32_t    crcRejected()   { return _crcRejected; }
 uint32_t    failStreak()    { return _failStreak; }
 uint32_t    failTotal()     { return _failTotal; }
+void        simulateNoise(uint32_t blocks) { _forceBad = blocks; }
 void        simulateOutage(uint32_t ms) { _outageEndMs = millis() + ms; _outage = true; _failStreak = _failStreak + 1; }   // the first failure is noticed now
 bool        probe() {
   if (!_ready) return false;

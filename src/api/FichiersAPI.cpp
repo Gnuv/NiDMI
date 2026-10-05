@@ -277,6 +277,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
+    if (request->hasParam("simulate_noise"))                           // bench: a noisy bus (blocks read with a bad CRC)
+      SdCard::simulateNoise((uint32_t)request->getParam("simulate_noise")->value().toInt());
     if (request->hasParam("simulate_loss")) {                          // bench: what a pulled card looks like
       uint32_t ms = request->hasParam("ms") ? (uint32_t)request->getParam("ms")->value().toInt() : 1500;
       if (ms > 60000) ms = 60000;

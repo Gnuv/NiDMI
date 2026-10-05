@@ -405,6 +405,7 @@ bool _clipJouable(const Liste& L, uint8_t k) {
  * A voice that chains from one streamed clip to another keeps its stream and repositions
  * it; towards a PSRAM sound, it gives it back. No stream available: the clip does not
  * start (false). */
+static_assert(SdStream::MAX_STREAMS >= LISTES_MAX + 1, "a streamed retrigger needs a stream beyond one per list (SdStream.h)");
 bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   if (!_clipJouable(L, k)) return false;
   const Clip& c = L.clips[k - 1];
@@ -417,9 +418,8 @@ bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
     const uint32_t clipEnd = (c.fin > c.debut && c.fin < n) ? c.fin : (uint32_t)n;
     if (hv.start + hv.frames < clipEnd) {              // the clip outlasts its head: it needs a stream
       if (stream < 0) stream = SdStream::acquire(voiceIndex);
-      if (stream < 0) {
-        NIDMI_WEB_LOG("[audio] %s : plus de flux SD disponible (%u au plus) — clip non joue",
-                      c.son, (unsigned)SdStream::MAX_STREAMS);
+      if (stream < 0) {                                // counted, never logged from the audio task
+        SdStream::recordNoStream();
         return false;
       }
       SdStream::start(stream, c.son, hv.start + hv.frames, clipEnd,

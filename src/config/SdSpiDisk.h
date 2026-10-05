@@ -41,17 +41,26 @@ uint32_t blocksRead();           // 512-byte blocks read
 uint32_t crcErrors();            // CRC16 mismatches
 uint32_t crcRejected();          // ... of which the block was read again (once the card has proven its CRCs)
 uint32_t retries();              // blocks read again after a failure
+/* The clock the bus runs at NOW: it falls back by itself (halved, 5 MHz at the lowest) when
+ * reads must be done again in a burst — a loose wire at 20 MHz — and stays there. */
+uint32_t frequency();
+uint32_t fallbacks();            // how many times it fell back since the mount
 /* Reads that failed after ALL their attempts: in a row (`failStreak`, back to 0 at the next
  * success) and since the mount. The first failure makes SdCard CHECK the card (probe): a
  * reader that fails stops reading, so no streak builds up by itself. */
 uint32_t failStreak();
 uint32_t failTotal();
 /* Reads sector 0, with all the driver's attempts: does the card still answer? A success
- * puts `failStreak` back to 0. The supervisor (SdCard) asks it after any failed read. */
+ * puts `failStreak` back to 0. The supervisor (SdCard) asks it after any failed read, five
+ * times a quarter of a second apart. */
 bool     probe();
 /* BENCH: for the next `ms` milliseconds every read fails on purpose, without touching the bus —
  * what a card pulled out then pushed back looks like to everything above
  * (/api/diag/sd?simulate_loss=1[&ms=...]). */
 void simulateOutage(uint32_t ms);
+/* BENCH: the next `reads` reads each have their first block corrupted (bad CRC), like a noisy
+ * bus — each is read again and succeeds; a burst of them makes the bus clock fall back
+ * (/api/diag/sd?simulate_noise=N). */
+void simulateNoise(uint32_t reads);
 
 }  // namespace SdSpiDisk

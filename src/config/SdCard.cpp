@@ -39,7 +39,11 @@ volatile bool     _lost        = false;
 volatile uint32_t _lostCount   = 0;         // times it was lost since boot
 volatile uint32_t _remounts    = 0;         // times it came back after a loss
 constexpr uint32_t RETRY_MS    = 5000;      // between two mounting attempts, headless
-constexpr uint8_t  PROBES      = 3;         // sector-0 reads, 150 ms apart, that must ALL fail to declare it lost
+/* PROBES sector-0 reads, PROBE_GAP_MS apart, that must ALL fail to declare the card lost — about a
+ * second of silence from it. Shorter would unmount a card that comes back 0.3 s later and kill
+ * the streams the ring (0.74 s) and the reader's retries would have carried through. */
+constexpr uint8_t  PROBES      = 5;
+constexpr uint32_t PROBE_GAP_MS = 250;
 volatile bool     _wantCheck   = false;     // a read failed: is the card still there?
 
 /* THE DIAGNOSTICS, written by the task, read by the web server (diagnostics()).
@@ -81,6 +85,7 @@ void _unmount() {
   if (!_mounted) return;
   _mounted = false;
   _capacity = 0;
+  if (SdSpiDisk::frequency() && SdSpiDisk::frequency() < _hz) _hz = SdSpiDisk::frequency();   // a fallback is kept: the wire has not improved
   SdStream::stopAll();                   // no open file under the unmount
   SdSpiDisk::unmount();
   NIDMI_WEB_LOG("[SD] demontee");
@@ -321,7 +326,9 @@ void _measure() {
     __sync_synchronize();
     _measState = 2;
   };
-  if (_measHz && _measHz != _hz) {                  // another frequency: remount
+  /* Another frequency than the bus RUNS at — the driver may have fallen back by itself, `_hz`
+   * is only what the next mount will ask for: remount. */
+  if (_measHz && _measHz != (_mounted ? SdSpiDisk::frequency() : _hz)) {
     _unmount();
     _hz = _measHz;
     _mount();
@@ -374,7 +381,7 @@ void _measure() {
            "\"over_10ms\":%lu,\"over_30ms\":%lu,\"over_100ms\":%lu,\"middle_seek_us\":%lu,"
            "\"raw_kb_s\":%.0f,\"with_yield_kb_s\":%.0f,\"needed_kb_s\":%.0f,"
            "\"possible_streams\":%.1f}",
-           _measName, (unsigned)fileSize, wav ? "true" : "false", (unsigned long)_hz, (unsigned long)freq,
+           _measName, (unsigned)fileSize, wav ? "true" : "false", (unsigned long)SdSpiDisk::frequency(), (unsigned long)freq,
            (unsigned)channels, (unsigned)total, (unsigned)CHUNK, (unsigned long)n,
            (unsigned long)(n ? sumUs / n : 0), (unsigned long)maxUs,
            (unsigned long)over10, (unsigned long)over30, (unsigned long)over100, (unsigned long)seekUs,
@@ -385,14 +392,15 @@ void _measure() {
                 _measName, raw, real, (unsigned long)maxUs, (unsigned long)seekUs);
 }
 
-/* A read failed: does the card still answer? A glitch (one sector, a corrupted transfer)
- * passes the probe and nothing happens; a card that does not answer PROBES times in a row is
+/* A read failed: does the card still answer? A glitch (one sector, a corrupted transfer, an
+ * outage of a few hundred ms) passes the probe and nothing happens; a card that does not answer
+ * PROBES times in a row is
  * LOST — unmounted here, in the task; the supervisor remounts it. */
 void _check() {
   if (!_mounted) return;
   for (uint8_t i = 0; i < PROBES; i++) {
     if (SdSpiDisk::probe()) return;
-    vTaskDelay(pdMS_TO_TICKS(150));
+    vTaskDelay(pdMS_TO_TICKS(PROBE_GAP_MS));
   }
   _lost = true;
   _lostCount = _lostCount + 1;
@@ -467,7 +475,7 @@ void retryIfDue() {
  * task, never touches the bus. HEADLESS: nothing here waits for an app or a page.
  *   - the card is not mounted: a new attempt every RETRY_MS (a card inserted after the
  *     boot, a module that powers up late, a contact that comes back);
- *   - a read failed: the task CHECKS the card (sector 0, PROBES attempts); if it does not
+ *   - a read failed: the task CHECKS the card (sector 0, PROBES probes); if it does not
  *     answer it was pulled out or lost its contact — it is unmounted (the streams go silent,
  *     the files close) and remounted by the attempts above, then its sounds are read again.
  *     A reader that fails stops reading: no "streak" would ever build up by itself;
@@ -504,6 +512,10 @@ void service() {
     snprintf(frame, sizeof frame, "NIDMI_SD:%s", st);
     nidmi_ws_pousser(frame);
   }
+}
+
+void simulateNoise(uint32_t blocks) {
+  if (_declared && _mounted) SdSpiDisk::simulateNoise(blocks);
 }
 
 void simulateLoss(uint32_t ms) {
@@ -556,7 +568,8 @@ String diagnostics() {
            + ",\"mounted\":" + String(_mounted ? "true" : "false")
            + ",\"pins\":{\"cs\":" + String(_cs) + ",\"sck\":" + String(_sck)
            + ",\"miso\":" + String(_miso) + ",\"mosi\":" + String(_mosi) + "}"
-           + ",\"hz\":" + String((unsigned long)_hz)
+           + ",\"hz\":" + String((unsigned long)(_mounted ? SdSpiDisk::frequency() : _hz))
+           + ",\"hz_fallbacks\":" + String((unsigned long)(_mounted ? SdSpiDisk::fallbacks() : 0))
            + ",\"attempts\":" + String((unsigned long)_attempts)
            + ",\"task\":" + String(_taskAlive ? "true" : "false")
            + ",\"total_kb\":" + String((unsigned long)(_capacity / 1024ULL));

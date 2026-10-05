@@ -108,10 +108,19 @@ struct Stream {
   File             file;
   char             openName[SampleStore::NOM_MAX] = {0};
   uint32_t         readEnd = 0;         // the end it aims for (copy of `endFrame` at the last request)
+  uint32_t         retryAtMs = 0;       // a read failed: not before this time (0: no retry pending)
+  uint8_t          errStreak = 0;       // failed reads in a row; MAX_ERRORS and the stream gives up
 };
+/* A READ THAT FAILS DOES NOT KILL THE STREAM: the reader replaces itself (a failed read leaves
+ * FatFs' position unreliable) and tries again RETRY_MS later — a burst of noise on the bus must
+ * not silence a four-minute clip until its end. The ring holds 0.74 s of audio: a hiccup
+ * shorter than that is inaudible. After MAX_ERRORS in a row (~4 s) the stream gives up; the
+ * card supervisor (SdCard) will have checked the card by then. */
+constexpr uint8_t  MAX_ERRORS = 25;
+constexpr uint32_t RETRY_MS   = 150;
 Stream* _streams = nullptr;           // MAX_STREAMS, likewise
 volatile uint32_t _underrunsTotal = 0;
-volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0, _noHeadNotes = 0, _readErrors = 0;
+volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0, _noHeadNotes = 0, _readErrors = 0, _noStream = 0;
 volatile uint32_t _refusals = 0, _anticipatedRefusals = 0;
 volatile uint32_t _readerAlive = 0;
 volatile bool     _stopReader = false;
@@ -153,6 +162,7 @@ bool _serve(Stream& x) {
       if (x.file) strlcpy(x.openName, name, sizeof(x.openName));
     }
     x.lo = from; x.hi = from; x.readEnd = end;
+    x.retryAtMs = 0; x.errStreak = 0;
     if (!x.file || !x.file.seek(offset + (size_t)from * channels * 2)) {
       NIDMI_WEB_LOG("[SD] flux de %s : placement impossible a la trame %lu", name, (unsigned long)from);
       x.readEnd = from;                                   // nothing to read: silence
@@ -161,6 +171,25 @@ bool _serve(Stream& x) {
     __sync_synchronize();
     x.seqSeen = s;
     return true;
+  }
+  if (x.retryAtMs) {                                      // a read failed a moment ago
+    if ((int32_t)(millis() - x.retryAtMs) < 0) return false;
+    x.retryAtMs = 0;
+    /* REOPEN, then place: a disk error is STICKY in FatFs (`fp->err`) — every later read or
+     * seek on that file object fails, the card back or not. Only a fresh open recovers. */
+    char name[SampleStore::NOM_MAX];
+    strlcpy(name, x.openName, sizeof(name));          // `openName` stays: the next try needs it if this one fails
+    if (x.file) x.file.close();
+    if (name[0]) x.file = SdCard::open(_path(name).c_str());
+    if (!x.file || !x.file.seek(x.dataOffset + (size_t)x.hi * x.channels * 2)) {
+      _readErrors = _readErrors + 1;
+      if (x.errStreak == 0 || x.errStreak % 10 == 9)
+        NIDMI_WEB_LOG("[SD] flux de %s : reprise impossible a la trame %lu (%s)", name, (unsigned long)x.hi, x.file ? "placement" : "ouverture");
+      if (++x.errStreak >= MAX_ERRORS) { x.readEnd = x.hi; return false; }
+      x.retryAtMs = millis() + RETRY_MS;
+      return false;
+    }
+    NIDMI_WEB_LOG("[SD] flux de %s : reprise a la trame %lu apres %u echec(s)", name, (unsigned long)x.hi, (unsigned)x.errStreak);
   }
   uint32_t hi = x.hi;
   if (hi >= x.readEnd || !x.file) return false;           // everything is read
@@ -189,11 +218,14 @@ bool _serve(Stream& x) {
   const uint32_t frames = (uint32_t)(got / ((size_t)x.channels * 2));
   __sync_synchronize();
   x.hi = hi + frames;
-  if (got != bytes) {                                     // end of file, or an error: stop there
-    if (hi + frames < x.endFrame) _readErrors = _readErrors + 1;      // not the end of the clip: the read failed
-    x.readEnd = hi + frames;
+  if (got != bytes) {
+    if (hi + frames >= x.endFrame) { x.readEnd = hi + frames; return false; }     // the end of the clip
+    _readErrors = _readErrors + 1;                        // the read FAILED: keep what came, try again shortly
+    if (++x.errStreak >= MAX_ERRORS) { x.readEnd = hi + frames; return false; }
+    x.retryAtMs = millis() + RETRY_MS;
     return false;
   }
+  x.errStreak = 0;
   return true;
 }
 
@@ -371,6 +403,7 @@ void recordWait(uint32_t ms) {
 }
 void recordDrop() { _droppedNotes = _droppedNotes + 1; }
 void recordNoHead() { _noHeadNotes = _noHeadNotes + 1; }
+void recordNoStream() { _noStream = _noStream + 1; }
 
 // ── Streams: API ─────────────────────────────────────────────────────────────
 int8_t acquire(uint8_t voice) {
@@ -462,6 +495,7 @@ String diagnostics() {
            + ",\"dropped_notes\":" + String((unsigned long)_droppedNotes)
            + ",\"notes_without_head\":" + String((unsigned long)_noHeadNotes)
            + ",\"read_errors\":" + String((unsigned long)_readErrors)
+           + ",\"clips_without_stream\":" + String((unsigned long)_noStream)
            + ",\"refused_heads\":" + String((unsigned long)_refusals)
            + ",\"refused_anticipated\":" + String((unsigned long)_anticipatedRefusals) + ",\"streams\":[";
   bool first = true;

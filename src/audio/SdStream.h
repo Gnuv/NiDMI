@@ -37,7 +37,11 @@
 
 namespace SdStream {
 
-constexpr uint8_t  MAX_STREAMS  = 3;        // simultaneous streams (one per playing playlist voice)
+/* One stream per playing playlist voice: LISTES_MAX lists, plus ONE for the retrigger — a list
+ * that starts a new clip fades the old voice out over 5 ms, and that voice still holds its
+ * stream: the new one needs another. With as many streams as lists, retriggering a list while
+ * all of them play was refused, the old clip was already fading: silence. */
+constexpr uint8_t  MAX_STREAMS  = 5;
 constexpr uint8_t  MAX_HEADS    = 64;       // table entries (a few dozen bytes each)
 constexpr uint32_t HEAD_FRAMES  = 16384;    // a clip's head: 0.37 s at 44.1 kHz
 /* THE HEAD BUDGET, IN BYTES, not a count: a stereo head takes 64 KB, a mono one 32 KB.
@@ -82,6 +86,7 @@ bool     headLoading(int8_t i);                         // requested, not read y
 void     prioritize(int8_t i);                          // a note is waiting for it: read it before the others
 void     recordWait(uint32_t ms);                       // a note waited for its head (diagnostic counters)
 void     recordDrop();                                  // ... or was given up on
+void     recordNoStream();                              // a clip did not start: every stream was taken
 void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
 bool     failedHeads();                                 // some failed head may be read again (SdCard::service asks)
 

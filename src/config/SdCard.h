@@ -33,9 +33,12 @@ namespace SdCard {
 
 constexpr const char* VOLUME_ID = "sd";          // the id /api/fichiers gives it
 constexpr const char* FOLDER    = "/samples";    // same layout as storage
-/* 10 MHz: a breadboard with jumper wires does not always hold 20 MHz.
- * `measure(..., hz)` remounts the card at another frequency to try it. */
-constexpr uint32_t    DEFAULT_FREQUENCY_HZ = 10000000;
+/* 20 MHz: measured 990 KB/s against 680 at 10 MHz (§204) — and FOUR long stereo sounds at
+ * once (4 lists) need 705 KB/s: 10 MHz cannot hold them (measured, §205: thousands of silent
+ * blocks), 20 MHz holds them clean. A loose wire does not always hold 20 MHz: the driver then
+ * HALVES the clock by itself (SdSpiDisk.h, `frequency`) and says so (/api/diag/sd `hz`,
+ * `hz_fallbacks`). `measure(..., hz)` remounts the card at another frequency to try it. */
+constexpr uint32_t    DEFAULT_FREQUENCY_HZ = 20000000;
 
 // The component is declared: its pins are known, the card is to be mounted.
 // Idempotent (boot-time restoration, then an identical re-declaration).
@@ -87,8 +90,11 @@ void   tryMount();
 void   probeWiring();
 bool   measure(const char* name, uint32_t hz);
 // BENCH: for `ms` milliseconds every read fails, as a card pulled out and put back would. An
-// outage longer than the checks (~0.5 s) makes the card be declared lost, unmounted, then
+// outage longer than the checks (~1 s) makes the card be declared lost, unmounted, then
 // remounted; a shorter one is a glitch that passes. (/api/diag/sd?simulate_loss=1[&ms=...])
 void   simulateLoss(uint32_t ms);
+// BENCH: the next `reads` reads each have a corrupted block, read again at once — a noisy bus
+// (/api/diag/sd?simulate_noise=N).
+void   simulateNoise(uint32_t reads);
 
 }  // namespace SdCard
