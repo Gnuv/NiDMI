@@ -1,6 +1,6 @@
 #include "CarteSd.h"
 
-#include <SD.h>
+#include "SdSpiDisque.h"
 #include <SPI.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
@@ -71,7 +71,7 @@ void _demonter() {
   if (!_monte) return;
   _monte = false;
   _total = 0;
-  SD.end();
+  SdSpiDisque::demonter();
   NIDMI_WEB_LOG("[SD] demontee");
 }
 
@@ -256,31 +256,23 @@ void _monter() {
    * bibliotheque SD qui le tient (digitalWrite). Le LIS3DH en SPI partage ce bus
    * sur son propre CS — begin() est sans effet s'il a deja ete ouvert. */
   SPI.begin(_sck, _miso, _mosi, -1);
-  if (!SD.begin(_cs, SPI, _hz)) {
-    _sonder();
-    if (_cmd0 == 0x01) _sonderBrut();                    // elle repond : jusqu'ou va-t-elle ?
-    const char* cause = _cmd0 == 0xFF || _cmd0 < 0
-        ? "aucune reponse a CMD0 : carte absente, ou MISO/MOSI/SCK/CS/alimentation mal cables"
-        : "la carte repond a CMD0 mais ne s'initialise pas : format FAT32 ? carte SDXC ? alimentation ?";
-    snprintf(_raison, sizeof(_raison), "%s", cause);
+  String cause;
+  if (!SdSpiDisque::monter(SPI, _cs, _hz, "/sd", cause)) {
+    /* Elle ne repond pas du tout : la sonde brute dit ce que le bus voit. Elle
+     * repond mais ne s'initialise pas : la trace de l'initialisation a la main. */
+    if (cause.startsWith("CMD0")) _sonder();
+    else { _sonder(); if (_cmd0 == 0x01) _sonderBrut(); }
+    snprintf(_raison, sizeof(_raison), "%s", cause.c_str());
     NIDMI_WEB_LOG("[SD] pas de carte (CS=%u SCK=%u MISO=%u MOSI=%u, %lu MHz) : %s",
                   (unsigned)_cs, (unsigned)_sck, (unsigned)_miso, (unsigned)_mosi,
-                  (unsigned long)(_hz / 1000000UL), cause);
+                  (unsigned long)(_hz / 1000000UL), cause.c_str());
     return;
   }
-  const sdcard_type_t type = SD.cardType();
-  if (type == CARD_NONE) {
-    SD.end();
-    snprintf(_raison, sizeof(_raison), "aucune carte reconnue apres l'initialisation");
-    NIDMI_WEB_LOG("[SD] aucune carte reconnue");
-    return;
-  }
-  _total = SD.cardSize();
+  _total = SdSpiDisque::capacite();
   _monte = true;
-  NIDMI_WEB_LOG("[SD] montee : %s, %lu Mo, a %lu MHz",
-                type == CARD_MMC ? "MMC" : type == CARD_SD ? "SD" : type == CARD_SDHC ? "SDHC" : "?",
-                (unsigned long)(_total / (1024ULL * 1024ULL)),
-                (unsigned long)(_hz / 1000000UL));
+  NIDMI_WEB_LOG("[SD] montee : %s, %lu Mo, a %lu MHz (CMD8 : 0x%lX)",
+                SdSpiDisque::type(), (unsigned long)(_total / (1024ULL * 1024ULL)),
+                (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisque::echoCmd8());
   _aCharger = true;
 }
 
@@ -321,7 +313,7 @@ void _mesurer() {
   }
   if (!_monte) return fin("carte non montee (voir le diagnostic)");
   const String chemin = String(DOSSIER) + "/" + _mesNom;
-  File f = SD.open(chemin.c_str(), FILE_READ);
+  File f = SdSpiDisque::ouvrir(chemin.c_str());
   if (!f || f.isDirectory()) return fin("fichier introuvable dans /samples");
   const size_t taille = f.size();
   uint16_t canaux = 0; uint32_t freq = 0, donnees = 0; String raison;
@@ -468,7 +460,7 @@ bool mesurer(const char* nom, uint32_t hz) {
 
 File ouvrir(const char* chemin) {
   if (!_monte) return File();
-  return SD.open(chemin, FILE_READ);
+  return SdSpiDisque::ouvrir(chemin);
 }
 
 String diagnostic() {
@@ -485,6 +477,11 @@ String diagnostic() {
   if (_cmd0 >= 0)
     j += ",\"sonde\":{\"cmd0\":" + String(_cmd0) + ",\"cmd8\":" + String(_cmd8)
        + ",\"cmd8_echo\":" + String((unsigned long)_cmd8Echo) + "}";
+  if (_monte)
+    j += ",\"pilote\":{\"type\":\"" + String(SdSpiDisque::type()) + "\",\"echo_cmd8\":" + String((unsigned long)SdSpiDisque::echoCmd8())
+       + ",\"blocs_lus\":" + String((unsigned long)SdSpiDisque::lectures())
+       + ",\"crc_erreurs\":" + String((unsigned long)SdSpiDisque::erreursCrc())
+       + ",\"relectures\":" + String((unsigned long)SdSpiDisque::relectures()) + "}";
   if (_acmd41Tours >= 0) {
     j += ",\"init_a_la_main\":{\"cmd0\":\"" + String(_brut[0]) + "\",\"cmd8\":\"" + String(_brut[1])
        + "\",\"cmd58\":\"" + String(_brut[2]) + "\",\"cmd55\":\"" + String(_brut[3])
