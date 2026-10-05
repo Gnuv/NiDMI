@@ -258,7 +258,7 @@ template <typename F> void parcourirCarteSd(F voir) {
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
     const String nom = baseDe(f.path());
-    if (genreTeleverse(nom) != Genre::Son) continue;
+    if (nom.startsWith(".") || genreTeleverse(nom) != Genre::Son) continue;   // « ._x.wav » de macOS : pas un son
     voir(String(SampleStore::DOSSIER) + "/" + nom, (size_t)f.size());
   }
 }

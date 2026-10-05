@@ -75,9 +75,11 @@ const char* _base(const char* nom) {
   return b ? b + 1 : nom;
 }
 String _chemin(const char* nom) { return String(DOSSIER) + "/" + _base(nom); }
+/* Un .wav a lire : pas un fichier cache. macOS pose a cote de chaque fichier copie
+ * sur une carte FAT un « ._nom.wav » de metadonnees (4 Ko) — jamais un son. */
 bool _estWav(const char* nom) {
   const size_t n = strlen(nom);
-  return n > 4 && !strcasecmp(nom + n - 4, ".wav");
+  return n > 4 && nom[0] != '.' && !strcasecmp(nom + n - 4, ".wav");
 }
 
 uint32_t _le32(const uint8_t* p) { return p[0] | (p[1]<<8) | (p[2]<<16) | ((uint32_t)p[3]<<24); }
