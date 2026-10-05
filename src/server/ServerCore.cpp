@@ -460,13 +460,34 @@ namespace {
         g_abosTous = tous;
     }
 
+    /* LES PAGES, PAS LES SOCKETS (MESURES §203). Une page tient jusqu'a deux
+     * sockets : celle d'AudioBoard, qui se declare, et celle de la console d'io.js,
+     * qui ne dit que son jeton. Les sockets qui portent le MEME jeton sont une seule
+     * page ; une socket sans jeton — une page d'avant le concert, un outil — est une
+     * page a elle seule. La liste et son nombre comptent les pages ; le registre
+     * garde toutes les sockets (huit au plus : c'est la borne de la memoire).
+     * Sous le verrou du registre. */
+    bool memeOnglet(uint8_t a, uint8_t b) {
+        return g_infos && g_infos[a].jeton[0] && !strcmp(g_infos[a].jeton, g_infos[b].jeton);
+    }
+    uint8_t nombreDePages() {
+        uint8_t n = 0;
+        for (uint8_t i = 0; i < g_nOnglets; i++) {
+            bool deja = false;
+            for (uint8_t j = 0; j < i && !deja; j++) deja = memeOnglet(i, j);
+            if (!deja) n++;
+        }
+        return n;
+    }
+
     /* « la liste a change » : un evenement minuscule, jamais la liste. Appele
-     * sous le verrou du registre — nidmi_ws_pousser n'en prend aucun. */
+     * sous le verrou du registre — nidmi_ws_pousser n'en prend aucun. Le nombre
+     * est celui des PAGES (§203). */
     void annoncerClients() {
         g_generationClients = g_generationClients + 1;
         char trame[40];
         snprintf(trame, sizeof trame, "NIDMI_CLIENTS:%u:%u",
-                 (unsigned)g_nOnglets, (unsigned)g_generationClients);
+                 (unsigned)nombreDePages(), (unsigned)g_generationClients);
         nidmi_ws_pousser(trame);
     }
 }
@@ -642,20 +663,42 @@ void nidmi_ws_client_etat(uint32_t id, const char* texte) {
 
 void nidmi_ws_clients_ecrire(String& j) {
     VerrouOnglets verrou;
-    j += "\"n\":" + String((unsigned)g_nOnglets);
+    /* « n » : les PAGES (§203) ; « connexions » : les sockets, ce que la memoire borne. */
+    j += "\"n\":" + String((unsigned)nombreDePages());
+    j += ",\"connexions\":" + String((unsigned)g_nOnglets);
     j += ",\"generation\":" + String((unsigned)g_generationClients);
     j += ",\"clients\":[";
     const uint32_t maintenant = millis();
+    bool premier = true;
     for (uint8_t i = 0; i < g_nOnglets; i++) {
-        if (i) j += ",";
+        /* Une page s'ecrit a sa PREMIERE socket ; celles qui portent son jeton s'y fondent. */
+        bool deja = false;
+        for (uint8_t k = 0; k < i && !deja; k++) deja = memeOnglet(i, k);
+        if (deja) continue;
+        if (!premier) j += ",";
+        premier = false;
         if (!g_infos) { j += "{}"; continue; }
-        const InfoOnglet& o = g_infos[i];
+        /* Sa socket PRINCIPALE : celle qui s'est declaree (elle a un nom), sinon la
+         * premiere. Ce que dit la page — nom, mode, premier plan, revision — vient
+         * d'elle ; l'age est celui de la plus ancienne socket, les abonnements sont
+         * ceux de toutes. */
+        uint8_t p = i, connexions = 0, abos = 0;
+        uint32_t age = 0;
+        for (uint8_t k = i; k < g_nOnglets; k++) {
+            if (k != i && !memeOnglet(i, k)) continue;
+            connexions++;
+            abos |= g_abos[k];
+            const uint32_t a = maintenant - g_infos[k].depuis;
+            if (a > age) age = a;
+            if (!g_infos[p].nom[0] && g_infos[k].nom[0]) p = k;
+        }
+        const InfoOnglet& o = g_infos[p];
         const IPAddress ip((uint32_t)o.ip);
         /* Le cable ou le WiFi : la carte le sait par l'adresse locale que cette
          * connexion a empruntee (le meme calcul que /api/interface). Le pointeur
          * du client est valide tant qu'on tient le verrou : le destructeur
          * attend ce meme verrou (voir « LES ONGLETS »). */
-        AsyncWebSocketClient* c = g_onglets[i];
+        AsyncWebSocketClient* c = g_onglets[p];
         const bool cable = (c && c->client())
                          ? nidmi_usbnet::parLeCable(c->client()->localIP(), ip) : false;
         char rev[9];
@@ -665,17 +708,18 @@ void nidmi_ws_clients_ecrire(String& j) {
         j += ",\"nom\":\""; j += o.nom; j += "\"";
         j += ",\"ip\":\""; j += ip.toString(); j += "\"";
         j += ",\"cable\":"; j += cable ? "true" : "false";
-        j += ",\"depuis_s\":" + String((unsigned)((maintenant - o.depuis) / 1000));
+        j += ",\"depuis_s\":" + String((unsigned)(age / 1000));
         j += ",\"mode\":\""; j += (o.mode == 1 ? "edit" : o.mode == 2 ? "regie" : o.mode == 3 ? "scene" : ""); j += "\"";
         j += ",\"visible\":"; j += (o.visible == 1 ? "true" : o.visible == 2 ? "false" : "null");
         j += ",\"visible_depuis_s\":" + String(o.visible ? (unsigned)((maintenant - o.changementVisible) / 1000) : 0u);
         j += ",\"rev\":\""; j += (o.aRev ? rev : ""); j += "\"";
-        /* Ce a quoi il est abonne (§200) : ce qu'il recoit de plus que les autres. */
+        /* Ce a quoi elle est abonnee (§200) : ce qu'elle recoit de plus que les autres,
+         * par n'importe laquelle de ses sockets. */
         j += ",\"abonnements\":[";
-        j += (g_abos[i] & NIDMI_ABO_BROCHES) ? "\"broches\"" : "";
-        j += ((g_abos[i] & NIDMI_ABO_BROCHES) && (g_abos[i] & NIDMI_ABO_CONSOLE)) ? "," : "";
-        j += (g_abos[i] & NIDMI_ABO_CONSOLE) ? "\"console\"" : "";
-        j += "]}";
+        j += (abos & NIDMI_ABO_BROCHES) ? "\"broches\"" : "";
+        j += ((abos & NIDMI_ABO_BROCHES) && (abos & NIDMI_ABO_CONSOLE)) ? "," : "";
+        j += (abos & NIDMI_ABO_CONSOLE) ? "\"console\"" : "";
+        j += "],\"connexions\":" + String((unsigned)connexions) + "}";
     }
     j += "]";
 }

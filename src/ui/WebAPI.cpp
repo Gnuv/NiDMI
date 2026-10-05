@@ -196,7 +196,8 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 
         /* CE QUE L'ONGLET DIT DE LUI (MESURES §199) : « CLIENT:<jeton>|<nom>|<mode>|
          * <visible>|<rev> ». Il n'y a rien a repondre : la carte retient, et dit a
-         * tous que la liste a change. */
+         * tous que la liste a change. Un jeton SEUL (« CLIENT:<jeton> ») rattache cette
+         * socket a sa page sans rien dire d'autre : celle de la console d'io.js (§203). */
         if (message.startsWith("CLIENT:")) {
             if (client) nidmi_ws_client_etat(client->id(), message.c_str() + 7);
             return;

@@ -10,7 +10,8 @@
  *
  *   GET  /api/verrou              l'etat : verrouillee, par, depuis_s
  *   POST /api/verrou  etat=on|off [par=…]
- *   GET  /api/clients             les onglets connectes, et ce qu'ils disent
+ *   GET  /api/clients             les pages connectees, et ce qu'elles disent (une ligne
+ *                                 par page : ses sockets sont fondues par jeton, §203)
  *   POST /api/diag/journal  texte=…   une ligne dans la console (MESURES §200)
  *
  * Le verrou est un geste de jeu pour la garde (Concert.cpp) : sans quoi on ne le

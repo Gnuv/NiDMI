@@ -188,9 +188,17 @@ void nidmi_ws_client_parti(AsyncWebSocketClient* client);    // WS_EVT_DISCONNEC
  * trame est minuscule, et l'onglet qui n'affiche pas la liste n'a rien a lire.
  *
  * Les informations sont en PSRAM (une quinzaine d'octets par onglet n'ont pas a
- * peser sur le plus gros bloc contigu), sous le verrou du registre. */
+ * peser sur le plus gros bloc contigu), sous le verrou du registre.
+ *
+ * UNE LIGNE PAR PAGE (MESURES §203). Une page tient jusqu'a deux sockets — celle
+ * d'AudioBoard, qui se declare, et celle de la console d'io.js, qui ne dit que son
+ * jeton : « CLIENT:<jeton> » seul rattache une socket a sa page, sans rien dire
+ * d'autre. Les sockets qui portent le meme jeton n'en font qu'une dans la liste, et
+ * dans le nombre que la carte annonce ; une socket sans jeton (une page d'avant le
+ * concert, un outil) est une page a elle seule. Le registre garde toutes les sockets :
+ * « connexions » les compte, c'est ce que la memoire borne. */
 void nidmi_ws_client_etat(uint32_t id, const char* texte);     // async_tcp : ce que l'onglet dit de lui
-void nidmi_ws_clients_ecrire(String& j);                       // « "n":…,"generation":…,"clients":[…] », sans accolades
+void nidmi_ws_clients_ecrire(String& j);                       // « "n":…,"connexions":…,"generation":…,"clients":[…] », sans accolades
 
 /* ── LES ABONNEMENTS : A CHAQUE ONGLET LES SIENS (MESURES §200) ──────────────
  *
