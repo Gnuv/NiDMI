@@ -16,6 +16,8 @@
 #include <new>
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
+#include "FluxSD.h"
+#include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
 #include <Preferences.h>
@@ -275,6 +277,14 @@ struct VoixEch {
   uint32_t debutT = 0;
   uint32_t finT   = 0;
   float    fondu  = 0.0f;
+  /* UN CLIP LU DEPUIS LA CARTE SD, EN FLUX (FluxSD.h) : `tete` (>= 0) dit qu'il vient
+   * de sa tete — [teteD, teteD + teteN), en PSRAM —, puis du tampon du flux `flux`
+   * (-1 : la tete suffit, le clip est plus court). Une voix a PSRAM (tete < 0) lit le
+   * magasin comme avant. */
+  int8_t          flux   = -1;
+  int8_t          tete   = -1;
+  const int16_t*  tetePcm = nullptr;
+  uint32_t        teteD  = 0, teteN = 0;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
@@ -310,6 +320,7 @@ struct Clip {
   float    debutS, finS;                 // ce que dit la cue, en secondes
   bool     boucle;
   int8_t   iEch;                         // resolu : -1, la carte n'a pas ce son
+  int8_t   tete;                         // un son en flux : sa tete (FluxSD), -1 sinon
   uint32_t debut, fin;                   // resolus, en trames du fichier (fin 0 : au bout)
 };
 struct Liste {
@@ -377,17 +388,50 @@ bool _clipJouable(const Liste& L, uint8_t k) {
   if (k == 0 || k > L.n) return false;
   const Clip& c = L.clips[k - 1];
   if (c.iEch < 0 || !SampleStore::lisible((uint8_t)c.iEch)) return false;
+  /* Un son lu en flux ne part que de sa TETE, deja en PSRAM : sans elle (pas encore lue
+   * par la tache de la carte), le clip ne se joue pas — du silence, pas une attente. */
+  if (SampleStore::estFlux((uint8_t)c.iEch) && !FluxSD::tetePrete(c.tete)) return false;
   const size_t n = SampleStore::trames((uint8_t)c.iEch);
   const size_t fin = (c.fin > c.debut && c.fin < n) ? c.fin : n;
   return (size_t)c.debut + 2 <= fin;
 }
 
 /* Pose sur la voix le son et la selection du clip k — pas son gain. Faux, et
- * la voix intacte, si le clip ne se joue pas. */
+ * la voix intacte, si le clip ne se joue pas.
+ *
+ * UN SON EN FLUX (FluxSD.h) : la voix part de la TETE du clip, deja en PSRAM, et un flux
+ * se place derriere — a la fin de la tete — pour remplir le tampon. La voix qui enchaine
+ * d'un clip en flux a un autre garde son flux et le replace ; vers un son en PSRAM, elle
+ * le rend. Plus de flux disponible : le clip ne part pas (faux). */
 bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   if (!_clipJouable(L, k)) return false;
   const Clip& c = L.clips[k - 1];
   const size_t n = SampleStore::trames((uint8_t)c.iEch);
+  const uint8_t idx = (uint8_t)(&vo - voixEch);
+  int8_t flux = FluxSD::possede(vo.flux, idx) ? vo.flux : (int8_t)-1;
+  FluxSD::TeteVue tv{nullptr, 0, 0};
+  if (SampleStore::estFlux((uint8_t)c.iEch)) {
+    FluxSD::teteVue(c.tete, tv);                       // prete : _clipJouable l'a verifiee
+    const uint32_t finClip = (c.fin > c.debut && c.fin < n) ? c.fin : (uint32_t)n;
+    if (tv.debut + tv.trames < finClip) {              // le clip depasse sa tete : il lui faut un flux
+      if (flux < 0) flux = FluxSD::acquerir(idx);
+      if (flux < 0) {
+        NIDMI_WEB_LOG("[audio] %s : plus de flux SD disponible (%u au plus) — clip non joue",
+                      c.son, (unsigned)FluxSD::FLUX_MAX);
+        return false;
+      }
+      FluxSD::demarrer(flux, c.son, tv.debut + tv.trames, finClip,
+                       SampleStore::stereo((uint8_t)c.iEch) ? 2 : 1,
+                       SampleStore::offsetDonnees((uint8_t)c.iEch));
+    } else if (flux >= 0) {                            // la tete suffit : le flux est rendu
+      FluxSD::liberer(flux); flux = -1;
+    }
+  } else if (flux >= 0) {                              // un son en PSRAM : plus de flux
+    FluxSD::liberer(flux); flux = -1;
+  }
+  vo.flux = flux;
+  vo.tete = SampleStore::estFlux((uint8_t)c.iEch) ? c.tete : (int8_t)-1;
+  vo.tetePcm = tv.pcm; vo.teteD = tv.debut; vo.teteN = tv.trames;
   vo.iEch   = (uint8_t)c.iEch;
   vo.pas    = double(SampleStore::frequence(vo.iEch)) / double(srReel);
   vo.pos    = double(c.debut);
@@ -517,7 +561,33 @@ char echantillonClavier[48] = {0};
 volatile uint32_t blocClavier = 0;
 volatile float    gainClavier = 1.0f;
 
+/* Une trame d'une voix en flux : sa tete d'abord ([teteD, teteD + teteN), en PSRAM), puis
+ * le tampon du flux. Faux : pas encore (ou plus) la — l'appelant rend du silence. */
+static inline bool _lireTete(const VoixEch& vo, uint32_t t, int16_t& g, int16_t& d) {
+  if (t >= vo.teteD && t - vo.teteD < vo.teteN) {
+    const uint32_t j = t - vo.teteD;
+    if (SampleStore::stereo(vo.iEch)) { g = vo.tetePcm[j * 2]; d = vo.tetePcm[j * 2 + 1]; }
+    else                              { g = d = vo.tetePcm[j]; }
+    return true;
+  }
+  return vo.flux >= 0 && FluxSD::lire(vo.flux, t, g, d);
+}
+
+/* LES FLUX, A CHAQUE BLOC (avant de rendre) : un flux dont la voix n'est plus — finie,
+ * coupee, volee, ou le moteur change — est rendu, et le lecteur ferme son fichier ; et
+ * chaque voix en flux dit ou elle en est, ce qui regle jusqu'ou le lecteur remplit. */
+void _balayerFlux() {
+  for (int8_t f = 0; f < (int8_t)FluxSD::FLUX_MAX; f++) {
+    if (!FluxSD::actif(f)) continue;
+    const VoixEch& vo = voixEch[FluxSD::voixDe(f)];
+    if (!(vo.actif && vo.flux == f)) FluxSD::liberer(f);
+  }
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (voixEch[v].actif && voixEch[v].flux >= 0) FluxSD::position(voixEch[v].flux, (uint32_t)voixEch[v].pos);
+}
+
 void rendreSample() {
+  uint8_t manques = 0;                  // les voix en flux qui ont manque de donnees ce bloc
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
@@ -527,9 +597,11 @@ void rendreSample() {
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
-      const int16_t* pcm = SampleStore::donnees(vo.iEch);
+      /* UNE VOIX EN FLUX n'a pas de PCM en memoire : elle lit sa tete, puis le tampon du
+       * flux (_lireTete). Les autres lisent le magasin, comme toujours. */
+      const int16_t* pcm = (vo.tete >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
       size_t         n   = SampleStore::trames(vo.iEch);
-      if (!pcm || n < 2) { vo.actif = false; continue; }
+      if ((vo.tete < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
       /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
        * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
        * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
@@ -540,10 +612,11 @@ void rendreSample() {
         if (vo.boucle) {
           vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
           if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
+          if (vo.flux >= 0) FluxSD::redemarrer(vo.flux);   // la voix repart de la tete : le flux se replace
         } else if (vo.liste >= 0 && _clipSuivant(vo)) {
-          pcm = SampleStore::donnees(vo.iEch);
+          pcm = (vo.tete >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
           n   = SampleStore::trames(vo.iEch);
-          if (!pcm || n < 2) { vo.actif = false; continue; }
+          if ((vo.tete < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
         } else { vo.actif = false; continue; }
       }
       if (vo.fondu > 0.0f) {
@@ -562,7 +635,16 @@ void rendreSample() {
       const float  f = float(vo.pos - double(k));
       const bool  st = SampleStore::stereo(vo.iEch);
       int32_t eg, ed;
-      if (st) {
+      if (vo.tete >= 0) {
+        /* La tete, puis le tampon ; ce qui manque est du SILENCE — jamais une attente. */
+        int16_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
+        const bool ok0 = _lireTete(vo, (uint32_t)k, l0, r0);
+        const bool ok1 = ok0 && _lireTete(vo, (uint32_t)k + 1, l1, r1);
+        if (!ok0)      manques |= (uint8_t)(1u << v);
+        else if (!ok1) { l1 = l0; r1 = r0; }
+        eg = (int32_t)(l0 + f * (l1 - l0));
+        ed = (int32_t)(r0 + f * (r1 - r0));
+      } else if (st) {
         eg = (int32_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
         ed = (int32_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
       } else {
@@ -584,6 +666,9 @@ void rendreSample() {
     if (d >  32767) d =  32767; else if (d < -32768) d = -32768;
     entrelace[i * 2] = (int16_t)g; entrelace[i * 2 + 1] = (int16_t)d;
   }
+  if (manques)
+    for (uint8_t v = 0; v < VOIX_MAX; v++)
+      if (manques & (1u << v)) FluxSD::manque(voixEch[v].flux);
 }
 
 void rendrePlaits() {
@@ -695,6 +780,7 @@ void boucleAudio(void*) {
     for (uint8_t v = 0; v < VOIX_MAX; v++)
       if (voixEch[v].actif && !SampleStore::lisible(voixEch[v].iEch)) voixEch[v].actif = false;
 
+    _balayerFlux();
     const uint32_t t0 = millis();
     const uint32_t u0 = micros();
     const uint32_t e0 = ecrituresFlash;
@@ -1228,6 +1314,12 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   if (moteurCourant != -2) return false;
   const int i = SampleStore::indexDe(nom);
   if (i < 0) return false;
+  if (SampleStore::estFlux((uint8_t)i)) {
+    /* Un son lu en flux n'a pas de PCM en memoire : il ne se transpose pas, ne se joue pas
+     * sur une note — seule une play list le sait lire (FluxSD.h). Dit, pas muet. */
+    NIDMI_WEB_LOG("[audio] %s est lu en flux depuis la SD : seulement dans une play list", nom);
+    return false;
+  }
   VoixEch* vo = _voixLibre();
   /* ETEINTE PENDANT QU'ON LA REECRIT. La tache audio, plus prioritaire, peut
    * lire la voix entre deux ecritures — celles d'une cue ou d'un apercu
@@ -1236,6 +1328,7 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
    * interdit au compilateur de supprimer ou de deplacer l'extinction. */
   vo->actif  = false;
   __sync_synchronize();
+  vo->flux = -1; vo->tete = -1;        // une voix volee a un clip en flux ne garde ni son flux ni sa tete
   vo->iEch   = (uint8_t)i;
   vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
              * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
@@ -1429,8 +1522,34 @@ Champs _champs(const String& params) {
 
 /* Le son d'un clip, cherche dans le magasin ; ses secondes, en trames DU
  * FICHIER. Refait quand un son arrive ou part (_reresoudre). */
+/* La tete d'un clip en flux — demandee a la tache de la carte, qui la lit (FluxSD.h).
+ * La table est pleine : on eleve d'abord les tetes que plus rien ne nomme (aucune banque,
+ * aucune voix) et qui ne sont plus demandees depuis 5 s, puis on redemande. Sous
+ * verrouListes, comme tous les appelants de _resoudre. */
+bool _teteReferencee(int8_t t) {
+  for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif && voixEch[v].tete == t) return true;
+  if (banques)
+    for (int b = 0; b < 2; b++)
+      for (uint8_t li = 0; li < banques[b].n; li++)
+        for (uint8_t k = 0; k < banques[b].listes[li].n; k++)
+          if (banques[b].listes[li].clips[k].tete == t) return true;
+  return false;
+}
+
+int8_t _teteDe(const char* son, uint32_t debut) {
+  int8_t t = FluxSD::demanderTete(son, debut);
+  if (t < 0) {
+    for (int8_t i = 0; i < (int8_t)FluxSD::TETES_MAX; i++)
+      if (FluxSD::teteUtilisee(i) && FluxSD::teteAgeMs(i) > 5000 && !_teteReferencee(i)) FluxSD::libererTete(i);
+    t = FluxSD::demanderTete(son, debut);
+  }
+  if (t < 0) NIDMI_WEB_LOG("[SD] %s : la table des tetes est pleine (%u clips en flux au plus)",
+                           son, (unsigned)FluxSD::TETES_MAX);
+  return t;
+}
+
 void _resoudre(Clip& c) {
-  c.iEch = -1; c.debut = 0; c.fin = 0;
+  c.iEch = -1; c.debut = 0; c.fin = 0; c.tete = -1;
   if (!c.son[0]) return;
   const int i = SampleStore::indexDe(c.son);
   if (i < 0) return;
@@ -1438,6 +1557,7 @@ void _resoudre(Clip& c) {
   c.iEch  = (int8_t)i;
   c.debut = (c.debutS > 0.0f) ? (uint32_t)(c.debutS * f + 0.5f) : 0;
   c.fin   = (c.finS   > 0.0f) ? (uint32_t)(c.finS   * f + 0.5f) : 0;
+  if (SampleStore::estFlux((uint8_t)i)) c.tete = _teteDe(c.son, c.debut);
 }
 
 /* La liste i des champs, dans L — tous ses champs poses. Les sons que la

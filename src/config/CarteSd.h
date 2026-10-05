@@ -53,6 +53,8 @@ void reessayer();
 
 /* SampleStore a fini de lire storage : les sons de la carte peuvent suivre. */
 void chargerSons();
+/* Des TETES de clips en flux sont demandees (FluxSD.h) : la tache les lit, une par une. */
+void chargerTetes();
 
 // Ouvre un fichier de la carte en lecture ; un File vide si elle n'est pas montee.
 File ouvrir(const char* chemin);

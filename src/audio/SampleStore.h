@@ -94,7 +94,8 @@ uint8_t chargerTout();
 // Les sons de la CARTE SD (CarteSd) que le magasin n'a pas encore : leurs noms,
 // pour que la tâche de la carte les installe un à un (installer(…, true)).
 uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max);
-/* Le plafond du prechargement depuis la SD : un son, et tous ensemble. */
+/* Le plafond du PRECHARGEMENT depuis la SD : un son, et tous ensemble. Au-dela, un son
+ * se joue en flux (FluxSD.h) plutot que d'etre garde en PSRAM. */
 constexpr size_t PRECHARGE_SON_MAX = 1536 * 1024;
 constexpr size_t PRECHARGE_SD_MAX  = 3 * 1024 * 1024;
 // L'en-tete d'un WAV : f reste au debut des donnees. Faux (et `raison`) si ce n'est pas du PCM 16 bits.
@@ -122,6 +123,10 @@ void liberer(int i);
 uint8_t         nombreCharges();               // les emplacements lisibles
 int             indexDe(const char* nom);      // -1 si absent
 bool            lisible(uint8_t i);            // faux : retiré, ou vide
+// Un son de la SD lu EN FLUX (FluxSD) : lisible, des trames, une fréquence — mais pas de
+// données en PSRAM (`donnees` rend nul). `offsetDonnees` : l'octet où elles commencent.
+bool            estFlux(uint8_t i);
+uint32_t        offsetDonnees(uint8_t i);
 const int16_t*  donnees(uint8_t i);            // en PSRAM ; nul si pas lisible
 size_t          trames(uint8_t i);
 bool            stereo(uint8_t i);

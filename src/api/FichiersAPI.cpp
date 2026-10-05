@@ -354,6 +354,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
                  CarteSd::VOLUME, (unsigned)octets);
       if (charges)
         e.formater(",\"lisible\":%s", SampleStore::indexDe(nom.c_str()) >= 0 ? "true" : "false");
+      { const int fi = SampleStore::indexDe(nom.c_str());
+        if (fi >= 0 && SampleStore::estFlux((uint8_t)fi)) e.ajouter(",\"flux\":true"); }   // lu en flux, jamais en PSRAM
       const char* par = usageDe(u, nu, nom);
       if (par) { e.ajouter(",\"utilise_par\":"); e.chaine(par); }
       e.ajouter("}");

@@ -9,6 +9,7 @@
 
 #include "../audio/AudioEngine.h"
 #include "../audio/SampleStore.h"
+#include "../audio/FluxSD.h"
 #include "../server/WebDebugConsole.h"
 
 namespace CarteSd {
@@ -28,6 +29,7 @@ volatile bool     _aMonter   = false;
 volatile bool     _aCharger  = false;
 volatile bool     _aMesurer  = false;
 volatile bool     _aCablage  = false;
+volatile bool     _aTetes    = false;
 volatile uint32_t _actif     = 0;          // la tache vit : une seule a la fois
 volatile uint32_t _dernierEssaiMs = 0;
 volatile uint32_t _essais    = 0;
@@ -274,6 +276,7 @@ void _monter() {
                 SdSpiDisque::type(), (unsigned long)(_total / (1024ULL * 1024ULL)),
                 (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisque::echoCmd8());
   _aCharger = true;
+  _aTetes = true;                                       // des tetes de clips attendaient peut-etre la carte
 }
 
 /* Les sons de la carte, un par un : chacun passe par echantillonArrive(), le meme
@@ -376,12 +379,13 @@ void _tache(void*) {
     if (_aMonter)   { _aMonter   = false; _monter();    continue; }
     if (_aMesurer)  { _aMesurer  = false; _mesurer();   continue; }
     if (_aCablage)  { _aCablage  = false; if (_declaree && !_monte) _sonderCablage(); continue; }
+    if (_aTetes)    { _aTetes    = false; FluxSD::chargerTetes(); continue; }
     if (_aCharger)  { _aCharger  = false; _chargerSons(); continue; }
     break;
   }
   __sync_lock_release(&_actif);
   // Un drapeau leve entre le dernier tour et la liberation : on repart.
-  if (_aDemonter || _aMonter || _aCharger || _aMesurer || _aCablage) _lancer();
+  if (_aDemonter || _aMonter || _aCharger || _aMesurer || _aCablage || _aTetes) _lancer();
   vTaskDelete(nullptr);
 }
 
@@ -442,6 +446,11 @@ void essayer() {
   _lancer();
 }
 
+void chargerTetes() {
+  _aTetes = true;
+  _lancer();
+}
+
 void chargerSons() {
   if (!_monte) return;
   _aCharger = true;
@@ -482,6 +491,7 @@ String diagnostic() {
        + ",\"blocs_lus\":" + String((unsigned long)SdSpiDisque::lectures())
        + ",\"crc_erreurs\":" + String((unsigned long)SdSpiDisque::erreursCrc())
        + ",\"relectures\":" + String((unsigned long)SdSpiDisque::relectures()) + "}";
+  j += ",\"flux\":" + FluxSD::diagnostic();
   if (_acmd41Tours >= 0) {
     j += ",\"init_a_la_main\":{\"cmd0\":\"" + String(_brut[0]) + "\",\"cmd8\":\"" + String(_brut[1])
        + "\",\"cmd58\":\"" + String(_brut[2]) + "\",\"cmd55\":\"" + String(_brut[3])

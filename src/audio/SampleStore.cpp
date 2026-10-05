@@ -49,6 +49,8 @@ struct Echantillon {
   uint32_t freq   = 48000;
   char     nom[NOM_MAX] = {0};
   bool     sd     = false;      // lu depuis la carte SD (CarteSd), pas depuis storage
+  bool     flux   = false;      // lu EN FLUX (FluxSD) : aucune donnee en PSRAM, pcm nul
+  uint32_t offset = 0;          // flux : l'octet ou commencent les donnees dans le fichier
   volatile bool pret = false;
 };
 Echantillon      _ech[SAMPLES_MAX];
@@ -98,7 +100,7 @@ int _vide() {
 void _publier(int i, const Echantillon& e) {
   Echantillon& d = _ech[i];
   d.pcm = e.pcm; d.trames = e.trames; d.octets = e.octets;
-  d.stereo = e.stereo; d.freq = e.freq; d.sd = e.sd;
+  d.stereo = e.stereo; d.freq = e.freq; d.sd = e.sd; d.flux = e.flux; d.offset = e.offset;
   memcpy(d.nom, e.nom, sizeof(d.nom));
   __sync_synchronize();
   d.pret = true;
@@ -165,6 +167,29 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
   if (!f) { raison = "fichier introuvable"; return false; }
   uint16_t canaux; uint32_t freq, tailleData;
   if (!_lireEntete(f, canaux, freq, tailleData, raison)) { f.close(); return false; }
+
+  /* UN SON DE LA SD QUI NE TIENT PAS EN PSRAM se joue EN FLUX : on n'en garde que
+   * l'en-tete (sa duree, sa frequence, ou commencent les donnees), aucune donnee. La
+   * PSRAM est commune — tampons du serveur web, banques de play list, console — : la
+   * SD ne doit pas la vider. Plus gros que PRECHARGE_SON_MAX, ou au-dela de
+   * PRECHARGE_SD_MAX en tout. Seule une play list sait le jouer (FluxSD.h). */
+  if (carteSd) {
+    size_t cumul = 0;
+    for (int j = 0; j < SAMPLES_MAX; j++) if (_ech[j].pret && _ech[j].sd && !_ech[j].flux) cumul += _ech[j].octets;
+    if (tailleData > PRECHARGE_SON_MAX || cumul + tailleData > PRECHARGE_SD_MAX) {
+      dest.pcm = nullptr; dest.octets = 0; dest.flux = true; dest.sd = true;
+      dest.offset = (uint32_t)f.position();
+      dest.stereo = (canaux == 2);
+      dest.freq   = freq ? freq : 48000;
+      dest.trames = tailleData / (2 * canaux);
+      strlcpy(dest.nom, nom, sizeof(dest.nom));
+      f.close();
+      NIDMI_WEB_LOG("[samples] %s : %u Ko, %u trames a %u Hz, %s — lu EN FLUX depuis la carte SD",
+                    dest.nom, (unsigned)(tailleData / 1024), (unsigned)dest.trames, (unsigned)dest.freq,
+                    dest.stereo ? "stereo" : "mono");
+      return true;
+    }
+  }
 
   // PSRAM : 8,25 Mo libres pendant que le tas interne se bat pour 14 ko.
   int16_t* pcm = (int16_t*)heap_caps_malloc(tailleData, MALLOC_CAP_SPIRAM);
@@ -264,6 +289,7 @@ String listerJson() {
       premier = false;
       out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size())
            + ",\"volume\":\"" + CarteSd::VOLUME + "\"";
+      { const int fi = _index(base); if (fi >= 0 && _ech[fi].flux) out += ",\"flux\":true"; }
       const int i = _index(base);
       if (i >= 0 && _ech[i].freq)
         out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
@@ -413,16 +439,11 @@ uint8_t chargerTout() {
   return _prets;
 }
 
-/* Les sons de la carte SD qu'il reste a PRECHARGER : ses `.wav` de /samples dont le
- * nom n'est pas deja dans le magasin (storage l'emporte).
- *
- * UN PLAFOND, parce que la PSRAM est une ressource commune : les tampons de reponse
- * du serveur web, les banques de play list et la console y vivent aussi. Une carte
- * SD pleine de sons ne doit pas la vider. Un son plus gros que PRECHARGE_SON_MAX, ou
- * qui depasserait PRECHARGE_SD_MAX en tout, n'est PAS precharge — il est dit, et il
- * attend la lecture en flux (CarteSd.h), qui ne le garde pas en memoire.
- * Les noms que `nomValide` refuse sont dits et sautes : une cue ne saurait pas les
- * nommer. */
+/* Les sons de la carte SD qu'il reste a INSTALLER : ses `.wav` de /samples dont le
+ * nom n'est pas deja dans le magasin (storage l'emporte). Chacun s'installe par
+ * _lire(…, carteSd), qui decide : precharge en PSRAM s'il est petit, sinon EN FLUX
+ * (aucune donnee gardee — voir _lire). Les noms que `nomValide` refuse sont dits et
+ * sautes : une cue ne saurait pas les nommer. */
 uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
   uint8_t n = 0;
   File d = CarteSd::ouvrir(CarteSd::DOSSIER);
@@ -430,23 +451,13 @@ uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
     NIDMI_WEB_LOG("[SD] pas de dossier %s sur la carte : rien a lire", CarteSd::DOSSIER);
     return 0;
   }
-  size_t cumul = 0;
-  for (int i = 0; i < SAMPLES_MAX; i++) if (_ech[i].pret && _ech[i].sd) cumul += _ech[i].octets;
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
     const char* base = _base(f.path());
     if (!_estWav(base) || indexDe(base) >= 0) continue;
     String raison;
     if (!nomValide(base, raison)) { NIDMI_WEB_LOG("[SD] %s ignore : %s", base, raison.c_str()); continue; }
-    const size_t taille = f.size();
-    if (taille > PRECHARGE_SON_MAX || cumul + taille > PRECHARGE_SD_MAX) {
-      NIDMI_WEB_LOG("[SD] %s : %u Ko, trop pour la PSRAM (un son : %u Ko au plus, la SD : %u Ko en tout) — pas precharge",
-                    base, (unsigned)(taille / 1024), (unsigned)(PRECHARGE_SON_MAX / 1024),
-                    (unsigned)(PRECHARGE_SD_MAX / 1024));
-      continue;
-    }
     if (n >= max) { NIDMI_WEB_LOG("[SD] au-dela de %u sons, le reste est ignore", (unsigned)max); break; }
-    cumul += taille;
     strlcpy(noms[n++], base, NOM_MAX);
   }
   return n;
@@ -496,7 +507,7 @@ void liberer(int i) {
   int16_t* pcm = e.pcm;
   _octets -= e.octets;
   e.pcm = nullptr; e.trames = 0; e.octets = 0; e.stereo = false; e.freq = 48000;
-  e.nom[0] = 0; e.sd = false;
+  e.nom[0] = 0; e.sd = false; e.flux = false; e.offset = 0;
   __sync_synchronize();
   heap_caps_free(pcm);
 }
@@ -508,6 +519,8 @@ const int16_t* donnees(uint8_t i)   { return lisible(i) ? _ech[i].pcm    : nullp
 size_t         trames(uint8_t i)    { return lisible(i) ? _ech[i].trames : 0; }
 bool           stereo(uint8_t i)    { return (i < SAMPLES_MAX) ? _ech[i].stereo : false; }
 uint32_t       frequence(uint8_t i) { return (i < SAMPLES_MAX) ? _ech[i].freq   : 48000; }
+bool           estFlux(uint8_t i)        { return i < SAMPLES_MAX && _ech[i].pret && _ech[i].flux; }
+uint32_t       offsetDonnees(uint8_t i)  { return (i < SAMPLES_MAX) ? _ech[i].offset : 0; }
 
 /* Retrouver un echantillon par son NOM — c'est ce que porte une ligne de cue.
  * Seuls les lisibles : un son retire ne se declenche plus. */
