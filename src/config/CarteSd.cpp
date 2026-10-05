@@ -2,6 +2,7 @@
 
 #include <SD.h>
 #include <SPI.h>
+#include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -41,6 +42,11 @@ volatile int  _misoBas = -1, _misoHaut = -1;   // niveau de MISO au repos, tire 
 volatile int  _invCmd0 = -1;               // R1 de CMD0 avec MISO et MOSI echanges
 volatile int  _bbCmd0 = -1, _bbCmd8 = -1, _bbInvCmd0 = -1;   // les memes, sans peripherique SPI
 volatile bool _cablageFait = false;
+/* Les quatre broches de la carte, mesurees seules (CS, SCK, MISO, MOSI) :
+ * lu avec un tirage bas, avec un tirage haut, puis lu en retour apres l'avoir
+ * PILOTEE a 0 et a 1. Une broche qui ne suit pas ce qu'elle pilote est en
+ * court-circuit (vers GND ou 3V3) ou fortement chargee. -1 : pas mesure. */
+volatile int8_t _niv[4][4] = {{-1,-1,-1,-1},{-1,-1,-1,-1},{-1,-1,-1,-1},{-1,-1,-1,-1}};
 
 /* LA MESURE DE LECTURE. Etat : 0 jamais, 1 en cours, 2 finie. Le JSON se pose
  * d'un coup, l'etat en dernier. */
@@ -144,11 +150,25 @@ void _sonder() {
  *     echanges — la confusion classique entre DI/DO et MOSI/MISO. Une carte qui
  *     repond ainsi est branchee a l'envers.
  * Le bus principal est ferme le temps de la sonde, puis rouvert. */
+void _mesurerBroche(uint8_t pin, volatile int8_t* r) {
+  pinMode(pin, INPUT_PULLDOWN); delay(3); r[0] = digitalRead(pin);
+  pinMode(pin, INPUT_PULLUP);   delay(3); r[1] = digitalRead(pin);
+  pinMode(pin, OUTPUT);
+  gpio_set_direction((gpio_num_t)pin, GPIO_MODE_INPUT_OUTPUT);   // se relire en sortie
+  digitalWrite(pin, LOW);  delay(3); r[2] = digitalRead(pin);
+  digitalWrite(pin, HIGH); delay(3); r[3] = digitalRead(pin);
+  pinMode(pin, INPUT);
+}
+
 void _sonderCablage() {
   SPI.end();
   pinMode(_miso, INPUT_PULLDOWN); delay(3); _misoBas  = digitalRead(_miso);
   pinMode(_miso, INPUT_PULLUP);   delay(3); _misoHaut = digitalRead(_miso);
   pinMode(_miso, INPUT);
+  _mesurerBroche(_cs, _niv[0]);
+  pinMode(_cs, OUTPUT); digitalWrite(_cs, HIGH);     // carte deselectionnee pendant les autres mesures
+  _mesurerBroche(_sck, _niv[1]);
+  _mesurerBroche(_miso, _niv[2]); _mesurerBroche(_mosi, _niv[3]);
   {
     SPIClass inv(HSPI);
     inv.begin(_sck, _mosi, _miso, -1);            // la broche MOSI lit, la broche MISO ecrit
@@ -408,7 +428,16 @@ String diagnostic() {
     j += ",\"sonde\":{\"cmd0\":" + String(_cmd0) + ",\"cmd8\":" + String(_cmd8)
        + ",\"cmd8_echo\":" + String((unsigned long)_cmd8Echo) + "}";
   if (_cablageFait) {
+    // Une broche qui ne suit pas ce qu'elle pilote : court-circuit ou charge.
+    const char* nomBroche[4] = {"CS", "SCK", "MISO", "MOSI"};
+    String suspecte;
+    for (int b = 0; b < 4; b++)
+      if (_niv[b][2] == 1 || _niv[b][3] == 0) suspecte += String(suspecte.length() ? ", " : "") + nomBroche[b];
+    static char tampon[160];
     const char* verdict =
+        suspecte.length()
+            ? (snprintf(tampon, sizeof(tampon), "%s ne suit pas ce que la carte pilote : court-circuit vers GND/3V3, ou fil sur une mauvaise broche", suspecte.c_str()), tampon)
+        :
         _bbCmd0 >= 0 && _bbCmd0 != 0xFF && (_cmd0 < 0 || _cmd0 == 0xFF)
             ? "la carte repond A LA MAIN mais pas par le SPI materiel : le defaut est dans notre usage du SPI"
         : _bbInvCmd0 >= 0 && _bbInvCmd0 != 0xFF
@@ -421,7 +450,15 @@ String diagnostic() {
     j += ",\"cablage\":{\"miso_tire_bas\":" + String(_misoBas) + ",\"miso_tire_haut\":" + String(_misoHaut)
        + ",\"cmd0_miso_mosi_inverses\":" + String(_invCmd0)
        + ",\"a_la_main_cmd0\":" + String(_bbCmd0) + ",\"a_la_main_cmd8\":" + String(_bbCmd8)
-       + ",\"a_la_main_inverses_cmd0\":" + String(_bbInvCmd0) + ",\"verdict\":\"" + String(verdict) + "\"}";
+       + ",\"a_la_main_inverses_cmd0\":" + String(_bbInvCmd0)
+       + ",\"broches\":{" + [&]() {
+           String t;
+           for (int b = 0; b < 4; b++)
+             t += String(b ? "," : "") + "\"" + nomBroche[b] + "\":{\"tirage_bas\":" + String(_niv[b][0])
+                + ",\"tirage_haut\":" + String(_niv[b][1]) + ",\"pilote_0_lu\":" + String(_niv[b][2])
+                + ",\"pilote_1_lu\":" + String(_niv[b][3]) + "}";
+           return t; }() + "}"
+       + ",\"verdict\":\"" + String(verdict) + "\"}";
   }
   j += ",\"mesure\":";
   if (_mesEtat == 0)      j += "null";
