@@ -258,8 +258,8 @@ int8_t demanderTete(const char* son, uint32_t debut, bool anticipee) {
                              && (!anticipee || anticipes + octets <= ANTICIPE_BUDGET_OCTETS);
       const bool psramOk = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >= PSRAM_RESERVE_OCTETS + octets;
       if (!placeSurLaTable || !dansLeBudget || !psramOk) {
-        if (anticipee) _refusAnticipes = _refusAnticipes + 1;
-        idx = TETE_BUDGET_PLEIN;
+        const bool sousBudgetTotal = placeSurLaTable && pris + octets <= TETES_BUDGET_OCTETS && psramOk;
+        idx = (anticipee && sousBudgetTotal) ? TETE_ANTICIPE_PLEIN : TETE_BUDGET_PLEIN;   // seul le demi-budget manque
       } else {
         Tete& t = _tetes[libre];
         strlcpy(t.son, son, sizeof(t.son));
@@ -278,6 +278,7 @@ int8_t demanderTete(const char* son, uint32_t debut, bool anticipee) {
 bool teteAnticipee(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat != 0 && _tetes[i].anticipee; }
 bool teteEvincable(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && (_tetes[i].etat == 2 || _tetes[i].etat == 3); }
 void noterRefus() { _refus = _refus + 1; }
+void noterRefusAnticipe() { _refusAnticipes = _refusAnticipes + 1; }
 
 bool tetePrete(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat == 2; }
 

@@ -1606,19 +1606,25 @@ bool _teteReferencee(int8_t t) {
   return false;
 }
 
-/* La tete a evincer pour faire de la place a une demande COURANTE — jamais une tete qu'une banque ou
- * une voix nomme, jamais une tete en cours de lecture par la tache de la carte (elle ecrirait dans
- * une entree rendue). D'abord une tete ANTICIPEE (la cue suivante : sans valeur tant qu'on n'y est
- * pas — et une demande courante qui la nomme l'aurait deja promue), la plus ancienne ; puis la plus
- * ancienne des autres non demandee depuis 5 s (la banque en construction n'est pas encore nommee :
- * ses tetes toutes fraiches sont protegees par ce delai). -1 : rien a evincer. */
-int8_t _teteAEvincer() {
+/* La tete a evincer pour faire de la place a une demande — jamais une tete qu'une banque ou une voix
+ * nomme, jamais une tete en cours de lecture par la tache de la carte (elle ecrirait dans une entree
+ * rendue).
+ *   Demande COURANTE : d'abord une tete ANTICIPEE (la cue suivante : sans valeur tant qu'on n'y est
+ *   pas — et une demande courante qui la nomme l'aurait deja promue), la plus ancienne ; puis la plus
+ *   ancienne des autres non demandee depuis 5 s (la banque en construction n'est pas encore nommee :
+ *   ses tetes toutes fraiches sont protegees par ce delai).
+ *   Demande ANTICIPEE : la meme chose, mais le delai de 5 s vaut pour TOUTES — on n'evince pas ce que la
+ *   meme passe vient de demander (les premiers clips de la cue suivante pour charger les derniers) —,
+ *   et `seulementAnticipees` quand c'est le demi-budget qui manque : evincer des tetes courantes n'y
+ *   changerait rien. -1 : rien a evincer. */
+int8_t _teteAEvincer(bool pourAnticipee, bool seulementAnticipees) {
   int8_t choix = -1; bool choixAnticipee = false; uint32_t choixAge = 0;
   for (int8_t i = 0; i < (int8_t)FluxSD::TETES_MAX; i++) {
     if (!FluxSD::teteEvincable(i) || _teteReferencee(i)) continue;
     const bool ant = FluxSD::teteAnticipee(i);
+    if (seulementAnticipees && !ant) continue;
     const uint32_t age = FluxSD::teteAgeMs(i);
-    if (!ant && age <= 5000) continue;
+    if ((!ant || pourAnticipee) && age <= 5000) continue;
     if (choix < 0 || (ant && !choixAnticipee) || (ant == choixAnticipee && age > choixAge)) {
       choix = i; choixAnticipee = ant; choixAge = age;
     }
@@ -1628,17 +1634,20 @@ int8_t _teteAEvincer() {
 
 /* La tete d'un clip en flux — demandee a la tache de la carte, qui la lit (FluxSD.h). Le budget est
  * plein : on eleve, une a une, ce qui peut l'etre (_teteAEvincer), puis on redemande ; au bout, un
- * REFUS, compte et dit — ce clip ne se jouera pas, et l'usager doit pouvoir le savoir (etatTetes). Une
- * demande ANTICIPEE n'evince rien : elle se contente de ce qui reste. Sous verrouListes, comme tous
- * les appelants de _resoudre. */
+ * REFUS, compte et dit — pour une demande COURANTE ce clip ne se jouera pas, et l'usager doit pouvoir le
+ * savoir (etatTetes) ; pour une ANTICIPEE ce n'est qu'un rattrapage manque (« la note attend »). Sous
+ * verrouListes, comme tous les appelants de _resoudre. */
 int8_t _teteDe(const char* son, uint32_t debut, bool anticipee = false) {
   int8_t t = FluxSD::demanderTete(son, debut, anticipee);
-  if (t == FluxSD::TETE_BUDGET_PLEIN && !anticipee) {
-    for (int8_t v; t == FluxSD::TETE_BUDGET_PLEIN && (v = _teteAEvincer()) >= 0; ) {
-      FluxSD::libererTete(v);
-      t = FluxSD::demanderTete(son, debut, false);
-    }
-    if (t == FluxSD::TETE_BUDGET_PLEIN) {
+  while (t == FluxSD::TETE_BUDGET_PLEIN || t == FluxSD::TETE_ANTICIPE_PLEIN) {
+    const int8_t v = _teteAEvincer(anticipee, t == FluxSD::TETE_ANTICIPE_PLEIN);
+    if (v < 0) break;
+    FluxSD::libererTete(v);
+    t = FluxSD::demanderTete(son, debut, anticipee);
+  }
+  if (t == FluxSD::TETE_BUDGET_PLEIN || t == FluxSD::TETE_ANTICIPE_PLEIN) {
+    if (anticipee) FluxSD::noterRefusAnticipe();
+    else {
       FluxSD::noterRefus();
       NIDMI_WEB_LOG("[SD] %s @%lu : budget des tetes plein (%u Ko) — ce clip ne se jouera pas",
                     son, (unsigned long)debut, (unsigned)(FluxSD::TETES_BUDGET_OCTETS / 1024));

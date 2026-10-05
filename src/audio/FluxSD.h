@@ -60,13 +60,16 @@ constexpr uint32_t SAUT_TRAMES    = 2048;     // un lecteur depasse se replace a
  * la carte SD ; `tetePrete` dit quand. `anticipee` : pour la cue SUIVANTE (sous son demi-budget ; une
  * demande courante la promeut, et peut l'evincer tant qu'elle ne l'a pas fait).
  *   >= 0 : l'index ;  -1 : pas une tete possible (son absent, pas lu en flux, debut au-dela de la fin) ;
- *   -2 : le BUDGET est plein (ou la PSRAM sous sa reserve) — l'appelant eleve ce qu'il peut, redemande,
- *        puis compte un refus (`noterRefus`). */
-constexpr int8_t TETE_INCONNUE = -1, TETE_BUDGET_PLEIN = -2;
+ *   -2 : le BUDGET est plein (ou la PSRAM sous sa reserve, ou la table) — l'appelant eleve ce qu'il peut,
+ *        redemande, puis compte un refus (`noterRefus`) ;
+ *   -3 : une demande ANTICIPEE, et le demi-budget des anticipees est plein — seule une anticipee perimee
+ *        peut lui faire de la place (evincer des tetes courantes n'y changerait rien). */
+constexpr int8_t TETE_INCONNUE = -1, TETE_BUDGET_PLEIN = -2, TETE_ANTICIPE_PLEIN = -3;
 int8_t   demanderTete(const char* son, uint32_t debut, bool anticipee = false);
 bool     teteAnticipee(int8_t i);                       // demandee pour la cue suivante, pas encore promue
 bool     teteEvincable(int8_t i);                       // prete ou en echec — jamais une tete en cours de lecture
 void     noterRefus();                                  // un clip n'a pas eu de tete : budget plein
+void     noterRefusAnticipe();                          // une tete anticipee n'a pas trouve de place (sans gravite)
 bool     tetePrete(int8_t i);
 struct   TeteVue { const int16_t* pcm; uint32_t debut; uint32_t trames; };
 bool     teteVue(int8_t i, TeteVue& v);                 // faux si elle n'est pas prete
