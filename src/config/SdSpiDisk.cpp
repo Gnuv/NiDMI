@@ -2,6 +2,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
 #include <vfs_api.h>
 
 extern "C" {
@@ -27,6 +28,24 @@ uint32_t  _cmd8Echo = 0;
 uint8_t   _pdrv = 0xFF;
 char      _mountPoint[16] = "";
 volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
+/* HEALTH. `_crcGood`: blocks whose CRC16 matched since the mount — once a card has proven
+ * it sends valid CRCs (CRC_PROVEN blocks), a mismatch is a corrupted transfer and the
+ * block is READ AGAIN instead of reaching the audio. A card that never sends a valid CRC
+ * (some cheap ones do not compute it in SPI mode) is never rejected: counted only.
+ * `_failStreak`: reads that failed after all their attempts, in a row — the signature of a
+ * card that was pulled out or lost its contact (SdCard watches it). */
+volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 0;
+volatile bool     _outage = false;      // the bench simulates a card pulled out: every read fails until...
+volatile uint32_t _outageEndMs = 0;     // ... this time (a window, like a real outage: whoever reads, fails)
+constexpr uint32_t CRC_PROVEN = 64;
+/* THE BUS, one transaction at a time: FatFs serialises its own reads, but `probe()` (the
+ * supervisor) reads a sector behind its back. */
+StaticSemaphore_t _busBuffer;
+SemaphoreHandle_t _bus = xSemaphoreCreateMutexStatic(&_busBuffer);
+struct BusLock {
+  BusLock()  { if (_bus) xSemaphoreTake(_bus, portMAX_DELAY); }
+  ~BusLock() { if (_bus) xSemaphoreGive(_bus); }
+};
 
 /* The file system as seen by Arduino's `File` API: a VFS implementation with its
  * mount point, like SDFS in the library. Created at mount time, not at static
@@ -47,7 +66,10 @@ inline void _deselect() { digitalWrite(_cs, HIGH); _spi->transfer(0xFF); }   // 
 bool _waitReady(uint32_t ms) {
   const uint32_t t0 = millis();
   uint8_t r;
-  do { r = _spi->transfer(0xFF); } while (r != 0xFF && millis() - t0 < ms);
+  do {
+    r = _spi->transfer(0xFF);
+    if (r != 0xFF && millis() - t0 > 4) vTaskDelay(1);      // a busy or absent card: yield (core 0's IDLE task)
+  } while (r != 0xFF && millis() - t0 < ms);
   return r == 0xFF;
 }
 
@@ -79,7 +101,8 @@ uint16_t _crc16(const uint8_t* d, size_t n) {
 }
 
 /* A data block after a read command: the 0xFE token, `n` bytes, the CRC16.
- * A bad CRC is COUNTED, not rejected (see the header). */
+ * A bad CRC is counted; it is REJECTED (false: the caller reads again) once the card has
+ * proven that it sends valid ones (see `_crcGood`). */
 bool _block(uint8_t* buf, size_t n) {
   const uint32_t t0 = millis();
   uint8_t tok;
@@ -90,7 +113,9 @@ bool _block(uint8_t* buf, size_t n) {
   if (tok != DATA_TOKEN) return false;
   _spi->transferBytes(nullptr, buf, n);
   const uint16_t received = _spi->transfer16(0xFFFF);
-  if (received != _crc16(buf, n)) _crcErrors = _crcErrors + 1;
+  if (received == _crc16(buf, n)) { _crcGood = _crcGood + 1; return true; }
+  _crcErrors = _crcErrors + 1;
+  if (_crcGood >= CRC_PROVEN) { _crcRejected = _crcRejected + 1; return false; }
   return true;
 }
 
@@ -172,6 +197,14 @@ bool _initialise(String& reason) {
 
 /* Read `n` sectors: a single one (CMD17) or in one go (CMD18). Three attempts. */
 bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
+  BusLock lock;
+  if (_outage) {                                          // simulated loss: fails like a pulled card, at once
+    if ((int32_t)(millis() - _outageEndMs) < 0) {
+      _failStreak = _failStreak + 1; _failTotal = _failTotal + 1;
+      return false;
+    }
+    _outage = false;                                      // the card is "back"
+  }
   _spi->beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
   bool ok = false;
   for (int attempt = 0; attempt < 3 && !ok; attempt++) {
@@ -191,7 +224,8 @@ bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
     _deselect();
   }
   _spi->endTransaction();
-  if (ok) _blocksRead = _blocksRead + n;
+  if (ok) { _blocksRead = _blocksRead + n; _failStreak = 0; }
+  else    { _failStreak = _failStreak + 1; _failTotal = _failTotal + 1; }
   return ok;
 }
 
@@ -219,6 +253,7 @@ bool mount(SPIClass& spi, uint8_t cs, uint32_t hz, const char* mountPoint, Strin
   if (_ready) return true;
   _spi = &spi; _cs = cs; _hz = hz;
   _blocksRead = _crcErrors = _retries = 0;
+  _crcGood = _crcRejected = _failStreak = _failTotal = 0;
   if (!_initialise(reason)) return false;
 
   if (ff_diskio_get_drive(&_pdrv) != ESP_OK || _pdrv == 0xFF) {
@@ -270,6 +305,15 @@ uint32_t    cmd8Echo()      { return _cmd8Echo; }
 uint32_t    blocksRead()    { return _blocksRead; }
 uint32_t    crcErrors()     { return _crcErrors; }
 uint32_t    retries()       { return _retries; }
+uint32_t    crcRejected()   { return _crcRejected; }
+uint32_t    failStreak()    { return _failStreak; }
+uint32_t    failTotal()     { return _failTotal; }
+void        simulateOutage(uint32_t ms) { _outageEndMs = millis() + ms; _outage = true; _failStreak = _failStreak + 1; }   // the first failure is noticed now
+bool        probe() {
+  if (!_ready) return false;
+  uint8_t sector[512];
+  return _readSectors(sector, 0, 1);
+}
 
 File open(const char* path) {
   if (!_ready || !_fs) return File();

@@ -489,6 +489,12 @@ void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
     /* Its head is still loading: the note waits. What was playing continues until the new
      * clip starts. For any other reason (sound absent, empty selection): nothing, as before. */
     if (_headLoading(L, k)) _waitForHead(L.bloc, k, L.clips[k - 1].head);
+    else {
+      /* A streamed clip that is not loading and not ready: its head failed or was refused —
+       * counted (a note lost is something to know), never logged from here. */
+      const Clip& c = L.clips[k - 1];
+      if (c.iEch >= 0 && SampleStore::isStreamed((uint8_t)c.iEch)) SdStream::recordNoHead();
+    }
     return;
   }
   _cancelWait(L.bloc);                    // a start, or the stop note, replaces the note that was waiting

@@ -24,7 +24,10 @@ struct Head {
   volatile bool  urgent  = false;       // a note is waiting for it: read it before the others
   volatile bool  anticipated = false;   // requested for the NEXT cue (promoted as soon as a current request names it)
   uint32_t       bytes   = 0;           // what it weighs in the budget (0: failed, nothing taken)
+  uint8_t        tries   = 0;           // failed reads so far (a glitch is read again, up to MAX_TRIES)
+  bool           retryable = false;     // the failure may pass (card, PSRAM), unlike "not a streamed sound"
 };
+constexpr uint8_t MAX_TRIES = 3;
 Head* _heads = nullptr;               // MAX_HEADS, in PSRAM, taken on first need (see _takeTables)
 
 /* The head table changes under several tasks (the cue, the web server, the SD-card
@@ -42,22 +45,25 @@ String _path(const char* name) { return String(SdCard::FOLDER) + "/" + name; }
 bool _loadHead(uint8_t i) {                          // false: nothing changed (the card is not there)
   Head& h = _heads[i];
   if (!SdCard::mounted()) return false;             // the card is not there: it stays "requested"
+  /* A failure is final for this attempt: `retryable` says whether it may pass (the card, PSRAM)
+   * or not (a sound that is not streamed, a start beyond the end) — see _retryFailed. */
+  auto fail = [&](bool retryable) { h.bytes = 0; h.retryable = retryable; if (retryable && h.tries < 255) h.tries++; h.state = 3; return true; };
   const int s = SampleStore::indexDe(h.name);
   if (s < 0 || !SampleStore::isStreamed((uint8_t)s)) {
     NIDMI_WEB_LOG("[SD] tete de %s : ce n'est pas un son lu en flux", h.name);
-    h.bytes = 0; h.state = 3; return true;
+    return fail(false);
   }
   const uint32_t total = (uint32_t)SampleStore::trames((uint8_t)s);
   const uint8_t  channels = SampleStore::stereo((uint8_t)s) ? 2 : 1;
   if (h.start >= total) {
     NIDMI_WEB_LOG("[SD] tete de %s : le debut (trame %lu) est au-dela de la fin", h.name, (unsigned long)h.start);
-    h.bytes = 0; h.state = 3; return true;
+    return fail(false);
   }
   const uint32_t n = (total - h.start < HEAD_FRAMES) ? total - h.start : HEAD_FRAMES;
   File f = SdCard::open(_path(h.name).c_str());
-  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", h.name); h.bytes = 0; h.state = 3; return true; }
+  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", h.name); return fail(true); }
   int16_t* pcm = (int16_t*)heap_caps_malloc((size_t)n * channels * 2, MALLOC_CAP_SPIRAM);
-  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", h.name); h.bytes = 0; h.state = 3; return true; }
+  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", h.name); return fail(true); }
   const uint32_t t0 = millis();
   const size_t   bytes = (size_t)n * channels * 2;
   size_t got = 0;
@@ -74,9 +80,9 @@ bool _loadHead(uint8_t i) {                          // false: nothing changed (
   if (got != bytes) {
     heap_caps_free(pcm);
     NIDMI_WEB_LOG("[SD] tete de %s : lecture incomplete (%u / %u o)", h.name, (unsigned)got, (unsigned)bytes);
-    h.bytes = 0; h.state = 3; return true;
+    return fail(true);
   }
-  h.pcm = pcm; h.frames = n;
+  h.pcm = pcm; h.frames = n; h.tries = 0;
   __sync_synchronize();
   h.state = 2;
   NIDMI_WEB_LOG("[SD] tete de %s @%lu : %lu trames en %lu ms", h.name, (unsigned long)h.start,
@@ -105,7 +111,7 @@ struct Stream {
 };
 Stream* _streams = nullptr;           // MAX_STREAMS, likewise
 volatile uint32_t _underrunsTotal = 0;
-volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0;
+volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0, _noHeadNotes = 0, _readErrors = 0;
 volatile uint32_t _refusals = 0, _anticipatedRefusals = 0;
 volatile uint32_t _readerAlive = 0;
 volatile bool     _stopReader = false;
@@ -184,6 +190,7 @@ bool _serve(Stream& x) {
   __sync_synchronize();
   x.hi = hi + frames;
   if (got != bytes) {                                     // end of file, or an error: stop there
+    if (hi + frames < x.endFrame) _readErrors = _readErrors + 1;      // not the end of the clip: the read failed
     x.readEnd = hi + frames;
     return false;
   }
@@ -243,6 +250,9 @@ int8_t requestHead(const char* name, uint32_t startFrame, bool anticipated) {
     uint32_t taken = 0, anticipatedBytes = 0;
     for (int8_t i = 0; i < (int8_t)MAX_HEADS; i++) {
       Head& h = _heads[i];
+      /* A failed head asked for AGAIN is a new try (a glitch must not silence a clip for good):
+       * its entry goes back to the free ones and is allocated afresh, budget included. */
+      if (h.state == 3 && h.start == startFrame && !strcmp(h.name, name)) { h.pcm = nullptr; h.tries = 0; h.state = 0; }
       if (h.state == 0) { if (freeSlot < 0) freeSlot = i; continue; }
       taken += h.bytes;
       if (h.anticipated) anticipatedBytes += h.bytes;
@@ -308,8 +318,38 @@ void releaseHead(int8_t i) {
 /* One head at a time, THE URGENT ONE FIRST: the one a note waits for goes ahead of the
  * others (it then waits for the head being read, at most, plus its own). An absent card
  * stops the loop — the heads stay "requested". */
+/* Failed heads whose cause may have passed (the card was away, a read glitched): back to
+ * "requested", budget permitting, at most MAX_TRIES times — a clip must not stay silent for the
+ * rest of the concert because one read failed. Called by the SD-card task before it reads. */
+void _retryFailed() {
+  HeadsLock lock;
+  uint32_t taken = 0;
+  for (uint8_t i = 0; i < MAX_HEADS; i++) if (_heads[i].state != 0) taken += _heads[i].bytes;
+  for (uint8_t i = 0; i < MAX_HEADS; i++) {
+    Head& h = _heads[i];
+    if (h.state != 3 || !h.retryable || h.tries >= MAX_TRIES) continue;
+    const int slot = SampleStore::indexDe(h.name);
+    if (slot < 0 || !SampleStore::isStreamed((uint8_t)slot)) continue;
+    const uint32_t total = (uint32_t)SampleStore::trames((uint8_t)slot);
+    if (h.start >= total) continue;
+    const uint32_t bytes = ((total - h.start < HEAD_FRAMES) ? total - h.start : HEAD_FRAMES)
+                         * (SampleStore::stereo((uint8_t)slot) ? 2u : 1u) * 2u;
+    if (taken + bytes > HEADS_BUDGET_BYTES) continue;
+    taken += bytes;
+    h.bytes = bytes; h.seenMs = millis(); h.state = 1;
+  }
+}
+
+bool failedHeads() {
+  if (!_heads) return false;
+  for (uint8_t i = 0; i < MAX_HEADS; i++)
+    if (_heads[i].state == 3 && _heads[i].retryable && _heads[i].tries < MAX_TRIES) return true;
+  return false;
+}
+
 void loadHeads() {
   if (!_heads) return;
+  _retryFailed();
   for (;;) {
     int8_t pick = -1;
     for (uint8_t i = 0; i < MAX_HEADS && pick < 0; i++) if (_heads[i].state == 1 && _heads[i].urgent) pick = (int8_t)i;
@@ -330,6 +370,7 @@ void recordWait(uint32_t ms) {
   if (ms > _worstWaitMs) _worstWaitMs = ms;
 }
 void recordDrop() { _droppedNotes = _droppedNotes + 1; }
+void recordNoHead() { _noHeadNotes = _noHeadNotes + 1; }
 
 // ── Streams: API ─────────────────────────────────────────────────────────────
 int8_t acquire(uint8_t voice) {
@@ -404,7 +445,7 @@ void stopAll() {
   if (_streams) for (uint8_t i = 0; i < MAX_STREAMS; i++) _streams[i].state = 0;
   if (!_readerAlive) return;
   _stopReader = true;
-  for (int i = 0; i < 50 && _readerAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));
+  for (int i = 0; i < 300 && _readerAlive; i++) vTaskDelay(pdMS_TO_TICKS(10));   // up to 3 s: a read on a lost card fails slowly
   _stopReader = false;
 }
 
@@ -419,6 +460,8 @@ String diagnostics() {
            + ",\"delayed_notes\":" + String((unsigned long)_delayedNotes)
            + ",\"worst_wait_ms\":" + String((unsigned long)_worstWaitMs)
            + ",\"dropped_notes\":" + String((unsigned long)_droppedNotes)
+           + ",\"notes_without_head\":" + String((unsigned long)_noHeadNotes)
+           + ",\"read_errors\":" + String((unsigned long)_readErrors)
            + ",\"refused_heads\":" + String((unsigned long)_refusals)
            + ",\"refused_anticipated\":" + String((unsigned long)_anticipatedRefusals) + ",\"streams\":[";
   bool first = true;
@@ -446,6 +489,7 @@ String diagnostics() {
     j += "{\"name\":\"" + String(h.name) + "\",\"start\":" + String((unsigned long)h.start)
        + ",\"state\":\"" + String(h.state == 1 ? "requested" : h.state == 2 ? "ready" : "failed")
        + "\",\"frames\":" + String((unsigned long)h.frames) + ",\"bytes\":" + String((unsigned long)h.bytes)
+       + (h.state == 3 ? ",\"tries\":" + String((unsigned)h.tries) + (h.retryable ? "" : ",\"final\":true") : String(""))
        + (h.anticipated ? ",\"anticipated\":true" : "") + "}";
   }
   j += "]}";

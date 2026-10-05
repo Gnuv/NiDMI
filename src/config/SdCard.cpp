@@ -11,6 +11,7 @@
 #include "../audio/SampleStore.h"
 #include "../audio/SdStream.h"
 #include "../server/WebDebugConsole.h"
+#include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES the card's state
 
 namespace SdCard {
 namespace {
@@ -32,6 +33,14 @@ volatile bool     _wantHeads   = false;
 volatile uint32_t _taskAlive   = 0;         // the task lives: only one at a time
 volatile uint32_t _lastAttemptMs = 0;
 volatile uint32_t _attempts    = 0;
+/* THE CARD'S LIFE. "lost": it WAS mounted and its reads now fail in a row (pulled out,
+ * lost contact) — until it is mounted again. */
+volatile bool     _lost        = false;
+volatile uint32_t _lostCount   = 0;         // times it was lost since boot
+volatile uint32_t _remounts    = 0;         // times it came back after a loss
+constexpr uint32_t RETRY_MS    = 5000;      // between two mounting attempts, headless
+constexpr uint8_t  PROBES      = 3;         // sector-0 reads, 150 ms apart, that must ALL fail to declare it lost
+volatile bool     _wantCheck   = false;     // a read failed: is the card still there?
 
 /* THE DIAGNOSTICS, written by the task, read by the web server (diagnostics()).
  * Plain fields: a slightly stale read breaks nothing. */
@@ -264,13 +273,17 @@ void _mount() {
     if (cause.startsWith("CMD0")) _probe();
     else { _probe(); if (_cmd0 == 0x01) _probeRaw(); }
     snprintf(_reason, sizeof(_reason), "%s", cause.c_str());
-    NIDMI_WEB_LOG("[SD] pas de carte (CS=%u SCK=%u MISO=%u MOSI=%u, %lu MHz) : %s",
-                  (unsigned)_cs, (unsigned)_sck, (unsigned)_miso, (unsigned)_mosi,
-                  (unsigned long)(_hz / 1000000UL), cause.c_str());
+    /* Headless, the board retries every RETRY_MS for as long as the card is missing: the
+     * console says it for the first attempts, then once a minute (it is a ring, not a log). */
+    if (_attempts <= 3 || _attempts % 12 == 0)
+      NIDMI_WEB_LOG("[SD] pas de carte (CS=%u SCK=%u MISO=%u MOSI=%u, %lu MHz) : %s",
+                    (unsigned)_cs, (unsigned)_sck, (unsigned)_miso, (unsigned)_mosi,
+                    (unsigned long)(_hz / 1000000UL), cause.c_str());
     return;
   }
   _capacity = SdSpiDisk::capacityBytes();
   _mounted = true;
+  if (_lost) { _lost = false; _remounts = _remounts + 1; NIDMI_WEB_LOG("[SD] carte retrouvee"); }
   NIDMI_WEB_LOG("[SD] montee : %s, %lu Mo, a %lu MHz (CMD8 : 0x%lX)",
                 SdSpiDisk::type(), (unsigned long)(_capacity / (1024ULL * 1024ULL)),
                 (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisk::cmd8Echo());
@@ -372,8 +385,25 @@ void _measure() {
                 _measName, raw, real, (unsigned long)maxUs, (unsigned long)seekUs);
 }
 
+/* A read failed: does the card still answer? A glitch (one sector, a corrupted transfer)
+ * passes the probe and nothing happens; a card that does not answer PROBES times in a row is
+ * LOST — unmounted here, in the task; the supervisor remounts it. */
+void _check() {
+  if (!_mounted) return;
+  for (uint8_t i = 0; i < PROBES; i++) {
+    if (SdSpiDisk::probe()) return;
+    vTaskDelay(pdMS_TO_TICKS(150));
+  }
+  _lost = true;
+  _lostCount = _lostCount + 1;
+  NIDMI_WEB_LOG("[SD] carte PERDUE : elle ne repond plus — demontee, nouvelles tentatives toutes les %lu s",
+                (unsigned long)(RETRY_MS / 1000));
+  _unmount();
+}
+
 void _task(void*) {
   for (;;) {
+    if (_wantCheck)   { _wantCheck   = false; _check();    continue; }
     if (_wantUnmount) { _wantUnmount = false; _unmount();  continue; }
     if (_wantMount)   { _wantMount   = false; _mount();    continue; }
     if (_wantMeasure) { _wantMeasure = false; _measure();  continue; }
@@ -384,7 +414,7 @@ void _task(void*) {
   }
   __sync_lock_release(&_taskAlive);
   // A flag raised between the last turn and the release: start again.
-  if (_wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads) _startTask();
+  if (_wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads) _startTask();
   vTaskDelete(nullptr);
 }
 
@@ -433,6 +463,53 @@ void retryIfDue() {
   _startTask();
 }
 
+/* THE CARD'S SUPERVISION, from the loop, every 250 ms — it only raises flags and wakes the
+ * task, never touches the bus. HEADLESS: nothing here waits for an app or a page.
+ *   - the card is not mounted: a new attempt every RETRY_MS (a card inserted after the
+ *     boot, a module that powers up late, a contact that comes back);
+ *   - a read failed: the task CHECKS the card (sector 0, PROBES attempts); if it does not
+ *     answer it was pulled out or lost its contact — it is unmounted (the streams go silent,
+ *     the files close) and remounted by the attempts above, then its sounds are read again.
+ *     A reader that fails stops reading: no "streak" would ever build up by itself;
+ *   - a failed head (a glitch) is read again, a few seconds later;
+ *   - every change of state is ANNOUNCED (NIDMI_SD): the app shows it, nobody polls. */
+const char* state() {
+  if (!_declared) return "off";
+  if (_mounted)   return "ok";
+  return _lost ? "lost" : "absent";
+}
+
+void service() {
+  static uint32_t last = 0, lastHeads = 0;
+  static const char* announced = "";
+  const uint32_t now = millis();
+  if (now - last < 250) return;
+  last = now;
+  if (_declared && _mounted && SdSpiDisk::failStreak() >= 1 && !_wantCheck && !_wantUnmount) {
+    _wantCheck = true;                    // a read failed: the task checks whether the card still answers
+    _startTask();
+  } else if (_declared && !_mounted && !_taskAlive && !_wantMount && !_wantUnmount
+             && now - _lastAttemptMs >= RETRY_MS) {
+    _wantMount = true;
+    _startTask();
+  }
+  if (_declared && _mounted && now - lastHeads >= 5000) {
+    lastHeads = now;
+    if (SdStream::failedHeads()) loadHeads();
+  }
+  const char* st = state();
+  if (strcmp(st, announced)) {
+    announced = st;
+    char frame[24];
+    snprintf(frame, sizeof frame, "NIDMI_SD:%s", st);
+    nidmi_ws_pousser(frame);
+  }
+}
+
+void simulateLoss(uint32_t ms) {
+  if (_declared && _mounted) SdSpiDisk::simulateOutage(ms);
+}
+
 void probeWiring() {
   if (!_declared || _mounted) return;
   _wantWiring = true;
@@ -473,6 +550,9 @@ File open(const char* path) {
 
 String diagnostics() {
   String j = "{\"declared\":" + String(_declared ? "true" : "false")
+           + ",\"state\":\"" + String(state()) + "\""
+           + ",\"lost_count\":" + String((unsigned long)_lostCount)
+           + ",\"remounts\":" + String((unsigned long)_remounts)
            + ",\"mounted\":" + String(_mounted ? "true" : "false")
            + ",\"pins\":{\"cs\":" + String(_cs) + ",\"sck\":" + String(_sck)
            + ",\"miso\":" + String(_miso) + ",\"mosi\":" + String(_mosi) + "}"
@@ -489,6 +569,9 @@ String diagnostics() {
     j += ",\"driver\":{\"type\":\"" + String(SdSpiDisk::type()) + "\",\"cmd8_echo\":" + String((unsigned long)SdSpiDisk::cmd8Echo())
        + ",\"blocks_read\":" + String((unsigned long)SdSpiDisk::blocksRead())
        + ",\"crc_errors\":" + String((unsigned long)SdSpiDisk::crcErrors())
+       + ",\"crc_rejected\":" + String((unsigned long)SdSpiDisk::crcRejected())
+       + ",\"fail_streak\":" + String((unsigned long)SdSpiDisk::failStreak())
+       + ",\"fail_total\":" + String((unsigned long)SdSpiDisk::failTotal())
        + ",\"retries\":" + String((unsigned long)SdSpiDisk::retries()) + "}";
   j += ",\"stream\":" + SdStream::diagnostics();
   if (_acmd41Rounds >= 0) {

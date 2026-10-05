@@ -1,3 +1,4 @@
+#include "../config/SdCard.h"
 #include "APICommon.h"
 #include "../Globals.h"
 #include "../server/ServerCore.h"
@@ -76,6 +77,7 @@ void setupNetworkAPI(AsyncWebServer& server) {
         json += ",\"fw_version\":\"" NIDMI_FW_VERSION "\"";
         json += ",\"fw_variant\":\"" NIDMI_FW_VARIANT "\"";
         json += ",\"app_version\":\"" NIDMI_APP_VERSION "\"";
+        json += ",\"sd\":\"" + String(SdCard::state()) + "\"";
         json += "}";
         request->send(200, "application/json", json);
     });

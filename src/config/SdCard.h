@@ -52,6 +52,15 @@ uint64_t capacityBytes();   // its capacity in bytes, 0 when not mounted
  * component is declared but the card is absent. */
 void retryIfDue();
 
+/* THE CARD'S SUPERVISION — from the loop, cheap (it throttles itself to 250 ms): remounts a
+ * card that is missing or was lost, declares lost a card whose reads fail in a row, reads
+ * failed heads again, and ANNOUNCES each change of state (`NIDMI_SD:<state>`). Headless: no
+ * app, no page needed. */
+void service();
+/* "off" (not declared), "ok" (mounted), "absent" (declared, never answered), "lost" (it was
+ * mounted, its reads failed in a row, it has not come back). */
+const char* state();
+
 /* SampleStore has finished reading storage: the card's sounds may follow. */
 void loadSounds();
 /* HEADS of streamed clips were requested (SdStream.h): the task reads them, one by one. */
@@ -77,5 +86,9 @@ void   tryMount();
 // The wiring probe (MISO level, swapped MISO/MOSI) — card NOT mounted only.
 void   probeWiring();
 bool   measure(const char* name, uint32_t hz);
+// BENCH: for `ms` milliseconds every read fails, as a card pulled out and put back would. An
+// outage longer than the checks (~0.5 s) makes the card be declared lost, unmounted, then
+// remounted; a shorter one is a glitch that passes. (/api/diag/sd?simulate_loss=1[&ms=...])
+void   simulateLoss(uint32_t ms);
 
 }  // namespace SdCard

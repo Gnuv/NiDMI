@@ -82,6 +82,8 @@ bool     headLoading(int8_t i);                         // requested, not read y
 void     prioritize(int8_t i);                          // a note is waiting for it: read it before the others
 void     recordWait(uint32_t ms);                       // a note waited for its head (diagnostic counters)
 void     recordDrop();                                  // ... or was given up on
+void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
+bool     failedHeads();                                 // some failed head may be read again (SdCard::service asks)
 
 // ── Streams ──────────────────────────────────────────────────────────────────
 // Called by the AUDIO TASK, and only it (except diagnostics).

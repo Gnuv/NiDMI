@@ -9,8 +9,9 @@
 // every failure says at which step it happened.
 //
 // THE DRIVER GOES FURTHER THAN MOUNTING: it is what reads streamed sounds.
-// Multi-block reads (CMD18) in one go, block CRC16 checked (counted, not
-// rejected: a card that sends no valid CRC shows in the counters), a failed block
+// Multi-block reads (CMD18) in one go, block CRC16 checked: counted, and REJECTED (read
+// again) once the card has proven it sends valid ones — a corrupted transfer must never
+// reach the audio; a card that sends no valid CRC at all is only counted. A failed block
 // is read again. Nothing writes: FatFs sees a protected medium.
 //
 // It plugs into FatFs the way the library does (ff_diskio_register, then
@@ -37,7 +38,20 @@ File open(const char* path);                     // read-only; empty when nothin
 
 // Counters, since the mount.
 uint32_t blocksRead();           // 512-byte blocks read
-uint32_t crcErrors();            // CRC16 mismatches (the data is kept anyway)
+uint32_t crcErrors();            // CRC16 mismatches
+uint32_t crcRejected();          // ... of which the block was read again (once the card has proven its CRCs)
 uint32_t retries();              // blocks read again after a failure
+/* Reads that failed after ALL their attempts: in a row (`failStreak`, back to 0 at the next
+ * success) and since the mount. The first failure makes SdCard CHECK the card (probe): a
+ * reader that fails stops reading, so no streak builds up by itself. */
+uint32_t failStreak();
+uint32_t failTotal();
+/* Reads sector 0, with all the driver's attempts: does the card still answer? A success
+ * puts `failStreak` back to 0. The supervisor (SdCard) asks it after any failed read. */
+bool     probe();
+/* BENCH: for the next `ms` milliseconds every read fails on purpose, without touching the bus —
+ * what a card pulled out then pushed back looks like to everything above
+ * (/api/diag/sd?simulate_loss=1[&ms=...]). */
+void simulateOutage(uint32_t ms);
 
 }  // namespace SdSpiDisk

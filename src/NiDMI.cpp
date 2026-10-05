@@ -15,6 +15,7 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include "audio/AudioEngine.h"
+#include "config/SdCard.h"
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -1735,6 +1736,7 @@ void nidmi_loop() {
     nidmi_chrono("ws", tc); tc = nidmi_section("journal");
     nidmi_web_debug_pump();
     nidmi_chrono("journal", tc);
+    SdCard::service();              // la carte SD : reprise, carte perdue, annonce (elle se limite a 250 ms)
     g_sectionEnCours = "hors boucle";
 
     /* LA BOUCLE DORT A CHAQUE TOUR (MESURES §170 ; elle cedait la main depuis

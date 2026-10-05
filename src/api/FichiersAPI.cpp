@@ -272,10 +272,16 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * `?retry=1`: a new attempt right now. `?wiring=1`: probes the wiring of a card that
    * will not mount. `?measure=<name.wav>[&hz=...]`: reads that sound end to end, in the
    * card's task (never here), and times every chunk; read again afterwards until
-   * `measure.state == "finished"`. A gesture, on demand: nothing polls it. */
+   * `measure.state == "finished"`. `?simulate_loss=1[&ms=1500]` (bench): every read fails
+   * for that long, as a card pulled out and put back. A gesture, on demand: nothing polls it. */
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
+    if (request->hasParam("simulate_loss")) {                          // bench: what a pulled card looks like
+      uint32_t ms = request->hasParam("ms") ? (uint32_t)request->getParam("ms")->value().toInt() : 1500;
+      if (ms > 60000) ms = 60000;
+      SdCard::simulateLoss(ms);
+    }
     if (request->hasParam("measure")) {
       uint32_t hz = request->hasParam("hz") ? (uint32_t)request->getParam("hz")->value().toInt() : 0;
       if (hz && (hz < 400000 || hz > 40000000)) hz = 0;
