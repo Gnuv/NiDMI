@@ -550,12 +550,25 @@ void loadSounds() {
 
 bool measure(const char* name, uint32_t hz) {
   if (!_declared || !name || !*name || strlen(name) >= sizeof(_measName) || _measState == 1) return false;
+  if (SdStream::anyActive()) {
+    /* A measure reads the card flat out for 12 s: it would take the bandwidth of the sounds that
+     * play. Said, not done. */
+    snprintf(_measJson, sizeof(_measJson), "{\"state\":\"finished\",\"error\":\"des sons de la carte jouent : la mesure leur volerait le debit\"}");
+    __sync_synchronize();
+    _measState = 2;
+    return false;
+  }
   strlcpy(_measName, name, sizeof(_measName));
   _measHz = hz;
   _measState = 1;
   _wantMeasure = true;
   _startTask();
   return true;
+}
+
+File openForWeb(const char* path) {
+  if (!_mounted || _wantCheck || SdSpiDisk::failStreak() > 0) return File();
+  return open(path);
 }
 
 File open(const char* path) {

@@ -372,6 +372,12 @@ void _retryFailed() {
   }
 }
 
+bool anyActive() {
+  if (!_streams) return false;
+  for (uint8_t i = 0; i < MAX_STREAMS; i++) if (_streams[i].state == 1) return true;
+  return false;
+}
+
 bool failedHeads() {
   if (!_heads) return false;
   for (uint8_t i = 0; i < MAX_HEADS; i++)

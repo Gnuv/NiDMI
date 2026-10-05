@@ -27,6 +27,7 @@
 #include "APICommon.h"
 #include "../config/Stockage.h"
 #include "../config/SdCard.h"
+#include "../config/Concert.h"
 #include <LittleFS.h>
 #include <stdarg.h>
 #include "../audio/AudioEngine.h"
@@ -253,7 +254,7 @@ template <typename F> void parcourir(F voir) {
 /* THE SD CARD'S SOUNDS: /samples/*.wav, the same layout as storage. Nothing else is
  * listed — for this firmware it only holds sounds (SdCard.h). */
 template <typename F> void walkSdCard(F voir) {
-  File d = SdCard::open(SdCard::FOLDER);
+  File d = SdCard::openForWeb(SdCard::FOLDER);        // the web server's walk: never on a card in doubt
   if (!d || !d.isDirectory()) return;
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
@@ -277,6 +278,11 @@ void setupFichiersAPI(AsyncWebServer& server) {
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
+    /* The bench hooks BREAK things on purpose: never during a concert (the lock answers 423). */
+    if ((request->hasParam("simulate_noise") || request->hasParam("simulate_loss"))
+        && Concert::refuse(request, "simulation de panne de la carte SD refusee : la carte est verrouillee pour le concert")) return;
+    if (request->hasParam("measure")
+        && Concert::refuse(request, "mesure de la carte SD refusee : la carte est verrouillee pour le concert")) return;
     if (request->hasParam("simulate_noise"))                           // bench: a noisy bus (blocks read with a bad CRC)
       SdCard::simulateNoise((uint32_t)request->getParam("simulate_noise")->value().toInt());
     if (request->hasParam("simulate_loss")) {                          // bench: what a pulled card looks like

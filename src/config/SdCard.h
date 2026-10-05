@@ -74,6 +74,12 @@ void loadHeads();
 
 // Opens a card file for reading; an empty File when the card is not mounted.
 File open(const char* path);
+/* The same, FOR THE WEB SERVER (a file list walks the directory in async_tcp, which has a 5 s
+ * watchdog): an empty File as soon as a read has failed and the card has not been checked since,
+ * or while it is — a card that hangs would make every directory read wait for its timeout. The
+ * list then simply does not show the SD for a moment. The streams and the heads use `open`:
+ * they must try again. */
+File openForWeb(const char* path);
 
 /* DIAGNOSTICS — a board without a serial port cannot say why a card won't mount.
  * The `[SD]` messages go to the web console (NIDMI_WEB_LOG); and when mounting

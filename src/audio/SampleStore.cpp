@@ -278,7 +278,7 @@ String listerJson() {
   }
   /* The SD card's sounds, after them — "volume" says where they come from. A name
    * that storage already holds wins, and is not listed twice. */
-  File s = SdCard::open(SdCard::FOLDER);
+  File s = SdCard::openForWeb(SdCard::FOLDER);        // the web server's walk: never on a card in doubt
   if (s && s.isDirectory()) {
     bool isFirst = out.length() == 1;
     for (File f = s.openNextFile(); f; f = s.openNextFile()) {

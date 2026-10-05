@@ -89,6 +89,7 @@ void     recordDrop();                                  // ... or was given up o
 void     recordNoStream();                              // a clip did not start: every stream was taken
 void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
 bool     failedHeads();
+bool     anyActive();                                   // some stream is playing (a measure would take its bandwidth)
 uint32_t trouble();                                     // everything missed so far: silent blocks, dropped notes, read errors, clips without a stream (the health reads it)                                 // some failed head may be read again (SdCard::service asks)
 
 // ── Streams ──────────────────────────────────────────────────────────────────
