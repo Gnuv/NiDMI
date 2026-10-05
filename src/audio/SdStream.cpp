@@ -404,6 +404,7 @@ void recordWait(uint32_t ms) {
 void recordDrop() { _droppedNotes = _droppedNotes + 1; }
 void recordNoHead() { _noHeadNotes = _noHeadNotes + 1; }
 void recordNoStream() { _noStream = _noStream + 1; }
+uint32_t trouble() { return _underrunsTotal + _noHeadNotes + _noStream + _droppedNotes + _readErrors; }
 
 // ── Streams: API ─────────────────────────────────────────────────────────────
 int8_t acquire(uint8_t voice) {

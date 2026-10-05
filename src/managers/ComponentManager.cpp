@@ -912,8 +912,13 @@ volatile uint32_t g_gigueMidiMaxUs   = 0;   // pire ecart a 10 ms, en us
 volatile uint32_t g_gigueMidiTours   = 0;   // tours comptes dans la fenetre
 volatile uint32_t g_gigueMidiRetards = 0;   // tours ou l'ecart depasse 5 ms
 volatile uint32_t g_gigueMidiCumulUs = 0;   // somme des ecarts, pour la moyenne
+/* WHEN, in ms since boot: the worst tick, the first and the last late one — a stall that
+ * happens at boot looks the same as one that happens in the middle of a performance in the
+ * counters, and only the time tells which (§205). */
+volatile uint32_t g_gigueMidiMaxAtMs = 0, g_gigueMidiFirstLateMs = 0, g_gigueMidiLastLateMs = 0;
 void nidmi_gigue_midi_reset(){
     g_gigueMidiMaxUs = g_gigueMidiTours = g_gigueMidiRetards = g_gigueMidiCumulUs = 0;
+    g_gigueMidiMaxAtMs = g_gigueMidiFirstLateMs = g_gigueMidiLastLateMs = 0;
 }
 
 void ComponentManager::midiTaskLoop() {
@@ -954,8 +959,12 @@ void ComponentManager::midiTaskLoop() {
         if (precedent) {
             const uint32_t d = maintenantUs - precedent;           // intervalle reel
             const uint32_t ecart = (d > PERIODE_US) ? (d - PERIODE_US) : (PERIODE_US - d);
-            if (ecart > g_gigueMidiMaxUs) g_gigueMidiMaxUs = ecart;
-            if (ecart > 5000) g_gigueMidiRetards++;
+            if (ecart > g_gigueMidiMaxUs) { g_gigueMidiMaxUs = ecart; g_gigueMidiMaxAtMs = millis(); }
+            if (ecart > 5000) {
+                g_gigueMidiRetards++;
+                if (!g_gigueMidiFirstLateMs) g_gigueMidiFirstLateMs = millis();
+                g_gigueMidiLastLateMs = millis();
+            }
             g_gigueMidiCumulUs += ecart;
             g_gigueMidiTours++;
         }

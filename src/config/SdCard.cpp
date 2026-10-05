@@ -308,7 +308,7 @@ void _loadSounds() {
   for (uint8_t i = 0; i < n && _mounted; i++) {
     String reason;
     if (AudioEngine::echantillonArrive(names[i], reason, true)) good++;
-    else NIDMI_WEB_LOG("[SD] %s ignore : %s", names[i], reason.c_str());
+    else { SampleStore::noteRefused(names[i], reason.c_str()); NIDMI_WEB_LOG("[SD] %s ignore : %s", names[i], reason.c_str()); }
   }
   NIDMI_WEB_LOG("[SD] %u son(s) precharge(s) sur %u dans %s", (unsigned)good, (unsigned)n, FOLDER);
 }
@@ -460,6 +460,9 @@ void undeclare() {
   _startTask();
 }
 
+uint32_t attempts()      { return _attempts; }
+uint32_t lostCount()     { return _lostCount; }
+uint32_t frequency()     { return _mounted ? SdSpiDisk::frequency() : 0; }
 bool     declared()      { return _declared; }
 bool     mounted()       { return _mounted; }
 uint64_t capacityBytes() { return _capacity; }

@@ -65,6 +65,13 @@ void installer() {
   c->os_func = &g_crochets;
 }
 
+/* THE WORST SINCE BOOT (§205): the quarter-second readings reset, and the stall that happens at
+ * boot — before the audio watchdog starts reading — was never seen by name. The first reading
+ * covers everything since boot; later ones only improve the record. Plain RAM, not in the hooks. */
+uint32_t g_bootPireUs = 0;
+char     g_bootPireTache[16] = "";
+uint32_t g_bootPireAtMs = 0;
+
 Releve releverEtRaz() {
   Releve r;
   r.operations = g_n;
@@ -79,7 +86,17 @@ Releve releverEtRaz() {
   g_totalCycles = 0;
   g_pireCycles = 0;
   g_pireTache = nullptr;
+  if (r.pireUs > g_bootPireUs) {
+    g_bootPireUs = r.pireUs;
+    g_bootPireAtMs = millis();
+    strlcpy(g_bootPireTache, r.pireTache ? pcTaskGetName(r.pireTache) : "?", sizeof(g_bootPireTache));
+  }
   return r;
+}
+
+void pireDepuisLeBoot(uint32_t& us, uint32_t& atMs, char* tache, size_t n) {
+  us = g_bootPireUs; atMs = g_bootPireAtMs;
+  strlcpy(tache, g_bootPireTache, n);
 }
 
 }  // namespace SurveillantFlash

@@ -88,7 +88,8 @@ void     recordWait(uint32_t ms);                       // a note waited for its
 void     recordDrop();                                  // ... or was given up on
 void     recordNoStream();                              // a clip did not start: every stream was taken
 void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
-bool     failedHeads();                                 // some failed head may be read again (SdCard::service asks)
+bool     failedHeads();
+uint32_t trouble();                                     // everything missed so far: silent blocks, dropped notes, read errors, clips without a stream (the health reads it)                                 // some failed head may be read again (SdCard::service asks)
 
 // ── Streams ──────────────────────────────────────────────────────────────────
 // Called by the AUDIO TASK, and only it (except diagnostics).

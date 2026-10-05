@@ -101,6 +101,11 @@ constexpr size_t PRELOAD_SOUND_MAX = 1536 * 1024;
 constexpr size_t PRELOAD_SD_MAX    = 3 * 1024 * 1024;
 // A WAV header: `f` is left at the start of the data. False (and `raison`) if it is not 16-bit PCM.
 bool wavHeader(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison);
+/* WHY A SOUND ON THE SD CARD WAS NOT LOADED ("PCM 16 bits requis (recu 24 bits…)"): kept so
+ * that the file list can SAY it — a 24-bit file dropped on the card used to be silently absent.
+ * Written by the SD-card task (SdCard), read by the web server; nullptr: no refusal on record. */
+void        noteRefused(const char* nom, const char* raison);
+const char* refusalOf(const char* nom);
 bool    charge();                      // chargerTout() est passé : lisible() dit vrai
 
 // ── Changer le magasin pendant que la tâche audio le lit ───────────────────

@@ -42,9 +42,10 @@ void nidmi_demanderDemarrageAVide(void);
 bool nidmi_prendreDemarrageAVide(void);   // consomme le drapeau (restaurerAuBoot)
 bool nidmi_demarreAVide(void);
 
-/* La sante, decidee par la carte : un octet de causes, et leur nom. */
-unsigned char nidmi_sante(void);
-void nidmi_santeTexte(unsigned char f, char* out, unsigned n);
+/* La sante, decidee par la carte : un mot de causes (16 bits : l'octet n'y suffisait plus,
+ * la carte SD en ajoute quatre), et leur nom. */
+unsigned short nidmi_sante(void);
+void nidmi_santeTexte(unsigned short f, char* out, unsigned n);
 
 /**
  * @brief L'ESSAI — voir NiDMI.cpp, « LE CABLE OU LE WIFI » : couper la radio

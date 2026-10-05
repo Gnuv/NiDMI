@@ -16,6 +16,7 @@
 #include <WiFi.h>
 #include "audio/AudioEngine.h"
 #include "config/SdCard.h"
+#include "audio/SdStream.h"
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -191,22 +192,31 @@ extern "C" bool nidmi_demarreAVide() { return s_demarreAVide; }
  *   reprises     une reprise refusee, file pleine. Tenue 60 s.
  *   plantage     le demarrage en cours fait suite a une panique, un chien de
  *                garde ou une chute de tension.
- * Un octet, ecrit par la boucle seule et lu par les routes : pas de chaine
+ *   sd_absente   la carte SD est declaree et ne repond pas (apres deux tentatives).
+ *   sd_perdue    elle repondait, et ne repond plus — ou elle a ete perdue dans la derniere
+ *                minute, meme retrouvee depuis (retiree, mauvais contact : un fil douteux).
+ *   sd_ralentie  son bus a ralenti de lui-meme (fil douteux) : moins de flux a la fois.
+ *   sd_flux      un flux a manque de donnees, une note n'a pas trouve son debut ou son
+ *                flux, une lecture a echoue — dans la derniere minute.
+ * Un mot de 16 bits, ecrit par la boucle seule et lu par les routes : pas de chaine
  * partagee entre deux taches (§20, piege 11). */
-enum : uint8_t {
+enum : uint16_t {
     SANTE_SON_COUPE = 1, SANTE_DECROCHAGES = 2, SANTE_CHARGE = 4,
-    SANTE_MEMOIRE = 8,   SANTE_REPRISES = 16,   SANTE_PLANTAGE = 32
+    SANTE_MEMOIRE = 8,   SANTE_REPRISES = 16,   SANTE_PLANTAGE = 32,
+    SANTE_SD_ABSENTE = 64, SANTE_SD_PERDUE = 128, SANTE_SD_RALENTIE = 256, SANTE_SD_FLUX = 512
 };
-static volatile uint8_t s_sante = 0;
-static unsigned long s_santeProchain = 0, s_decrochagesJusqua = 0, s_reprisesJusqua = 0;
-static uint32_t s_sousAlimAvant = 0, s_refusAvant = 0;
+static volatile uint16_t s_sante = 0;
+static unsigned long s_santeProchain = 0, s_decrochagesJusqua = 0, s_reprisesJusqua = 0, s_sdFluxJusqua = 0, s_sdPerdueJusqua = 0;
+static uint32_t s_sousAlimAvant = 0, s_refusAvant = 0, s_sdTroubleAvant = 0, s_sdPerduAvant = 0;
 
-extern "C" uint8_t nidmi_sante() { return s_sante; }
-extern "C" void nidmi_santeTexte(uint8_t f, char* out, unsigned n) {
-    static const struct { uint8_t bit; const char* nom; } CAUSES[] = {
+extern "C" unsigned short nidmi_sante() { return s_sante; }
+extern "C" void nidmi_santeTexte(unsigned short f, char* out, unsigned n) {
+    static const struct { uint16_t bit; const char* nom; } CAUSES[] = {
         { SANTE_SON_COUPE, "son_coupe" }, { SANTE_DECROCHAGES, "decrochages" },
         { SANTE_CHARGE, "charge" },       { SANTE_MEMOIRE, "memoire" },
-        { SANTE_REPRISES, "reprises" },   { SANTE_PLANTAGE, "plantage" } };
+        { SANTE_REPRISES, "reprises" },   { SANTE_PLANTAGE, "plantage" },
+        { SANTE_SD_ABSENTE, "sd_absente" }, { SANTE_SD_PERDUE, "sd_perdue" },
+        { SANTE_SD_RALENTIE, "sd_ralentie" }, { SANTE_SD_FLUX, "sd_flux" } };
     if (!out || !n) return;
     out[0] = '\0';
     for (const auto& c : CAUSES) {
@@ -234,7 +244,7 @@ static void verifierSante() {
     s_refusAvant = refus;
 
     const esp_reset_reason_t r = esp_reset_reason();
-    uint8_t f = 0;
+    uint16_t f = 0;
     if (m.bootCoupe)                                          f |= SANTE_SON_COUPE;
     if ((long)(s_decrochagesJusqua - maintenant) > 0)         f |= SANTE_DECROCHAGES;
     if (m.cyclesParEch * 100u >= 85u * 5000u)                 f |= SANTE_CHARGE;
@@ -243,10 +253,27 @@ static void verifierSante() {
     if (r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT
         || r == ESP_RST_WDT || r == ESP_RST_BROWNOUT)         f |= SANTE_PLANTAGE;
 
+    /* LA CARTE SD (§205), seulement si le composant est declare : une carte qui n'en a pas n'a
+     * rien a en dire. */
+    if (SdCard::declared()) {
+        const char* sd = SdCard::state();
+        /* A loss is held for a minute, like a dropout: the card may be back before the next
+         * reading (1 s), and a flaky contact must not disappear from the light with it. */
+        if (SdCard::lostCount() > s_sdPerduAvant) s_sdPerdueJusqua = maintenant + 60000;
+        s_sdPerduAvant = SdCard::lostCount();
+        if (!strcmp(sd, "lost") || (long)(s_sdPerdueJusqua - maintenant) > 0) f |= SANTE_SD_PERDUE;
+        else if (!strcmp(sd, "absent") && SdCard::attempts() >= 2)            f |= SANTE_SD_ABSENTE;
+        if (SdCard::mounted() && SdCard::frequency() < SdCard::DEFAULT_FREQUENCY_HZ) f |= SANTE_SD_RALENTIE;
+        const uint32_t trouble = SdStream::trouble();
+        if (trouble > s_sdTroubleAvant) s_sdFluxJusqua = maintenant + 60000;
+        s_sdTroubleAvant = trouble;
+        if ((long)(s_sdFluxJusqua - maintenant) > 0)                   f |= SANTE_SD_FLUX;
+    }
+
     if (f == s_sante) return;
     s_sante = f;
     if (!nidmi_ws_quelqu_un_ecoute()) return;
-    char trame[96] = "NIDMI_SANTE:";
+    char trame[160] = "NIDMI_SANTE:";
     nidmi_santeTexte(f, trame + 12, sizeof(trame) - 12);
     nidmi_ws_pousser(trame);
 }

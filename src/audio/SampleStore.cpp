@@ -2,6 +2,7 @@
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../config/SdCard.h"
+#include "SdStream.h"
 #include "../server/WebDebugConsole.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -288,7 +289,20 @@ String listerJson() {
       isFirst = false;
       out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size())
            + ",\"volume\":\"" + SdCard::VOLUME_ID + "\"";
-      { const int fi = _index(base); if (fi >= 0 && _ech[fi].streamed) out += ",\"streamed\":true"; }
+      { const int fi = _index(base);
+        if (fi >= 0 && _ech[fi].streamed) {
+          /* What this sound's head weighs in the heads budget: the app adds them up per cue. */
+          const uint32_t frames = (_ech[fi].trames < SdStream::HEAD_FRAMES) ? (uint32_t)_ech[fi].trames : SdStream::HEAD_FRAMES;
+          out += ",\"streamed\":true,\"head_bytes\":" + String((unsigned)(frames * (_ech[fi].stereo ? 2u : 1u) * 2u));
+        } else if (fi < 0) {
+          const char* why = refusalOf(base);                 // not loaded: say why, when we know
+          if (why && *why) {
+            String esc;
+            for (const char* c = why; *c; c++) { if (*c == '"' || *c == '\\') esc += '\\'; if ((uint8_t)*c >= 0x20) esc += *c; }
+            out += ",\"refused\":\"" + esc + "\"";
+          }
+        }
+      }
       const int i = _index(base);
       if (i >= 0 && _ech[i].freq)
         out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
@@ -297,6 +311,34 @@ String listerJson() {
   }
   out += "]";
   return out;
+}
+
+/* THE REFUSALS, in PSRAM (a few dozen bytes each, but internal RAM is the scarce resource):
+ * taken at the first refusal, never given back. A small ring: the most recent ones. One writer
+ * (the SD-card task); a reader may see a half-written entry once — it only costs a garbled
+ * line of a diagnostic list, never a crash (fixed-size, always terminated). */
+namespace {
+struct Refusal { char nom[NOM_MAX]; char raison[72]; };
+constexpr uint8_t REFUSALS_MAX = 8;
+Refusal* _refusals = nullptr;
+uint8_t  _refusalNext = 0;
+}
+
+void noteRefused(const char* nom, const char* raison) {
+  if (!nom || !*nom) return;
+  if (!_refusals) _refusals = (Refusal*)heap_caps_calloc(REFUSALS_MAX, sizeof(Refusal), MALLOC_CAP_SPIRAM);
+  if (!_refusals) return;
+  Refusal* r = nullptr;
+  for (uint8_t i = 0; i < REFUSALS_MAX; i++) if (!strcmp(_refusals[i].nom, nom)) { r = &_refusals[i]; break; }
+  if (!r) { r = &_refusals[_refusalNext]; _refusalNext = (uint8_t)((_refusalNext + 1) % REFUSALS_MAX); }
+  strlcpy(r->nom, nom, sizeof(r->nom));
+  strlcpy(r->raison, raison ? raison : "", sizeof(r->raison));
+}
+
+const char* refusalOf(const char* nom) {
+  if (!_refusals || !nom) return nullptr;
+  for (uint8_t i = 0; i < REFUSALS_MAX; i++) if (_refusals[i].nom[0] && !strcmp(_refusals[i].nom, nom)) return _refusals[i].raison;
+  return nullptr;
 }
 
 bool nomValide(const char* nom, String& raison) {

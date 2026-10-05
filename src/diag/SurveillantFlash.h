@@ -33,4 +33,8 @@ void installer();
 /** Ce qui s'est passe depuis le releve precedent, et remise a zero. */
 Releve releverEtRaz();
 
+/** La plus longue operation de flash depuis le demarrage, relevee a chaque lecture : sa duree,
+ *  l'heure (ms) du releve qui l'a vue, la tache qui l'a lancee. */
+void pireDepuisLeBoot(uint32_t& us, uint32_t& atMs, char* tache, size_t n);
+
 }  // namespace SurveillantFlash

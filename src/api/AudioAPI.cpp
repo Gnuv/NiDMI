@@ -1,3 +1,5 @@
+#include "../audio/SdStream.h"
+#include "../diag/SurveillantFlash.h"
 #include "../config/Occupations.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
@@ -354,6 +356,9 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += ",\"used\":"   + String(SampleStore::espaceUtilise());
         json += ",\"loaded\":\"" + String(AudioEngine::samplerNom()) + "\"";
         json += ",\"psram_bytes\":" + String(SampleStore::octetsPsram());
+        /* THE HEADS BUDGET: what the app adds the streamed sounds' `head_bytes` up against. */
+        json += ",\"heads_budget_bytes\":" + String((unsigned)SdStream::HEADS_BUDGET_BYTES);
+        json += ",\"heads_anticipated_bytes\":" + String((unsigned)SdStream::ANTICIPATED_BUDGET_BYTES);
         json += ",\"files\":" + SampleStore::listerJson() + "}";
         request->send(200, "application/json", json);
     });
@@ -1181,6 +1186,7 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
                                  g_gigueMidiRetards, g_gigueMidiCumulUs;
         extern volatile uint32_t g_gigueMuxMaxUs, g_gigueMuxTours,
                                  g_gigueMuxRetards, g_gigueMuxCumulUs;
+        extern volatile uint32_t g_gigueMidiMaxAtMs, g_gigueMidiFirstLateMs, g_gigueMidiLastLateMs;
         extern void nidmi_gigue_midi_reset();
         extern void nidmi_gigue_mux_reset();
         extern volatile uint32_t g_boucleMaxUs, g_boucleTours, g_boucleCumulUs,
@@ -1218,7 +1224,16 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         json += ",\"tours\":"     + String(nMidi);
         json += ",\"max_us\":"    + String(g_gigueMidiMaxUs);
         json += ",\"moy_us\":"    + String(nMidi ? (g_gigueMidiCumulUs / nMidi) : 0);
-        json += ",\"retards\":"   + String(g_gigueMidiRetards) + "},";
+        json += ",\"retards\":"   + String(g_gigueMidiRetards);
+        json += ",\"max_at_ms\":" + String(g_gigueMidiMaxAtMs);
+        json += ",\"first_late_ms\":" + String(g_gigueMidiFirstLateMs);
+        json += ",\"last_late_ms\":" + String(g_gigueMidiLastLateMs) + "},";
+        {
+            uint32_t us, atMs; char tache[16];
+            SurveillantFlash::pireDepuisLeBoot(us, atMs, tache, sizeof tache);
+            json += "\"flash_worst\":{\"us\":" + String(us) + ",\"read_at_ms\":" + String(atMs)
+                  + ",\"task\":\"" + String(tache) + "\"},";
+        }
         json += "\"mux\":{\"periode_us\":5000";
         json += ",\"tours\":"     + String(nMux);
         json += ",\"max_us\":"    + String(g_gigueMuxMaxUs);
@@ -1563,7 +1578,7 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
      * sans etre sondee. Causes separees par des virgules ; vide = rien a
      * signaler. La liste et ses seuils : NiDMI.cpp, « LA SANTE DE LA CARTE ». */
     server.on("/api/diag/sante", HTTP_GET, [](AsyncWebServerRequest *request){
-        char causes[96];
+        char causes[160];
         nidmi_santeTexte(nidmi_sante(), causes, sizeof causes);
         request->send(200, "application/json", String("{\"causes\":\"") + causes + "\"}");
     });

@@ -60,6 +60,9 @@ void retryIfDue();
  * failed heads again, and ANNOUNCES each change of state (`NIDMI_SD:<state>`). Headless: no
  * app, no page needed. */
 void service();
+uint32_t attempts();        // mounting attempts since boot
+uint32_t lostCount();       // times the card was lost since boot (a loss is remembered by the health for a minute)
+uint32_t frequency();       // the clock the bus runs at now (0: not mounted)
 /* "off" (not declared), "ok" (mounted), "absent" (declared, never answered), "lost" (it was
  * mounted, its reads failed in a row, it has not come back). */
 const char* state();
