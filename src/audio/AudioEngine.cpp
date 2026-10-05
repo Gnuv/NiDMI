@@ -1707,8 +1707,30 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anti
 
 /* Un son est arrive ou parti : les index des clips se recalculent — un clip
  * ne garde jamais l'emplacement d'un son retire. */
+/* L'ANTICIPATION EN COURS : les params de la cue SUIVANTE, gardes (en PSRAM) pour etre REJOUES quand un
+ * son arrive. Au demarrage, la cue 1 part seule et prepare la 2 AVANT que la SD soit montee et que ses
+ * sons existent : la demande ne trouvait pas le son, et rien ne la rejouait — a chaque allumage d'une
+ * composition qui joue au demarrage. Ecrit et lu sous verrouListes. */
+char* anticipationParams = nullptr;
+
+/* Les tetes des listes marquees `lprec` de `params` — classe ANTICIPEE, sans armer la liste. Sous
+ * verrouListes. Idempotent : une tete deja demandee n'est pas redemandee. */
+void _anticiper(const char* params) {
+  if (!params || !*params) return;
+  const String p(params);
+  const Champs ch = _champs(p);
+  const int nl = _nbParties(ch.liste, ',');
+  if (!nl || !ch.prec.length()) return;
+  Liste* tmp = (Liste*)heap_caps_malloc(sizeof(Liste), MALLOC_CAP_SPIRAM);
+  if (!tmp) return;
+  for (int i = 0; i < nl && i < (int)LISTES_MAX; i++)
+    if (_partie(ch.prec, ',', i).toInt() != 0) _remplirListe(*tmp, ch, i, nullptr, /*anticipe=*/true);
+  heap_caps_free(tmp);
+}
+
 void _reresoudre() {
   VerrouListes v;
+  _anticiper(anticipationParams);      // un son vient d'arriver : la cue suivante le trouve peut-etre
   if (!banques || !banques[banqueActive].n) return;
   Banque* b = _banqueLibre();
   if (!b) return;
@@ -1821,14 +1843,12 @@ int etatListes(uint32_t* blocs, uint8_t* clips, uint8_t* nombres, uint8_t max, b
  * elles s'evincent d'elles-memes. Ce qui ne rentre pas retombe sur « la note attend ». */
 void prechargerListes(const String& params) {
   VerrouListes v;
-  const Champs ch = _champs(params);
-  const int nl = _nbParties(ch.liste, ',');
-  if (!nl || !ch.prec.length()) return;
-  Liste* tmp = (Liste*)heap_caps_malloc(sizeof(Liste), MALLOC_CAP_SPIRAM);
-  if (!tmp) return;
-  for (int i = 0; i < nl && i < (int)LISTES_MAX; i++)
-    if (_partie(ch.prec, ',', i).toInt() != 0) _remplirListe(*tmp, ch, i, nullptr, /*anticipe=*/true);
-  heap_caps_free(tmp);
+  if (anticipationParams) { heap_caps_free(anticipationParams); anticipationParams = nullptr; }
+  if (params.indexOf("lprec=") < 0) return;                    // la cue suivante n'en veut pas : rien a garder
+  anticipationParams = (char*)heap_caps_malloc(params.length() + 1, MALLOC_CAP_SPIRAM);
+  if (!anticipationParams) return;
+  memcpy(anticipationParams, params.c_str(), params.length() + 1);
+  _anticiper(anticipationParams);
 }
 
 /* L'ETAT DES TETES d'une liste armee : combien de ses clips sont lus en flux, combien ont leur tete

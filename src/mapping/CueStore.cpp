@@ -345,18 +345,6 @@ void _appliquer(const Cue& c) {
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
      * charge. Une cue sans liste les retire (une banque vide). */
     AudioEngine::poserListes(c.params);
-    /* « PRECHARGER » (option d'un bloc play-list) : la cue SUIVANTE — celle que GO jouerait, la premiere
-     * apres la derniere si la liste boucle — voit les tetes de ses listes marquees lues d'avance. On ne
-     * sait pas ou l'usager ira (les sauts sont libres) : c'est une OPTION, par bloc, pour les
-     * compositions lineaires. Le budget la borne (FluxSD.h) ; si on saute ailleurs, ces tetes s'evincent. */
-    {
-      const int n = nombre();
-      const int suivante = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
-      Cue prochaine;
-      if (suivante >= 0 && suivante != _index && lire(suivante, prochaine) && prochaine.engine == -2
-          && prochaine.params.indexOf("lprec=") >= 0)
-        AudioEngine::prechargerListes(prochaine.params);
-    }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
@@ -366,6 +354,22 @@ void _appliquer(const Cue& c) {
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
   if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String()); }
+
+  /* « PRECHARGER » (option d'un bloc play-list), sur TOUTE cue — une cue muette prepare aussi la
+   * suivante. La cue SUIVANTE — celle que GO jouerait, la premiere apres la derniere si la liste
+   * boucle — voit les tetes de ses listes marquees lues d'avance. On ne
+   * sait pas ou l'usager ira (les sauts sont libres) : c'est une OPTION, par bloc, pour les
+   * compositions lineaires. Le budget la borne (FluxSD.h) ; si on saute ailleurs, ces tetes s'evincent. */
+  {
+    const int n = nombre();
+    const int suivante = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
+    /* TOUJOURS appelee : une suivante qui n'en veut pas EFFACE l'anticipation d'avant. */
+    Cue prochaine;
+    if (suivante >= 0 && suivante != _index && lire(suivante, prochaine) && prochaine.engine == -2)
+      AudioEngine::prechargerListes(prochaine.params);
+    else
+      AudioEngine::prechargerListes(String());
+  }
 
   // 2. L'audio, s'il y en a. Une carte sans moteur audio ecrit engine = -1 et
   //    ne paye rien de tout ceci.
