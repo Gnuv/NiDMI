@@ -2,6 +2,7 @@
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../config/CarteSd.h"
+#include "../server/WebDebugConsole.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -47,6 +48,7 @@ struct Echantillon {
   bool     stereo = false;
   uint32_t freq   = 48000;
   char     nom[NOM_MAX] = {0};
+  bool     sd     = false;      // lu depuis la carte SD (CarteSd), pas depuis storage
   volatile bool pret = false;
 };
 Echantillon      _ech[SAMPLES_MAX];
@@ -94,7 +96,7 @@ int _vide() {
 void _publier(int i, const Echantillon& e) {
   Echantillon& d = _ech[i];
   d.pcm = e.pcm; d.trames = e.trames; d.octets = e.octets;
-  d.stereo = e.stereo; d.freq = e.freq;
+  d.stereo = e.stereo; d.freq = e.freq; d.sd = e.sd;
   memcpy(d.nom, e.nom, sizeof(d.nom));
   __sync_synchronize();
   d.pret = true;
@@ -186,11 +188,12 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
 
   dest.pcm    = pcm;
   dest.octets = tailleData;
+  dest.sd     = carteSd;
   dest.stereo = (canaux == 2);
   dest.freq   = freq ? freq : 48000;
   dest.trames = tailleData / (2 * canaux);
   strlcpy(dest.nom, nom, sizeof(dest.nom));
-  Serial.printf("[samples] %s charge%s : %u trames, %u Hz, %s, %u o en PSRAM\n",
+  NIDMI_WEB_LOG("[samples] %s charge%s : %u trames, %u Hz, %s, %u o en PSRAM",
                 dest.nom, carteSd ? " (carte SD)" : "", (unsigned)dest.trames, (unsigned)dest.freq,
                 dest.stereo ? "stereo" : "mono", (unsigned)tailleData);
   return true;
@@ -199,6 +202,10 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool carteSd = fa
 }  // namespace
 
 bool estMonte() { return _monte; }
+
+bool enteteWav(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison) {
+  return _lireEntete(f, canaux, freq, octetsData, raison);
+}
 
 bool monter() {
   if (_monte) return true;
@@ -404,23 +411,40 @@ uint8_t chargerTout() {
   return _prets;
 }
 
-/* Les sons de la carte SD qu'il reste a lire : ses `.wav` de /samples dont le nom
- * n'est pas deja dans le magasin (storage l'emporte). Les noms que `nomValide`
- * refuse sont dits et sautes — une cue ne pourrait pas les nommer. */
+/* Les sons de la carte SD qu'il reste a PRECHARGER : ses `.wav` de /samples dont le
+ * nom n'est pas deja dans le magasin (storage l'emporte).
+ *
+ * UN PLAFOND, parce que la PSRAM est une ressource commune : les tampons de reponse
+ * du serveur web, les banques de play list et la console y vivent aussi. Une carte
+ * SD pleine de sons ne doit pas la vider. Un son plus gros que PRECHARGE_SON_MAX, ou
+ * qui depasserait PRECHARGE_SD_MAX en tout, n'est PAS precharge — il est dit, et il
+ * attend la lecture en flux (CarteSd.h), qui ne le garde pas en memoire.
+ * Les noms que `nomValide` refuse sont dits et sautes : une cue ne saurait pas les
+ * nommer. */
 uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max) {
   uint8_t n = 0;
   File d = CarteSd::ouvrir(CarteSd::DOSSIER);
   if (!d || !d.isDirectory()) {
-    Serial.printf("[SD] pas de dossier %s sur la carte : rien a lire\n", CarteSd::DOSSIER);
+    NIDMI_WEB_LOG("[SD] pas de dossier %s sur la carte : rien a lire", CarteSd::DOSSIER);
     return 0;
   }
+  size_t cumul = 0;
+  for (int i = 0; i < SAMPLES_MAX; i++) if (_ech[i].pret && _ech[i].sd) cumul += _ech[i].octets;
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (f.isDirectory()) continue;
     const char* base = _base(f.path());
     if (!_estWav(base) || indexDe(base) >= 0) continue;
     String raison;
-    if (!nomValide(base, raison)) { Serial.printf("[SD] %s ignore : %s\n", base, raison.c_str()); continue; }
-    if (n >= max) { Serial.printf("[SD] au-dela de %u sons, le reste est ignore\n", (unsigned)max); break; }
+    if (!nomValide(base, raison)) { NIDMI_WEB_LOG("[SD] %s ignore : %s", base, raison.c_str()); continue; }
+    const size_t taille = f.size();
+    if (taille > PRECHARGE_SON_MAX || cumul + taille > PRECHARGE_SD_MAX) {
+      NIDMI_WEB_LOG("[SD] %s : %u Ko, trop pour la PSRAM (un son : %u Ko au plus, la SD : %u Ko en tout) — pas precharge",
+                    base, (unsigned)(taille / 1024), (unsigned)(PRECHARGE_SON_MAX / 1024),
+                    (unsigned)(PRECHARGE_SD_MAX / 1024));
+      continue;
+    }
+    if (n >= max) { NIDMI_WEB_LOG("[SD] au-dela de %u sons, le reste est ignore", (unsigned)max); break; }
+    cumul += taille;
     strlcpy(noms[n++], base, NOM_MAX);
   }
   return n;
@@ -470,7 +494,7 @@ void liberer(int i) {
   int16_t* pcm = e.pcm;
   _octets -= e.octets;
   e.pcm = nullptr; e.trames = 0; e.octets = 0; e.stereo = false; e.freq = 48000;
-  e.nom[0] = 0;
+  e.nom[0] = 0; e.sd = false;
   __sync_synchronize();
   heap_caps_free(pcm);
 }

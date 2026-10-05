@@ -32,9 +32,9 @@ namespace CarteSd {
 
 constexpr const char* VOLUME  = "sd";           // l'id que /api/fichiers lui donne
 constexpr const char* DOSSIER = "/samples";     // la meme forme que storage
-/* 10 MHz : une breadboard et des fils volants ne tiennent pas 20 MHz. Un son de
- * 1 Mo se lit en ~1 s ; il se lit une fois, au chargement. */
-constexpr uint32_t    FREQUENCE_HZ = 10000000;
+/* 10 MHz : une breadboard et des fils volants ne tiennent pas toujours 20 MHz.
+ * `mesurer(…, hz)` remonte la carte a une autre frequence pour l'essayer. */
+constexpr uint32_t    FREQUENCE_DEFAUT_HZ = 10000000;
 
 // Le composant est declare : ses broches sont connues, la carte est a monter.
 // Idempotent (la restauration au demarrage, puis une redeclaration identique).
@@ -56,5 +56,20 @@ void chargerSons();
 
 // Ouvre un fichier de la carte en lecture ; un File vide si elle n'est pas montee.
 File ouvrir(const char* chemin);
+
+/* DIAGNOSTIC — une carte sans port serie ne dit pas pourquoi elle ne monte pas.
+ * Les messages `[SD]` vont a la console web (NIDMI_WEB_LOG) ; et quand le montage
+ * echoue, la tache SONDE le bus a la main : CMD0 puis CMD8, a 400 kHz. Une carte
+ * vivante repond 0x01 a CMD0 ; 0xFF, c'est le silence (carte absente, MISO ou
+ * alimentation ou CS mal cables). Ce que /api/diag/sd rend.
+ *   essai   : force un nouvel essai tout de suite (sans les 5 s).
+ *   mesure  : le nom d'un .wav de /samples dont on mesure la lecture sequentielle
+ *             (debit, pire latence d'un morceau de 16 ko, un saut au milieu) —
+ *             ce qui dimensionne la lecture en flux. `hz` : la frequence du bus.
+ * La mesure se fait dans la tache ; la requete n'attend pas : on relit le
+ * diagnostic jusqu'a `mesure.etat == "finie"`. */
+String diagnostic();
+void   essayer();
+bool   mesurer(const char* nom, uint32_t hz);
 
 }  // namespace CarteSd

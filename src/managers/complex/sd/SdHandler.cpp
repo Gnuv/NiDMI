@@ -4,6 +4,7 @@
 
 #include "../../../components/storage/SdSpiDef.h"
 #include "../../../config/CarteSd.h"
+#include "../../../server/WebDebugConsole.h"
 
 bool SdHandler::addComponent(const ComplexComponentData& data) {
     cs_ = data.mainPinGpio;
@@ -17,14 +18,14 @@ bool SdHandler::addComponent(const ComplexComponentData& data) {
         else if (!strcmp(id, "sdMiso")) miso_ = data.additionalPins[i].gpio;
         else if (!strcmp(id, "sdMosi")) mosi_ = data.additionalPins[i].gpio;
     }
-    Serial.printf("[SD] declaree : CS=%u SCK=%u MISO=%u MOSI=%u\n",
+    NIDMI_WEB_LOG("[SD] declaree : CS=%u SCK=%u MISO=%u MOSI=%u",
                   (unsigned)cs_, (unsigned)sck_, (unsigned)miso_, (unsigned)mosi_);
     CarteSd::declarer(cs_, sck_, miso_, mosi_);     // monte dans SA tache : on ne l'attend pas
     return true;
 }
 
 bool SdHandler::removeComponent(const char*, uint8_t) {
-    Serial.println("[SD] retiree : les broches sont liberees");
+    NIDMI_WEB_LOG("[SD] retiree : les broches sont liberees");
     cs_ = sck_ = miso_ = mosi_ = 255;
     CarteSd::retirer();
     return true;

@@ -27,6 +27,7 @@
  */
 #pragma once
 #include <Arduino.h>
+#include <FS.h>
 
 namespace SampleStore {
 
@@ -93,6 +94,11 @@ uint8_t chargerTout();
 // Les sons de la CARTE SD (CarteSd) que le magasin n'a pas encore : leurs noms,
 // pour que la tâche de la carte les installe un à un (installer(…, true)).
 uint8_t sonsDeLaCarteSd(char noms[][NOM_MAX], uint8_t max);
+/* Le plafond du prechargement depuis la SD : un son, et tous ensemble. */
+constexpr size_t PRECHARGE_SON_MAX = 1536 * 1024;
+constexpr size_t PRECHARGE_SD_MAX  = 3 * 1024 * 1024;
+// L'en-tete d'un WAV : f reste au debut des donnees. Faux (et `raison`) si ce n'est pas du PCM 16 bits.
+bool enteteWav(File& f, uint16_t& canaux, uint32_t& freq, uint32_t& octetsData, String& raison);
 bool    charge();                      // chargerTout() est passé : lisible() dit vrai
 
 // ── Changer le magasin pendant que la tâche audio le lit ───────────────────
