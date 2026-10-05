@@ -135,9 +135,16 @@ void setupAudioAPI(AsyncWebServer& server) {
             uint8_t clips[AudioEngine::LISTES_MAX], nombres[AudioEngine::LISTES_MAX];
             const int n = AudioEngine::etatListes(blocs, clips, nombres, AudioEngine::LISTES_MAX);
             json += "\"listes\":[";
-            for (int i = 0; i < n; i++)
+            for (int i = 0; i < n; i++) {
                 json += String(i ? "," : "") + "{\"bloc\":" + String(blocs[i]) + ",\"clip\":"
-                      + String(clips[i]) + ",\"n\":" + String(nombres[i]) + "}";
+                      + String(clips[i]) + ",\"n\":" + String(nombres[i]);
+                /* Ses clips lus en flux : combien, combien ont leur tete, combien n'en auront jamais. */
+                uint8_t fl, pr, sa;
+                if (AudioEngine::etatTetes(blocs[i], fl, pr, sa) && fl)
+                    json += ",\"tetes\":{\"flux\":" + String(fl) + ",\"pretes\":" + String(pr)
+                          + ",\"sans\":" + String(sa) + "}";
+                json += "}";
+            }
             json += "],";
         }
         json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
@@ -384,7 +391,7 @@ void setupAudioAPI(AsyncWebServer& server) {
      * par le suivi, la redira a la prochaine arrivee sur la cue. */
     server.on("/api/audio/liste", HTTP_POST, [](AsyncWebServerRequest *request){
         static const char* const CLES[] = { "liste", "lbloc", "lnote", "lsuite",
-                                            "lgain", "ldebut", "lfin", "lboucle" };
+                                            "lgain", "ldebut", "lfin", "lboucle", "lprec" };
         String params;
         for (const char* cle : CLES)
             if (request->hasParam(cle, true))
@@ -400,7 +407,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         }
         String absents;
         uint32_t bloc = 0;
-        const int n = AudioEngine::poserListe(params, absents, bloc);
+        uint8_t enFlux = 0, sansTete = 0;
+        const int n = AudioEngine::poserListe(params, absents, bloc, &enFlux, &sansTete);
         if (n < 0) {
             request->send(bloc ? 507 : 400, "application/json", bloc
                 ? "{\"status\":\"error\",\"message\":\"plus de place : "
@@ -408,7 +416,10 @@ void setupAudioAPI(AsyncWebServer& server) {
                 : String("{\"status\":\"error\",\"message\":\"lbloc requis\"}"));
             return;
         }
+        /* `tetes_sans` : les clips lus en flux qui n'auront JAMAIS de tete — le budget des tetes de la
+         * carte est plein : ils ne joueront pas. L'app le dit (inspecteur de la play-list). */
         String json = "{\"status\":\"ok\",\"bloc\":" + String(bloc) + ",\"clips\":" + String(n)
+                    + ",\"tetes_flux\":" + String(enFlux) + ",\"tetes_sans\":" + String(sansTete)
                     + ",\"absents\":[";
         for (int i = 0, debut = 0; debut < (int)absents.length(); i++) {
             int fin = absents.indexOf(',', debut); if (fin < 0) fin = absents.length();

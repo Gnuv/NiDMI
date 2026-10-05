@@ -345,6 +345,18 @@ void _appliquer(const Cue& c) {
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
      * charge. Une cue sans liste les retire (une banque vide). */
     AudioEngine::poserListes(c.params);
+    /* « PRECHARGER » (option d'un bloc play-list) : la cue SUIVANTE — celle que GO jouerait, la premiere
+     * apres la derniere si la liste boucle — voit les tetes de ses listes marquees lues d'avance. On ne
+     * sait pas ou l'usager ira (les sauts sont libres) : c'est une OPTION, par bloc, pour les
+     * compositions lineaires. Le budget la borne (FluxSD.h) ; si on saute ailleurs, ces tetes s'evincent. */
+    {
+      const int n = nombre();
+      const int suivante = (n <= 0) ? -1 : ((_index + 1 < n) ? _index + 1 : (_boucle ? 0 : -1));
+      Cue prochaine;
+      if (suivante >= 0 && suivante != _index && lire(suivante, prochaine) && prochaine.engine == -2
+          && prochaine.params.indexOf("lprec=") >= 0)
+        AudioEngine::prechargerListes(prochaine.params);
+    }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */

@@ -22,6 +22,8 @@ struct Tete {
   int16_t*       pcm     = nullptr;
   volatile uint8_t etat  = 0;           // 0 libre, 1 demandee, 2 prete, 3 en echec
   volatile bool  urgente = false;       // une note l'attend : a lire avant les autres
+  volatile bool  anticipee = false;     // demandee pour la cue SUIVANTE (promue des qu'une demande courante la nomme)
+  uint32_t       octets  = 0;           // ce qu'elle pese dans le budget (0 : en echec, rien de pris)
 };
 Tete* _tetes = nullptr;               // TETES_MAX, en PSRAM, pris au premier besoin (voir _prendreTables)
 
@@ -43,19 +45,19 @@ bool _chargerTete(uint8_t i) {                       // faux : rien n'a change (
   const int s = SampleStore::indexDe(t.son);
   if (s < 0 || !SampleStore::estFlux((uint8_t)s)) {
     NIDMI_WEB_LOG("[SD] tete de %s : ce n'est pas un son lu en flux", t.son);
-    t.etat = 3; return true;
+    t.octets = 0; t.etat = 3; return true;
   }
   const uint32_t total = (uint32_t)SampleStore::trames((uint8_t)s);
   const uint8_t  ca    = SampleStore::stereo((uint8_t)s) ? 2 : 1;
   if (t.debut >= total) {
     NIDMI_WEB_LOG("[SD] tete de %s : le debut (trame %lu) est au-dela de la fin", t.son, (unsigned long)t.debut);
-    t.etat = 3; return true;
+    t.octets = 0; t.etat = 3; return true;
   }
   const uint32_t n = (total - t.debut < TETE_TRAMES) ? total - t.debut : TETE_TRAMES;
   File f = CarteSd::ouvrir(_chemin(t.son).c_str());
-  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", t.son); t.etat = 3; return true; }
+  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", t.son); t.octets = 0; t.etat = 3; return true; }
   int16_t* pcm = (int16_t*)heap_caps_malloc((size_t)n * ca * 2, MALLOC_CAP_SPIRAM);
-  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", t.son); t.etat = 3; return true; }
+  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", t.son); t.octets = 0; t.etat = 3; return true; }
   const uint32_t t0 = millis();
   const size_t   octets = (size_t)n * ca * 2;
   size_t lus = 0;
@@ -72,7 +74,7 @@ bool _chargerTete(uint8_t i) {                       // faux : rien n'a change (
   if (lus != octets) {
     heap_caps_free(pcm);
     NIDMI_WEB_LOG("[SD] tete de %s : lecture incomplete (%u / %u o)", t.son, (unsigned)lus, (unsigned)octets);
-    t.etat = 3; return true;
+    t.octets = 0; t.etat = 3; return true;
   }
   t.pcm = pcm; t.trames = n;
   __sync_synchronize();
@@ -104,6 +106,7 @@ struct Flux {
 Flux* _fl = nullptr;                  // FLUX_MAX, idem
 volatile uint32_t _manquesTotal = 0;
 volatile uint32_t _notesRetardees = 0, _notesAbandonnees = 0, _attentePireMs = 0;
+volatile uint32_t _refus = 0, _refusAnticipes = 0;
 volatile uint32_t _lecteurVit = 0;
 volatile bool     _arretLecteur = false;
 
@@ -223,30 +226,58 @@ void _lancerLecteur() {
 }  // namespace
 
 // ── Les tetes : API ──────────────────────────────────────────────────────────
-int8_t demanderTete(const char* son, uint32_t debut) {
-  if (!_prendreTables()) return -1;
-  int8_t idx = -1;
+int8_t demanderTete(const char* son, uint32_t debut, bool anticipee) {
+  if (!_prendreTables()) return TETE_INCONNUE;
+  /* Ce que cette tete pesera : lu dans l'emplacement « flux » du magasin (duree, canaux). */
+  const int sl = SampleStore::indexDe(son);
+  if (sl < 0 || !SampleStore::estFlux((uint8_t)sl)) return TETE_INCONNUE;
+  const uint32_t total = (uint32_t)SampleStore::trames((uint8_t)sl);
+  if (debut >= total) return TETE_INCONNUE;
+  const uint32_t octets = ((total - debut < TETE_TRAMES) ? total - debut : TETE_TRAMES)
+                        * (SampleStore::stereo((uint8_t)sl) ? 2u : 1u) * 2u;
+  int8_t idx = TETE_INCONNUE;
   bool neuve = false;
   {
     VerrouT v;
     int8_t libre = -1;
+    uint32_t pris = 0, anticipes = 0;
     for (int8_t i = 0; i < (int8_t)TETES_MAX; i++) {
       Tete& t = _tetes[i];
       if (t.etat == 0) { if (libre < 0) libre = i; continue; }
-      if (t.debut == debut && !strcmp(t.son, son)) { t.vuMs = millis(); idx = i; break; }
+      pris += t.octets;
+      if (t.anticipee) anticipes += t.octets;
+      if (idx == TETE_INCONNUE && t.debut == debut && !strcmp(t.son, son)) {
+        t.vuMs = millis();
+        if (!anticipee) t.anticipee = false;              // une demande courante la PROMEUT
+        idx = i;
+      }
     }
-    if (idx < 0 && libre >= 0) {
-      Tete& t = _tetes[libre];
-      strlcpy(t.son, son, sizeof(t.son));
-      t.debut = debut; t.trames = 0; t.pcm = nullptr; t.vuMs = millis();
-      __sync_synchronize();
-      t.etat = 1;
-      idx = libre; neuve = true;
+    if (idx == TETE_INCONNUE) {
+      const bool placeSurLaTable = libre >= 0;
+      const bool dansLeBudget = pris + octets <= TETES_BUDGET_OCTETS
+                             && (!anticipee || anticipes + octets <= ANTICIPE_BUDGET_OCTETS);
+      const bool psramOk = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) >= PSRAM_RESERVE_OCTETS + octets;
+      if (!placeSurLaTable || !dansLeBudget || !psramOk) {
+        if (anticipee) _refusAnticipes = _refusAnticipes + 1;
+        idx = TETE_BUDGET_PLEIN;
+      } else {
+        Tete& t = _tetes[libre];
+        strlcpy(t.son, son, sizeof(t.son));
+        t.debut = debut; t.trames = 0; t.pcm = nullptr; t.vuMs = millis();
+        t.octets = octets; t.urgente = false; t.anticipee = anticipee;
+        __sync_synchronize();
+        t.etat = 1;
+        idx = libre; neuve = true;
+      }
     }
   }
   if (neuve) CarteSd::chargerTetes();
   return idx;
 }
+
+bool teteAnticipee(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat != 0 && _tetes[i].anticipee; }
+bool teteEvincable(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && (_tetes[i].etat == 2 || _tetes[i].etat == 3); }
+void noterRefus() { _refus = _refus + 1; }
 
 bool tetePrete(int8_t i) { return _tetes && i >= 0 && i < (int8_t)TETES_MAX && _tetes[i].etat == 2; }
 
@@ -269,7 +300,7 @@ void libererTete(int8_t i) {
   int16_t* pcm = t.pcm;
   t.etat = 0;
   __sync_synchronize();
-  t.pcm = nullptr; t.trames = 0;
+  t.pcm = nullptr; t.trames = 0; t.octets = 0; t.anticipee = false; t.urgente = false;
   if (pcm) heap_caps_free(pcm);
 }
 
@@ -281,7 +312,8 @@ void chargerTetes() {
   for (;;) {
     int8_t choix = -1;
     for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1 && _tetes[i].urgente) choix = (int8_t)i;
-    for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1) choix = (int8_t)i;
+    for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1 && !_tetes[i].anticipee) choix = (int8_t)i;
+    for (uint8_t i = 0; i < TETES_MAX && choix < 0; i++) if (_tetes[i].etat == 1) choix = (int8_t)i;   // les anticipees, en dernier
     if (choix < 0) break;
     if (!_chargerTete((uint8_t)choix)) break;
   }
@@ -385,7 +417,9 @@ String diagnostic() {
            + ",\"manques_total\":" + String((unsigned long)_manquesTotal)
            + ",\"notes_retardees\":" + String((unsigned long)_notesRetardees)
            + ",\"attente_pire_ms\":" + String((unsigned long)_attentePireMs)
-           + ",\"notes_abandonnees\":" + String((unsigned long)_notesAbandonnees) + ",\"flux\":[";
+           + ",\"notes_abandonnees\":" + String((unsigned long)_notesAbandonnees)
+           + ",\"tetes_refusees\":" + String((unsigned long)_refus)
+           + ",\"anticipees_refusees\":" + String((unsigned long)_refusAnticipes) + ",\"flux\":[";
   bool premier = true;
   for (uint8_t i = 0; _fl && i < FLUX_MAX; i++) {
     const Flux& x = _fl[i];
@@ -398,7 +432,10 @@ String diagnostic() {
        + ",\"fin\":" + String((unsigned long)x.fin) + ",\"blocs_manques\":" + String((unsigned long)x.sousAlim)
        + ",\"sauts\":" + String((unsigned long)x.sauts) + ",\"departs\":" + String((unsigned long)x.departs) + "}";
   }
-  j += "],\"tetes\":[";
+  uint32_t pris = 0, ant = 0;
+  for (uint8_t i = 0; _tetes && i < TETES_MAX; i++) if (_tetes[i].etat != 0) { pris += _tetes[i].octets; if (_tetes[i].anticipee) ant += _tetes[i].octets; }
+  j += "],\"budget_tetes\":{\"utilise\":" + String((unsigned long)pris) + ",\"max\":" + String((unsigned long)TETES_BUDGET_OCTETS)
+     + ",\"anticipees\":" + String((unsigned long)ant) + ",\"max_anticipees\":" + String((unsigned long)ANTICIPE_BUDGET_OCTETS) + "},\"tetes\":[";
   premier = true;
   for (uint8_t i = 0; _tetes && i < TETES_MAX; i++) {
     const Tete& t = _tetes[i];
@@ -407,7 +444,8 @@ String diagnostic() {
     premier = false;
     j += "{\"son\":\"" + String(t.son) + "\",\"debut\":" + String((unsigned long)t.debut)
        + ",\"etat\":\"" + String(t.etat == 1 ? "demandee" : t.etat == 2 ? "prete" : "echec")
-       + "\",\"trames\":" + String((unsigned long)t.trames) + "}";
+       + "\",\"trames\":" + String((unsigned long)t.trames) + ",\"octets\":" + String((unsigned long)t.octets)
+       + (t.anticipee ? ",\"anticipee\":true" : "") + "}";
   }
   j += "]}";
   return j;

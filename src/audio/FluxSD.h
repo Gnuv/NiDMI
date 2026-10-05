@@ -38,18 +38,35 @@
 namespace FluxSD {
 
 constexpr uint8_t  FLUX_MAX       = 3;        // flux simultanes (un par voix de play list qui joue)
-constexpr uint8_t  TETES_MAX      = 16;       // clips « a tete » armes a la fois
+constexpr uint8_t  TETES_MAX      = 64;       // entrees de la table (quelques dizaines d'octets chacune)
 constexpr uint32_t TETE_TRAMES    = 16384;    // la tete d'un clip : 0,37 s a 44,1 kHz
+/* LE BUDGET DES TETES, EN OCTETS, pas en nombre : une tete stereo prend 64 Ko, une mono 32 Ko.
+ * 2 Mo = ~32 clips stereo (~64 mono) a tete — le quart de la PSRAM libre (8,2 Mo au demarrage).
+ * Somme des plafonds de la PSRAM : sons de storage 1,56 Mo + sons de SD precharges 3 Mo + tetes
+ * 2 Mo + tampons ~0,5 Mo ≈ 7 Mo — d'ou la reserve ci-dessous : AUCUNE tete ne se prend si la PSRAM
+ * libre tombe sous 1 Mo (les tampons de reponse du serveur web, les banques, la console y vivent). */
+constexpr uint32_t TETES_BUDGET_OCTETS    = 2u * 1024u * 1024u;
+/* Les tetes ANTICIPEES (la cue suivante, option « Precharger » d'un bloc) n'ont que la moitie : la
+ * cue qui joue passe toujours avant, et les evince au besoin. */
+constexpr uint32_t ANTICIPE_BUDGET_OCTETS = 1u * 1024u * 1024u;
+constexpr uint32_t PSRAM_RESERVE_OCTETS   = 1u * 1024u * 1024u;
 constexpr uint32_t ANNEAU_TRAMES  = 32768;    // un tampon : 0,74 s a 44,1 kHz (puissance de 2)
 constexpr uint32_t MORCEAU_TRAMES = 4096;     // ce que le lecteur lit d'un coup
 constexpr uint32_t GARDE_TRAMES   = 1024;     // jamais ecrire a moins de cela du lecteur audio
 constexpr uint32_t SAUT_TRAMES    = 2048;     // un lecteur depasse se replace a cette avance
 
 // ── Les tetes ────────────────────────────────────────────────────────────────
-/* L'index de la tete de (son, debut) — la demande, si elle n'existe pas. -1 : la table
- * est pleine (l'appelant eleve des tetes inutiles puis redemande). Se charge dans la
- * tache de la carte SD ; `tetePrete` dit quand. */
-int8_t   demanderTete(const char* son, uint32_t debut);
+/* L'index de la tete de (son, debut) — la demande, si elle n'existe pas. Se charge dans la tache de
+ * la carte SD ; `tetePrete` dit quand. `anticipee` : pour la cue SUIVANTE (sous son demi-budget ; une
+ * demande courante la promeut, et peut l'evincer tant qu'elle ne l'a pas fait).
+ *   >= 0 : l'index ;  -1 : pas une tete possible (son absent, pas lu en flux, debut au-dela de la fin) ;
+ *   -2 : le BUDGET est plein (ou la PSRAM sous sa reserve) — l'appelant eleve ce qu'il peut, redemande,
+ *        puis compte un refus (`noterRefus`). */
+constexpr int8_t TETE_INCONNUE = -1, TETE_BUDGET_PLEIN = -2;
+int8_t   demanderTete(const char* son, uint32_t debut, bool anticipee = false);
+bool     teteAnticipee(int8_t i);                       // demandee pour la cue suivante, pas encore promue
+bool     teteEvincable(int8_t i);                       // prete ou en echec — jamais une tete en cours de lecture
+void     noterRefus();                                  // un clip n'a pas eu de tete : budget plein
 bool     tetePrete(int8_t i);
 struct   TeteVue { const int16_t* pcm; uint32_t debut; uint32_t trames; };
 bool     teteVue(int8_t i, TeteVue& v);                 // faux si elle n'est pas prete

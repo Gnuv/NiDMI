@@ -258,11 +258,18 @@ constexpr uint8_t CLIPS_MAX  = 32;    // clips par liste
  * le bloc etait deja arme (une chaine de cellules : meme bloc d'une cue a la
  * suivante) garde le clip qui joue ; les autres se taisent. Vide : aucune. */
 void poserListes(const String& params);
+/* « Precharger » : les tetes des clips en flux des listes marquees de la cue SUIVANTE, d'avance. */
+void prechargerListes(const String& params);
+/* Les tetes d'une liste armee : clips lus en flux, tetes pretes, clips SANS tete (ils ne joueront pas). */
+bool etatTetes(uint32_t bloc, uint8_t& flux, uint8_t& pretes, uint8_t& sans);
 /* LE CHEMIN VIVANT : la liste d'UN bloc (memes cles, une liste), a la place
  * de celle du meme bloc — ou ajoutee. Sans aucun son, elle est retiree. Rend
  * le nombre de clips (-1 : `lbloc` manque, ou plus de place), et dans
  * `absents` les sons que la carte n'a pas, separes par des virgules. */
-int poserListe(const String& params, String& absents, uint32_t& bloc);
+/* `enFlux`, `sansTete` : de la liste qu'on vient de poser, les clips lus en flux et ceux qui n'auront
+ * JAMAIS de tete (budget plein) — ils ne joueront pas, et l'appelant doit pouvoir le dire. */
+int poserListe(const String& params, String& absents, uint32_t& bloc,
+               uint8_t* enFlux = nullptr, uint8_t* sansTete = nullptr);
 /* Joue le clip k (1..n) de la liste du bloc — 0 l'arrete. Le meme effet
  * qu'une note, passe par la file de la tache audio. Faux : pas de liste
  * armee pour ce bloc, ou clip k sans son. */

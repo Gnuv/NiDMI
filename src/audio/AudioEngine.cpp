@@ -329,6 +329,7 @@ struct Liste {
   uint8_t  suite;                        // 0 s'arreter, 1 enchainer, 2 enchainer et reboucler
   uint8_t  n;                            // nombre de clips
   uint8_t  courant;                      // le clip qui joue (0 : aucun), tenu par la tache audio
+  uint8_t  prec;                         // 1 : « Precharger » — sur la cue d'avant, ses tetes se lisent d'avance
   float    gain;
   Clip     clips[CLIPS_MAX];
 };
@@ -1580,12 +1581,13 @@ String _partieCompletee(const String& s, char sep, int k) {
   return n ? _partie(s, sep, (k < n) ? k : n - 1) : String();
 }
 
-struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle; };
+struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle, prec; };
 Champs _champs(const String& params) {
   return Champs{ _valeurParam(params, "liste"),  _valeurParam(params, "lbloc"),
                  _valeurParam(params, "lnote"),  _valeurParam(params, "lsuite"),
                  _valeurParam(params, "lgain"),  _valeurParam(params, "ldebut"),
-                 _valeurParam(params, "lfin"),   _valeurParam(params, "lboucle") };
+                 _valeurParam(params, "lfin"),   _valeurParam(params, "lboucle"),
+                 _valeurParam(params, "lprec") };
 }
 
 /* Le son d'un clip, cherche dans le magasin ; ses secondes, en trames DU
@@ -1604,19 +1606,48 @@ bool _teteReferencee(int8_t t) {
   return false;
 }
 
-int8_t _teteDe(const char* son, uint32_t debut) {
-  int8_t t = FluxSD::demanderTete(son, debut);
-  if (t < 0) {
-    for (int8_t i = 0; i < (int8_t)FluxSD::TETES_MAX; i++)
-      if (FluxSD::teteUtilisee(i) && FluxSD::teteAgeMs(i) > 5000 && !_teteReferencee(i)) FluxSD::libererTete(i);
-    t = FluxSD::demanderTete(son, debut);
+/* La tete a evincer pour faire de la place a une demande COURANTE — jamais une tete qu'une banque ou
+ * une voix nomme, jamais une tete en cours de lecture par la tache de la carte (elle ecrirait dans
+ * une entree rendue). D'abord une tete ANTICIPEE (la cue suivante : sans valeur tant qu'on n'y est
+ * pas — et une demande courante qui la nomme l'aurait deja promue), la plus ancienne ; puis la plus
+ * ancienne des autres non demandee depuis 5 s (la banque en construction n'est pas encore nommee :
+ * ses tetes toutes fraiches sont protegees par ce delai). -1 : rien a evincer. */
+int8_t _teteAEvincer() {
+  int8_t choix = -1; bool choixAnticipee = false; uint32_t choixAge = 0;
+  for (int8_t i = 0; i < (int8_t)FluxSD::TETES_MAX; i++) {
+    if (!FluxSD::teteEvincable(i) || _teteReferencee(i)) continue;
+    const bool ant = FluxSD::teteAnticipee(i);
+    const uint32_t age = FluxSD::teteAgeMs(i);
+    if (!ant && age <= 5000) continue;
+    if (choix < 0 || (ant && !choixAnticipee) || (ant == choixAnticipee && age > choixAge)) {
+      choix = i; choixAnticipee = ant; choixAge = age;
+    }
   }
-  if (t < 0) NIDMI_WEB_LOG("[SD] %s : la table des tetes est pleine (%u clips en flux au plus)",
-                           son, (unsigned)FluxSD::TETES_MAX);
-  return t;
+  return choix;
 }
 
-void _resoudre(Clip& c) {
+/* La tete d'un clip en flux — demandee a la tache de la carte, qui la lit (FluxSD.h). Le budget est
+ * plein : on eleve, une a une, ce qui peut l'etre (_teteAEvincer), puis on redemande ; au bout, un
+ * REFUS, compte et dit — ce clip ne se jouera pas, et l'usager doit pouvoir le savoir (etatTetes). Une
+ * demande ANTICIPEE n'evince rien : elle se contente de ce qui reste. Sous verrouListes, comme tous
+ * les appelants de _resoudre. */
+int8_t _teteDe(const char* son, uint32_t debut, bool anticipee = false) {
+  int8_t t = FluxSD::demanderTete(son, debut, anticipee);
+  if (t == FluxSD::TETE_BUDGET_PLEIN && !anticipee) {
+    for (int8_t v; t == FluxSD::TETE_BUDGET_PLEIN && (v = _teteAEvincer()) >= 0; ) {
+      FluxSD::libererTete(v);
+      t = FluxSD::demanderTete(son, debut, false);
+    }
+    if (t == FluxSD::TETE_BUDGET_PLEIN) {
+      FluxSD::noterRefus();
+      NIDMI_WEB_LOG("[SD] %s @%lu : budget des tetes plein (%u Ko) — ce clip ne se jouera pas",
+                    son, (unsigned long)debut, (unsigned)(FluxSD::TETES_BUDGET_OCTETS / 1024));
+    }
+  }
+  return t < 0 ? (int8_t)-1 : t;
+}
+
+void _resoudre(Clip& c, bool anticipe = false) {
   c.iEch = -1; c.debut = 0; c.fin = 0; c.tete = -1;
   if (!c.son[0]) return;
   const int i = SampleStore::indexDe(c.son);
@@ -1625,13 +1656,13 @@ void _resoudre(Clip& c) {
   c.iEch  = (int8_t)i;
   c.debut = (c.debutS > 0.0f) ? (uint32_t)(c.debutS * f + 0.5f) : 0;
   c.fin   = (c.finS   > 0.0f) ? (uint32_t)(c.finS   * f + 0.5f) : 0;
-  if (SampleStore::estFlux((uint8_t)i)) c.tete = _teteDe(c.son, c.debut);
+  if (SampleStore::estFlux((uint8_t)i)) c.tete = _teteDe(c.son, c.debut, anticipe);
 }
 
 /* La liste i des champs, dans L — tous ses champs poses. Les sons que la
  * carte n'a pas vont dans `absents` (une fois chacun). Rend vrai si au moins
  * un clip porte un son (une liste sans aucun son n'en est pas une). */
-bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents) {
+bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anticipe = false) {
   memset(&L, 0, sizeof(Liste));
   L.bloc = (uint32_t)_partie(ch.bloc, ',', i).toInt();
   const String n = _partieCompletee(ch.note,  ',', i);
@@ -1640,6 +1671,7 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents) {
   L.note  = n.length() ? (uint8_t)constrain(n.toInt(), 0, 127) : 60;
   L.suite = s.length() ? (uint8_t)constrain(s.toInt(), 0, 2)   : 0;
   L.gain  = g.length() ? _borneGain(g.toFloat()) : 1.0f;
+  L.prec  = (_partie(ch.prec, ',', i).toInt() != 0) ? 1 : 0;      // absent : non
   const String noms = _partie(ch.liste, ',', i), debs = _partie(ch.debut,  ',', i),
                fins = _partie(ch.fin,   ',', i), bcls = _partie(ch.boucle, ',', i);
   const int nc = _nbParties(noms, '/');
@@ -1654,7 +1686,7 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents) {
     c.debutS = _partie(debs, '/', k).toFloat();
     c.finS   = _partie(fins, '/', k).toFloat();
     c.boucle = _partie(bcls, '/', k).toFloat() >= 0.5f;
-    _resoudre(c);
+    _resoudre(c, anticipe);
     if (c.son[0]) unSon = true;
     if (absents && c.son[0] && c.iEch < 0
         && ("," + *absents + ",").indexOf("," + String(c.son) + ",") < 0)
@@ -1676,6 +1708,21 @@ void _reresoudre() {
     for (uint8_t k = 0; k < b->listes[li].n; k++) _resoudre(b->listes[li].clips[k]);
   _proposer(b);
 }
+/* Les clips d'une liste lus en flux, ceux qui ont leur tete, ceux qui n'en auront jamais. */
+void _comptesTetes(const Liste& L, uint8_t& flux, uint8_t& pretes, uint8_t& sans) {
+  flux = pretes = sans = 0;
+  for (uint8_t k = 0; k < L.n; k++) {
+    const Clip& c = L.clips[k];
+    if (c.iEch < 0 || !SampleStore::estFlux((uint8_t)c.iEch)) continue;
+    flux++;
+    if (c.tete < 0)                              sans++;       // le budget etait plein : jamais de tete
+    else if (FluxSD::tetePrete(c.tete))          pretes++;
+    else if (!FluxSD::teteUtilisee(c.tete))      sans++;       // rendue : plus de tete
+    else if (FluxSD::teteEvincable(c.tete))      sans++;       // lecture en echec
+    // sinon : demandee, la tache de la carte la lit — ce clip attend, il n'est pas perdu
+  }
+}
+
 }  // namespace
 
 void poserListes(const String& params) {
@@ -1698,9 +1745,11 @@ void poserListes(const String& params) {
   _proposer(b);
 }
 
-int poserListe(const String& params, String& absents, uint32_t& bloc) {
+int poserListe(const String& params, String& absents, uint32_t& bloc, uint8_t* enFlux, uint8_t* sansTete) {
   VerrouListes v;
   absents = "";
+  if (enFlux) *enFlux = 0;
+  if (sansTete) *sansTete = 0;
   const Champs ch = _champs(params);
   bloc = (uint32_t)_partie(ch.bloc, ',', 0).toInt();
   if (!bloc) return -1;
@@ -1715,6 +1764,9 @@ int poserListe(const String& params, String& absents, uint32_t& bloc) {
   }
   const bool unSon = _remplirListe(b->listes[li], ch, 0, &absents);
   const int n = b->listes[li].n;
+  { uint8_t fl, pr, sa; _comptesTetes(b->listes[li], fl, pr, sa);       // la liste qu'on VIENT de poser
+    if (enFlux) *enFlux = fl;
+    if (sansTete) *sansTete = sa; }
   if (!unSon) {                                      // sans aucun son : retiree
     for (int k = li; k + 1 < b->n; k++) memcpy(&b->listes[k], &b->listes[k + 1], sizeof(Liste));
     b->n--;
@@ -1751,6 +1803,38 @@ int etatListes(uint32_t* blocs, uint8_t* clips, uint8_t* nombres, uint8_t max, b
   }
   xSemaphoreGive(verrouListes);
   return n;
+}
+
+/* « PRECHARGER » (option d'un BLOC play-list, cle `lprec` de la cue) : appelee a l'arrivee sur une
+ * cue avec les params de la cue SUIVANTE. Pour chacune de ses listes marquees, les tetes des clips en
+ * flux sont demandees d'avance — classe ANTICIPEE, sous son demi-budget, derriere celles de la cue
+ * qui joue, evincees en premier — SANS armer la liste : ni banque, ni voix. Si l'usager saute ailleurs,
+ * elles s'evincent d'elles-memes. Ce qui ne rentre pas retombe sur « la note attend ». */
+void prechargerListes(const String& params) {
+  VerrouListes v;
+  const Champs ch = _champs(params);
+  const int nl = _nbParties(ch.liste, ',');
+  if (!nl || !ch.prec.length()) return;
+  Liste* tmp = (Liste*)heap_caps_malloc(sizeof(Liste), MALLOC_CAP_SPIRAM);
+  if (!tmp) return;
+  for (int i = 0; i < nl && i < (int)LISTES_MAX; i++)
+    if (_partie(ch.prec, ',', i).toInt() != 0) _remplirListe(*tmp, ch, i, nullptr, /*anticipe=*/true);
+  heap_caps_free(tmp);
+}
+
+/* L'ETAT DES TETES d'une liste armee : combien de ses clips sont lus en flux, combien ont leur tete
+ * (`pretes`), combien n'en auront JAMAIS (`sans` : le budget etait plein, ou la lecture a echoue —
+ * ces clips-la ne jouent pas). Le reste attend sa lecture. Faux : la liste n'est pas armee, ou le
+ * verrou est pris (on ne l'attend pas : c'est une lecture d'etat). */
+bool etatTetes(uint32_t bloc, uint8_t& flux, uint8_t& pretes, uint8_t& sans) {
+  flux = pretes = sans = 0;
+  if (!banques || xSemaphoreTake(verrouListes, 0) != pdTRUE) return false;
+  const Banque& b = banques[banqueActive];
+  bool trouvee = false;
+  for (uint8_t li = 0; li < b.n && !trouvee; li++)
+    if (b.listes[li].bloc == bloc) { trouvee = true; _comptesTetes(b.listes[li], flux, pretes, sans); }
+  xSemaphoreGive(verrouListes);
+  return trouvee;
 }
 
 uint32_t generationListes() { return genListes; }
