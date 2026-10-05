@@ -42,6 +42,12 @@ volatile int  _misoBas = -1, _misoHaut = -1;   // niveau de MISO au repos, tire 
 volatile int  _invCmd0 = -1;               // R1 de CMD0 avec MISO et MOSI echanges
 volatile int  _bbCmd0 = -1, _bbCmd8 = -1, _bbInvCmd0 = -1;   // les memes, sans peripherique SPI
 volatile bool _cablageFait = false;
+/* LA TRACE BRUTE de l'initialisation a la main : les 12 octets lus apres chaque
+ * commande, en hexadecimal. `[0]` CMD0, `[1]` CMD8, `[2]` CMD58, `[3]` CMD55,
+ * `[4]` ACMD41 (le premier tour), `[5]` ACMD41 (le dernier). */
+char          _brut[6][40];
+volatile int  _acmd41Tours = -1;
+volatile int  _acmd41R1 = -1;
 /* Les quatre broches de la carte, mesurees seules (CS, SCK, MISO, MOSI) :
  * lu avec un tirage bas, avec un tirage haut, puis lu en retour apres l'avoir
  * PILOTEE a 0 et a 1. Une broche qui ne suit pas ce qu'elle pilote est en
@@ -132,6 +138,57 @@ void _sonderALaMain(uint8_t sckEn, uint8_t misoEn, uint8_t mosiEn, int& r0, int&
   pinMode(sckEn, INPUT); pinMode(mosiEn, INPUT); pinMode(misoEn, INPUT);
 }
 
+/* Une commande, puis les 12 octets qui suivent, gardes bruts. Rend le premier R1
+ * valide (bit 7 a 0), 0xFF si aucun. */
+int _brutCmd(uint8_t cmd, uint32_t arg, uint8_t crc, char* hex) {
+  SPI.transfer(0xFF);
+  SPI.transfer(0x40 | cmd);
+  SPI.transfer((uint8_t)(arg >> 24)); SPI.transfer((uint8_t)(arg >> 16));
+  SPI.transfer((uint8_t)(arg >> 8));  SPI.transfer((uint8_t)arg);
+  SPI.transfer(crc);
+  int r1 = 0xFF;
+  for (int i = 0; i < 12; i++) {
+    const uint8_t o = SPI.transfer(0xFF);
+    if (hex) snprintf(hex + i * 3, 4, "%02X ", (unsigned)o);
+    if (r1 == 0xFF && !(o & 0x80)) r1 = o;
+  }
+  return r1;
+}
+
+/* L'INITIALISATION A LA MAIN, jusqu'ou la carte va : CMD0, CMD8, CMD58 (OCR),
+ * puis CMD55 + ACMD41 en boucle (HCS, 1 s au plus) — ce que fait la bibliotheque,
+ * en gardant ce que la carte dit au lieu d'un simple echec. Carte non montee. */
+void _sonderBrut() {
+  for (auto& h : _brut) h[0] = 0;
+  _acmd41Tours = 0; _acmd41R1 = -1;
+  pinMode(_cs, OUTPUT);
+  digitalWrite(_cs, HIGH);
+  SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+  for (int i = 0; i < 20; i++) SPI.transfer(0xFF);
+  digitalWrite(_cs, LOW);
+  _brutCmd(0, 0, 0x95, _brut[0]);
+  digitalWrite(_cs, HIGH); SPI.transfer(0xFF); digitalWrite(_cs, LOW);
+  _brutCmd(8, 0x1AA, 0x87, _brut[1]);
+  digitalWrite(_cs, HIGH); SPI.transfer(0xFF); digitalWrite(_cs, LOW);
+  _brutCmd(58, 0, 0x01, _brut[2]);
+  digitalWrite(_cs, HIGH); SPI.transfer(0xFF); digitalWrite(_cs, LOW);
+  const uint32_t t0 = millis();
+  int r = 0xFF;
+  do {
+    digitalWrite(_cs, HIGH); SPI.transfer(0xFF); digitalWrite(_cs, LOW);
+    _brutCmd(55, 0, 0x01, _acmd41Tours == 0 ? _brut[3] : nullptr);
+    digitalWrite(_cs, HIGH); SPI.transfer(0xFF); digitalWrite(_cs, LOW);
+    r = _brutCmd(41, 0x40000000, 0x01, _acmd41Tours == 0 ? _brut[4] : _brut[5]);
+    _acmd41Tours = _acmd41Tours + 1;
+    delay(10);
+  } while (r == 0x01 && millis() - t0 < 1000);
+  _acmd41R1 = r;
+  digitalWrite(_cs, HIGH); SPI.transfer(0xFF);
+  SPI.endTransaction();
+  NIDMI_WEB_LOG("[SD] init a la main : ACMD41 -> 0x%02X apres %d tour(s) ; CMD8 brut : %s",
+                (unsigned)_acmd41R1, (int)_acmd41Tours, _brut[1]);
+}
+
 void _sonder() {
   int r0, r8; uint32_t echo;
   _sonderSur(SPI, r0, r8, echo);
@@ -201,6 +258,7 @@ void _monter() {
   SPI.begin(_sck, _miso, _mosi, -1);
   if (!SD.begin(_cs, SPI, _hz)) {
     _sonder();
+    if (_cmd0 == 0x01) _sonderBrut();                    // elle repond : jusqu'ou va-t-elle ?
     const char* cause = _cmd0 == 0xFF || _cmd0 < 0
         ? "aucune reponse a CMD0 : carte absente, ou MISO/MOSI/SCK/CS/alimentation mal cables"
         : "la carte repond a CMD0 mais ne s'initialise pas : format FAT32 ? carte SDXC ? alimentation ?";
@@ -427,6 +485,12 @@ String diagnostic() {
   if (_cmd0 >= 0)
     j += ",\"sonde\":{\"cmd0\":" + String(_cmd0) + ",\"cmd8\":" + String(_cmd8)
        + ",\"cmd8_echo\":" + String((unsigned long)_cmd8Echo) + "}";
+  if (_acmd41Tours >= 0) {
+    j += ",\"init_a_la_main\":{\"cmd0\":\"" + String(_brut[0]) + "\",\"cmd8\":\"" + String(_brut[1])
+       + "\",\"cmd58\":\"" + String(_brut[2]) + "\",\"cmd55\":\"" + String(_brut[3])
+       + "\",\"acmd41_premier\":\"" + String(_brut[4]) + "\",\"acmd41_dernier\":\"" + String(_brut[5])
+       + "\",\"acmd41_tours\":" + String((int)_acmd41Tours) + ",\"acmd41_r1\":" + String((int)_acmd41R1) + "}";
+  }
   if (_cablageFait) {
     // Une broche qui ne suit pas ce qu'elle pilote : court-circuit ou charge.
     const char* nomBroche[4] = {"CS", "SCK", "MISO", "MOSI"};
