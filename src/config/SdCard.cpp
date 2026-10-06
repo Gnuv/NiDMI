@@ -10,6 +10,7 @@
 #include "../audio/AudioEngine.h"
 #include "../audio/SampleStore.h"
 #include "../audio/SdStream.h"
+#include "../audio/SdClusters.h"
 #include "../server/WebDebugConsole.h"
 #include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES the card's state
 
@@ -71,6 +72,12 @@ volatile int8_t _level[4][4] = {{-1,-1,-1,-1},{-1,-1,-1,-1},{-1,-1,-1,-1},{-1,-1
 /* THE READ MEASUREMENT. State: 0 never, 1 running, 2 finished. The JSON is
  * posted in one go, the state last. */
 volatile uint8_t _measState = 0;
+/* THE CLUSTER MAP CHECK (?verify_map=<name>): random spans read through the map and through FatFs, compared. */
+volatile bool    _wantRebuild = false;        // BENCH: rebuild the maps after a simulated staleness
+volatile bool    _wantVerify = false;
+volatile uint8_t _verifyState = 0;            // 0 never, 1 running, 2 finished
+char             _verifyName[SampleStore::NOM_MAX] = "";
+char             _verifyJson[200] = "";
 char     _measJson[1024] = "";
 char     _measName[SampleStore::NOM_MAX] = "";
 uint32_t _measHz = 0;
@@ -289,6 +296,7 @@ void _mount() {
   _capacity = SdSpiDisk::capacityBytes();
   _mounted = true;
   if (_lost) { _lost = false; _remounts = _remounts + 1; NIDMI_WEB_LOG("[SD] carte retrouvee"); }
+  SdClusters::rebuildAll();             // the maps built for the previous mount are stale: again, BEFORE the heads are read
   NIDMI_WEB_LOG("[SD] montee : %s, %lu Mo, a %lu MHz (CMD8 : 0x%lX)",
                 SdSpiDisk::type(), (unsigned long)(_capacity / (1024ULL * 1024ULL)),
                 (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisk::cmd8Echo());
@@ -409,8 +417,20 @@ void _check() {
   _unmount();
 }
 
+void _verify() {
+  const SdClusters::Verify v = SdClusters::verify(_verifyName, 300);
+  snprintf(_verifyJson, sizeof(_verifyJson), "{\"state\":\"finished\",\"name\":\"%s\",\"ran\":%s,\"spans\":%lu,\"bytes\":%lu,\"mismatches\":%lu}",
+           _verifyName, v.ran ? "true" : "false", (unsigned long)v.spans, (unsigned long)v.bytes, (unsigned long)v.mismatches);
+  __sync_synchronize();
+  _verifyState = 2;
+  NIDMI_WEB_LOG("[SD] verification de la carte des clusters de %s : %lu tranches, %lu differences",
+                _verifyName, (unsigned long)v.spans, (unsigned long)v.mismatches);
+}
+
 void _task(void*) {
   for (;;) {
+    if (_wantRebuild) { _wantRebuild = false; vTaskDelay(pdMS_TO_TICKS(2000)); SdClusters::rebuildAll(); continue; }
+    if (_wantVerify)  { _wantVerify  = false; _verify();   continue; }
     if (_wantCheck)   { _wantCheck   = false; _check();    continue; }
     if (_wantUnmount) { _wantUnmount = false; _unmount();  continue; }
     if (_wantMount)   { _wantMount   = false; _mount();    continue; }
@@ -422,7 +442,7 @@ void _task(void*) {
   }
   __sync_lock_release(&_taskAlive);
   // A flag raised between the last turn and the release: start again.
-  if (_wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads) _startTask();
+  if (_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads) _startTask();
   vTaskDelete(nullptr);
 }
 
@@ -548,6 +568,28 @@ void loadSounds() {
   _startTask();
 }
 
+void simulateStale() {
+  if (!_declared || !_mounted) return;
+  SdSpiDisk::bumpGeneration();           // every map is stale: the streams fall back to FatFs...
+  _wantRebuild = true;                   // ... and the maps are rebuilt two seconds later
+  _startTask();
+}
+
+bool verifyMap(const char* name) {
+  if (!_declared || !_mounted || !name || !*name || strlen(name) >= sizeof(_verifyName) || _verifyState == 1) return false;
+  if (SdStream::anyActive()) {                           // it reads flat out for a while: not over a playing stream
+    snprintf(_verifyJson, sizeof(_verifyJson), "{\"state\":\"finished\",\"error\":\"des sons de la carte jouent\"}");
+    __sync_synchronize();
+    _verifyState = 2;
+    return false;
+  }
+  strlcpy(_verifyName, name, sizeof(_verifyName));
+  _verifyState = 1;
+  _wantVerify = true;
+  _startTask();
+  return true;
+}
+
 bool measure(const char* name, uint32_t hz) {
   if (!_declared || !name || !*name || strlen(name) >= sizeof(_measName) || _measState == 1) return false;
   if (SdStream::anyActive()) {
@@ -603,6 +645,11 @@ String diagnostics() {
        + ",\"fail_total\":" + String((unsigned long)SdSpiDisk::failTotal())
        + ",\"retries\":" + String((unsigned long)SdSpiDisk::retries()) + "}";
   j += ",\"stream\":" + SdStream::diagnostics();
+  j += ",\"clusters\":" + SdClusters::diagnostics();
+  j += ",\"verify\":";
+  if (_verifyState == 0)      j += "null";
+  else if (_verifyState == 1) j += "{\"state\":\"running\"}";
+  else                        j += String(_verifyJson);
   if (_acmd41Rounds >= 0) {
     j += ",\"manual_init\":{\"cmd0\":\"" + String(_raw[0]) + "\",\"cmd8\":\"" + String(_raw[1])
        + "\",\"cmd58\":\"" + String(_raw[2]) + "\",\"cmd55\":\"" + String(_raw[3])

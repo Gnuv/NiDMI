@@ -64,6 +64,10 @@ constexpr uint32_t ANTICIPATED_BUDGET_BYTES = 1u * 1024u * 1024u;
 constexpr uint32_t PSRAM_RESERVE_BYTES = 1u * 1024u * 1024u;
 constexpr uint32_t RING_FRAMES  = 32768;    // one buffer: 0.74 s at 44.1 kHz (power of 2)
 constexpr uint32_t CHUNK_FRAMES = 4096;     // what the reader reads in one go
+/* The FIRST chunk after a (re)start is small: with several streams restarting together the reader serves
+ * them in turn, and a stream's first data should not wait for the others' full chunks (4 KB: ~5 ms at
+ * 20 MHz, against ~17 ms for 16 KB). The head plays meanwhile; the next chunks are full size. */
+constexpr uint32_t FIRST_CHUNK_FRAMES = 1024;
 constexpr uint32_t GUARD_FRAMES = 1024;     // never write closer than this to the audio reader
 constexpr uint32_t JUMP_FRAMES  = 2048;     // an overtaken reader repositions this far ahead
 

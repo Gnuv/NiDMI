@@ -36,6 +36,20 @@ uint32_t    cmd8Echo();          // what CMD8 returned (0x1AA: a conforming card
 
 File open(const char* path);                     // read-only; empty when nothing is mounted
 
+// ── For the cluster maps (src/audio/SdClusters.h) ────────────────────────────────────────────────
+/* Whole 512-byte sectors, straight from the bus: one transaction, bus-locked, with the driver's retries
+ * and CRC checks; no FatFs. False when not mounted or when the read failed. */
+bool readSectors(uint8_t* buf, uint32_t sector, uint32_t count);
+/* Bumped at every successful mount: a map built before it describes a volume that may no longer be there. */
+uint32_t generation();
+/* BENCH: makes every map stale, as a remount would (/api/diag/sd?simulate_stale=1). */
+void bumpGeneration();
+struct FsGeometry { uint8_t fatBits; uint32_t fatBase, dataBase, clusterSectors, nEntries; };
+/* The mounted volume's geometry; false for anything but FAT16/FAT32 with 512-byte sectors. */
+bool fsGeometry(FsGeometry& out);
+/* A file's first cluster and size ("/samples/x.wav", under the mount point). */
+bool fileStart(const char* path, uint32_t& startCluster, uint32_t& bytes);
+
 // Counters, since the mount.
 uint32_t blocksRead();           // 512-byte blocks read
 uint32_t crcErrors();            // CRC16 mismatches

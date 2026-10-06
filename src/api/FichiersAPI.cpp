@@ -281,10 +281,12 @@ void setupFichiersAPI(AsyncWebServer& server) {
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
     /* The bench hooks BREAK things on purpose: never during a concert (the lock answers 423). */
-    if ((request->hasParam("simulate_noise") || request->hasParam("simulate_loss"))
+    if ((request->hasParam("simulate_noise") || request->hasParam("simulate_loss") || request->hasParam("simulate_stale"))
         && Concert::refuse(request, "simulation de panne de la carte SD refusee : la carte est verrouillee pour le concert")) return;
-    if (request->hasParam("measure")
-        && Concert::refuse(request, "mesure de la carte SD refusee : la carte est verrouillee pour le concert")) return;
+    if ((request->hasParam("measure") || request->hasParam("verify_map"))
+        && Concert::refuse(request, "mesure ou verification de la carte SD refusee : la carte est verrouillee pour le concert")) return;
+    if (request->hasParam("verify_map")) SdCard::verifyMap(request->getParam("verify_map")->value().c_str());
+    if (request->hasParam("simulate_stale")) SdCard::simulateStale();  // bench: every cluster map becomes stale
     if (request->hasParam("simulate_noise"))                           // bench: a noisy bus (blocks read with a bad CRC)
       SdCard::simulateNoise((uint32_t)request->getParam("simulate_noise")->value().toInt());
     if (request->hasParam("simulate_loss")) {                          // bench: what a pulled card looks like

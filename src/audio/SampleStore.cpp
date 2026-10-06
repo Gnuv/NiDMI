@@ -3,6 +3,7 @@
 #include "../config/EcrituresDifferees.h"
 #include "../config/SdCard.h"
 #include "SdStream.h"
+#include "SdClusters.h"
 #include "../server/WebDebugConsole.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -184,6 +185,7 @@ bool _lire(const char* nom, Echantillon& dest, String& raison, bool fromSdCard =
       dest.trames = tailleData / (2 * canaux);
       strlcpy(dest.nom, nom, sizeof(dest.nom));
       f.close();
+      SdClusters::build(dest.nom);          // its cluster chain, walked once: the streams then skip FatFs's seek
       NIDMI_WEB_LOG("[samples] %s : %u Ko, %u trames a %u Hz, %s — lu EN FLUX depuis la carte SD",
                     dest.nom, (unsigned)(tailleData / 1024), (unsigned)dest.trames, (unsigned)dest.freq,
                     dest.stereo ? "stereo" : "mono");

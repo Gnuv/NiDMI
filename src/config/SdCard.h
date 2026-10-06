@@ -98,6 +98,11 @@ void   tryMount();
 // The wiring probe (MISO level, swapped MISO/MOSI) — card NOT mounted only.
 void   probeWiring();
 bool   measure(const char* name, uint32_t hz);
+// Reads random spans of a streamed sound through its cluster map and through FatFs, and compares them
+// (/api/diag/sd?verify_map=<name>) — refused while sounds of the card play.
+bool   verifyMap(const char* name);
+// BENCH: every cluster map becomes stale (as after a remount); rebuilt 2 s later (/api/diag/sd?simulate_stale=1).
+void   simulateStale();
 // BENCH: for `ms` milliseconds every read fails, as a card pulled out and put back would. An
 // outage longer than the checks (~1 s) makes the card be declared lost, unmounted, then
 // remounted; a shorter one is a glitch that passes. (/api/diag/sd?simulate_loss=1[&ms=...])

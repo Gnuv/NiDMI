@@ -7,6 +7,7 @@
 #include <new>
 
 #include "SampleStore.h"
+#include "SdClusters.h"
 #include "../config/SdCard.h"
 #include "../server/WebDebugConsole.h"
 
@@ -60,23 +61,51 @@ bool _loadHead(uint8_t i) {                          // false: nothing changed (
     return fail(false);
   }
   const uint32_t n = (total - h.start < HEAD_FRAMES) ? total - h.start : HEAD_FRAMES;
-  File f = SdCard::open(_path(h.name).c_str());
-  if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", h.name); return fail(true); }
+  /* The cluster map first (SdClusters.h): no seek through FatFs's chain walk. Without one — or stale —
+   * the file, as before. */
+  SdClusters::Map* map = SdClusters::acquire(h.name);
+  File f;
+  if (!map) {
+    f = SdCard::open(_path(h.name).c_str());
+    if (!f) { NIDMI_WEB_LOG("[SD] tete de %s : ouverture impossible", h.name); return fail(true); }
+  }
   int16_t* pcm = (int16_t*)heap_caps_malloc((size_t)n * channels * 2, MALLOC_CAP_SPIRAM);
-  if (!pcm) { f.close(); NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", h.name); return fail(true); }
+  if (!pcm) {
+    if (map) SdClusters::release(map); else f.close();
+    NIDMI_WEB_LOG("[SD] tete de %s : PSRAM insuffisante", h.name); return fail(true);
+  }
   const uint32_t t0 = millis();
   const size_t   bytes = (size_t)n * channels * 2;
+  const size_t   first = (size_t)SampleStore::dataOffset((uint8_t)s) + (size_t)h.start * channels * 2;
   size_t got = 0;
-  if (f.seek(SampleStore::dataOffset((uint8_t)s) + (size_t)h.start * channels * 2)) {
+  if (map) {
+    SdClusters::Status st = SdClusters::Status::Ok;
     while (got < bytes) {
       const size_t step = (bytes - got < 16384) ? bytes - got : 16384;
-      const size_t k = f.read((uint8_t*)pcm + got, step);
+      const size_t k = SdClusters::read(map, (uint32_t)(first + got), (uint8_t*)pcm + got, step, st);
       if (!k) break;
       got += k;
       vTaskDelay(1);                                  // yield: core 0's IDLE task
     }
+    SdClusters::release(map);
+    if (got != bytes && st == SdClusters::Status::Stale) {      // the card was remounted: through FatFs this once
+      got = 0;
+      f = SdCard::open(_path(h.name).c_str());
+    }
   }
-  f.close();
+  if (!map || (got != bytes && f)) {
+    got = 0;
+    if (f && f.seek(first)) {
+      while (got < bytes) {
+        const size_t step = (bytes - got < 16384) ? bytes - got : 16384;
+        const size_t k = f.read((uint8_t*)pcm + got, step);
+        if (!k) break;
+        got += k;
+        vTaskDelay(1);                                // yield: core 0's IDLE task
+      }
+    }
+  }
+  if (f) f.close();
   if (got != bytes) {
     heap_caps_free(pcm);
     NIDMI_WEB_LOG("[SD] tete de %s : lecture incomplete (%u / %u o)", h.name, (unsigned)got, (unsigned)bytes);
@@ -105,7 +134,8 @@ struct Stream {
   volatile uint32_t underruns = 0, jumps = 0, starts = 0;
   int16_t*         ring = nullptr;      // RING_FRAMES x 2 int16, in PSRAM, taken once
   // the reader's own:
-  File             file;
+  File             file;                // the FatFs path: when there is no (fresh) cluster map
+  SdClusters::Map* map = nullptr;       // the direct path: a counted reference to the sound's cluster map
   char             openName[SampleStore::NOM_MAX] = {0};
   uint32_t         readEnd = 0;         // the end it aims for (copy of `endFrame` at the last request)
   volatile uint32_t reqMs = 0;          // written by the audio: when the (re)start was asked (millis)
@@ -122,6 +152,13 @@ struct Stream {
  * card supervisor (SdCard) will have checked the card by then. */
 constexpr uint8_t  MAX_ERRORS = 25;
 constexpr uint32_t RETRY_MS   = 150;
+
+/* Let go of a stream's source — its cluster map or its file. */
+void _dropSource(Stream& x) {
+  if (x.map) { SdClusters::release(x.map); x.map = nullptr; }
+  if (x.file) x.file.close();
+  x.openName[0] = 0;
+}
 Stream* _streams = nullptr;           // MAX_STREAMS, likewise
 volatile uint32_t _underrunsTotal = 0;
 volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0, _noHeadNotes = 0, _readErrors = 0, _noStream = 0;
@@ -165,15 +202,16 @@ bool _serve(Stream& x) {
     const uint32_t from = x.startFrame, end = x.endFrame, offset = x.dataOffset;
     const uint8_t  channels = x.channels;
     if (x.seq != s) return true;                          // it changed during the copy: next turn
-    if (strcmp(name, x.openName) || !x.file) {
-      if (x.file) x.file.close();
-      x.openName[0] = 0;
-      x.file = SdCard::open(_path(name).c_str());
-      if (x.file) strlcpy(x.openName, name, sizeof(x.openName));
+    if (strcmp(name, x.openName) || (!x.file && !x.map)) {
+      _dropSource(x);
+      x.map = SdClusters::acquire(name);              // direct sectors when the sound has a fresh cluster map...
+      if (!x.map) x.file = SdCard::open(_path(name).c_str());   // ... FatFs otherwise
+      if (x.map || x.file) strlcpy(x.openName, name, sizeof(x.openName));
     }
     x.lo = from; x.hi = from; x.readEnd = end;
     x.retryAtMs = 0; x.errStreak = 0;
-    if (!x.file || !x.file.seek(offset + (size_t)from * channels * 2)) {
+    /* A cluster map needs no placing: every read computes its sectors from the frame. FatFs seeks. */
+    if (!x.map && (!x.file || !x.file.seek(offset + (size_t)from * channels * 2))) {
       NIDMI_WEB_LOG("[SD] flux de %s : placement impossible a la trame %lu", name, (unsigned long)from);
       x.readEnd = from;                                   // nothing to read: silence
     }
@@ -194,9 +232,12 @@ bool _serve(Stream& x) {
      * seek on that file object fails, the card back or not. Only a fresh open recovers. */
     char name[SampleStore::NOM_MAX];
     strlcpy(name, x.openName, sizeof(name));          // `openName` stays: the next try needs it if this one fails
-    if (x.file) x.file.close();
-    if (name[0]) x.file = SdCard::open(_path(name).c_str());
-    if (!x.file || !x.file.seek(x.dataOffset + (size_t)x.hi * x.channels * 2)) {
+    /* A direct read keeps nothing of its failure: just try again. */
+    if (!x.map) {
+      if (x.file) x.file.close();
+      if (name[0]) x.file = SdCard::open(_path(name).c_str());
+    }
+    if (!x.map && (!x.file || !x.file.seek(x.dataOffset + (size_t)x.hi * x.channels * 2))) {
       _readErrors = _readErrors + 1;
       if (x.errStreak == 0 || x.errStreak % 10 == 9)
         NIDMI_WEB_LOG("[SD] flux de %s : reprise impossible a la trame %lu (%s)", name, (unsigned long)x.hi, x.file ? "placement" : "ouverture");
@@ -207,7 +248,7 @@ bool _serve(Stream& x) {
     NIDMI_WEB_LOG("[SD] flux de %s : reprise a la trame %lu apres %u echec(s)", name, (unsigned long)x.hi, (unsigned)x.errStreak);
   }
   uint32_t hi = x.hi;
-  if (hi >= x.readEnd || !x.file) return false;           // everything is read
+  if (hi >= x.readEnd || (!x.file && !x.map)) return false;   // everything is read
   const uint32_t consumer = x.consumer;
   /* THE VOICE HAS OVERTAKEN US: it read past what we had. We jump ahead instead of
    * reading what it will never replay — silence in the meantime. */
@@ -215,7 +256,7 @@ bool _serve(Stream& x) {
     const uint32_t target = consumer + JUMP_FRAMES;
     if (target >= x.readEnd) { x.hi = x.lo = x.readEnd; return false; }
     x.lo = target; __sync_synchronize(); x.hi = target;
-    if (!x.file.seek(x.dataOffset + (size_t)target * x.channels * 2)) { x.readEnd = target; return false; }
+    if (!x.map && !x.file.seek(x.dataOffset + (size_t)target * x.channels * 2)) { x.readEnd = target; return false; }
     x.jumps = x.jumps + 1;
     hi = target;
   }
@@ -225,11 +266,24 @@ bool _serve(Stream& x) {
   if (hi >= limit) return false;                          // the buffer is full
   uint32_t n = limit - hi;
   if (n > CHUNK_FRAMES) n = CHUNK_FRAMES;
+  if (x.awaitFirst && n > FIRST_CHUNK_FRAMES) n = FIRST_CHUNK_FRAMES;     // a small first chunk: see FIRST_CHUNK_FRAMES
   const uint32_t toRingEnd = RING_FRAMES - (hi & (RING_FRAMES - 1));
   if (n > toRingEnd) n = toRingEnd;                       // do not straddle the end of the buffer
   const size_t bytes = (size_t)n * x.channels * 2;
   int16_t* dest = x.ring + (size_t)(hi & (RING_FRAMES - 1)) * x.channels;
-  const size_t got = x.file.read((uint8_t*)dest, bytes);
+  const size_t readOffset = (size_t)x.dataOffset + (size_t)hi * x.channels * 2;
+  size_t got;
+  if (x.map) {
+    SdClusters::Status st;
+    got = SdClusters::read(x.map, (uint32_t)readOffset, (uint8_t*)dest, bytes, st);
+    if (st == SdClusters::Status::Stale) {                // the card was remounted: this stream goes on through FatFs
+      SdClusters::release(x.map); x.map = nullptr;
+      x.file = SdCard::open(_path(x.openName).c_str());
+      got = (x.file && x.file.seek(readOffset)) ? x.file.read((uint8_t*)dest, bytes) : 0;
+    }
+  } else {
+    got = x.file.read((uint8_t*)dest, bytes);
+  }
   const uint32_t frames = (uint32_t)(got / ((size_t)x.channels * 2));
   __sync_synchronize();
   x.hi = hi + frames;
@@ -260,16 +314,26 @@ void _readerTask(void*) {
   for (;;) {
     if (_stopReader || !_streams) break;                   // the card is unmounting: give everything back
     bool anyActive = false, didWork = false;
+    /* FIRST, the streams that have just been (re)started: position, and deliver their first small chunk.
+     * A clip plays its head meanwhile, and that head is short — the first data must not queue behind
+     * the full-size refills of the streams that are already running. */
+    for (uint8_t i = 0; i < MAX_STREAMS; i++) {
+      Stream& x = _streams[i];
+      if (x.state == 1 && (x.seq != x.seqSeen || x.awaitFirst)) {
+        if (_serve(x)) didWork = true;                      // positions...
+        if (x.awaitFirst && x.seq == x.seqSeen && _serve(x)) didWork = true;   // ... and reads the first chunk, at once
+      }
+    }
     for (uint8_t i = 0; i < MAX_STREAMS; i++) {
       Stream& x = _streams[i];
       if (x.state == 1) { anyActive = true; if (_serve(x)) didWork = true; }
-      else if (x.file) { x.file.close(); x.openName[0] = 0; }   // a released stream: its file too
+      else if (x.file || x.map) _dropSource(x);             // a released stream: its file or map too
     }
     if (anyActive) idleSince = millis();
     else if (millis() - idleSince > 1500) break;
     vTaskDelay(didWork ? 1 : pdMS_TO_TICKS(4));            // never a busy turn
   }
-  if (_streams) for (uint8_t i = 0; i < MAX_STREAMS; i++) if (_streams[i].file) { _streams[i].file.close(); _streams[i].openName[0] = 0; }
+  if (_streams) for (uint8_t i = 0; i < MAX_STREAMS; i++) if (_streams[i].file || _streams[i].map) _dropSource(_streams[i]);
   __sync_lock_release(&_readerAlive);
   bool remaining = false;
   if (_streams && !_stopReader) for (uint8_t i = 0; i < MAX_STREAMS; i++) if (_streams[i].state == 1) remaining = true;

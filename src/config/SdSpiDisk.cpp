@@ -27,6 +27,8 @@ uint32_t  _sectors = 0;
 uint32_t  _cmd8Echo = 0;
 uint8_t   _pdrv = 0xFF;
 char      _mountPoint[16] = "";
+FATFS*    _fatfs = nullptr;            // the volume FatFs mounted (geometry for the cluster maps)
+volatile uint32_t _generation = 0;     // bumped at every successful mount: what was learnt about the previous one is stale
 volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
 /* HEALTH. `_crcGood`: blocks whose CRC16 matched since the mount — once a card has proven
  * it sends valid CRCs (CRC_PROVEN blocks), a mismatch is a corrupted transfer and the
@@ -305,6 +307,8 @@ bool mount(SPIClass& spi, uint8_t cs, uint32_t hz, const char* mountPoint, Strin
   }
   if (!_fs) _fs = new Disk();
   _fs->mountPoint(mountPoint);
+  _fatfs = fatfs;
+  _generation = _generation + 1;
   return true;
 }
 
@@ -320,6 +324,55 @@ void unmount() {
 }
 
 bool        mounted()       { return _ready; }
+
+/* THE DIRECT PATH (cluster maps, src/audio/SdClusters.h): whole sectors, straight from the bus,
+ * without FatFs. One transaction, bus-locked, with the driver's retries and CRC checks. */
+bool readSectors(uint8_t* buf, uint32_t sector, uint32_t count) {
+  if (!_ready || !count) return false;
+  return _readSectors(buf, sector, count);
+}
+uint32_t generation() { return _generation; }
+void bumpGeneration() { _generation = _generation + 1; }
+
+/* The volume's geometry, as FatFs worked it out at the mount. Only what the cluster maps can serve:
+ * FAT16 or FAT32 with 512-byte sectors (the SD card's). */
+bool fsGeometry(FsGeometry& out) {
+  if (!_ready || !_fatfs) return false;
+  const FATFS* f = _fatfs;
+#if FF_MAX_SS != FF_MIN_SS
+  const uint32_t sectorSize = f->ssize;
+#else
+  const uint32_t sectorSize = FF_MIN_SS;
+#endif
+  if (sectorSize != 512) return false;
+  if (f->fs_type != FS_FAT16 && f->fs_type != FS_FAT32) return false;
+  out.fatBits = (f->fs_type == FS_FAT32) ? 32 : 16;
+  out.fatBase = (uint32_t)f->fatbase;
+  out.dataBase = (uint32_t)f->database;
+  out.clusterSectors = f->csize;
+  out.nEntries = (uint32_t)f->n_fatent;
+  return out.clusterSectors != 0;
+}
+
+/* Where a file starts: its first cluster and its size, read from its directory entry by FatFs's own
+ * f_open (a file object of ours: the Arduino `File` hides it). `path` is under the mount point:
+ * "/samples/x.wav". */
+bool fileStart(const char* path, uint32_t& startCluster, uint32_t& bytes) {
+  if (!_ready || _pdrv == 0xFF || !path) return false;
+  char full[128];
+  snprintf(full, sizeof full, "%c:%s", (char)('0' + _pdrv), path);
+  FIL* fil = (FIL*)heap_caps_calloc(1, sizeof(FIL), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!fil) return false;
+  bool ok = false;
+  if (f_open(fil, full, FA_READ) == FR_OK) {
+    startCluster = (uint32_t)fil->obj.sclust;
+    bytes = (uint32_t)fil->obj.objsize;
+    ok = startCluster >= 2;
+    f_close(fil);
+  }
+  heap_caps_free(fil);
+  return ok;
+}
 uint64_t    capacityBytes() { return (uint64_t)_sectors * 512ULL; }
 const char* type()          { return _hc ? "SDHC/SDXC" : "SD"; }
 uint32_t    cmd8Echo()      { return _cmd8Echo; }
