@@ -4,6 +4,7 @@
 #include "../midi/MidiRouter.h"
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
+#include "../audio/SfzStore.h"
 #include "../server/ServerCore.h"     // nidmi_ws_pousser : la carte ANNONCE son etat
 #include "../config/EcrituresDifferees.h"
 #include "Repertoire.h"
@@ -186,6 +187,21 @@ namespace {
 
 // Applique a la carte ce que la cue decrit. C'est ICI que « changer de cue »
 // prend un sens materiel — et nulle part dans le navigateur.
+/* Les chemins sfz= que la LISTE ENTIÈRE nomme encore (§207, décision du 6
+ * octobre) : l'entretien décharge un instrument chargé qu'aucune cue ne
+ * nomme plus. Passe par lire() : _pourChaqueLigne est défini plus bas. */
+static String _sfzEmployes() {
+  String toutes;
+  const int n = nombre();
+  for (int i = 0; i < n; i++) {
+    Cue c;
+    if (!lire(i, c)) continue;
+    const String v = _valeurDe(c.params, "sfz");
+    if (v.length()) toutes += (toutes.length() ? "," : "") + v;
+  }
+  return toutes;
+}
+
 void _appliquer(const Cue& c) {
   /* Les courbes d'abord : analysees ICI, a l'activation, jamais dans la boucle.
    * Une cue sans automation en vide la table — sinon la courbe de la cue
@@ -250,7 +266,7 @@ void _appliquer(const Cue& c) {
      * avec sa derniere valeur : ecrire « loop=0 » une fois vaut pour tous.
      * `bloc=` porte l'identifiant du bloc de chaque son (MESURES §165), sans
      * completion : c'est par lui que le volume retrouve une voix qui joue. */
-    String noms, boucles, gains, blocs;
+    String noms, boucles, gains, blocs, cheminSfz;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
     int debut = 0;
     while (debut < (int)c.params.length()) {
@@ -264,6 +280,7 @@ void _appliquer(const Cue& c) {
         else if (cle == "loop")   { boucles = kv.substring(eq + 1); boucles.trim(); }
         else if (cle == "gain")   { gains   = kv.substring(eq + 1); gains.trim(); }
         else if (cle == "bloc")   { blocs   = kv.substring(eq + 1); blocs.trim(); }
+        else if (cle == "sfz")    { cheminSfz = kv.substring(eq + 1); cheminSfz.trim(); }
         else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
         else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
       }
@@ -281,7 +298,7 @@ void _appliquer(const Cue& c) {
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
 
-    if (!noms.length() && !listes) {
+    if (!noms.length() && !listes && !cheminSfz.length()) {
       Serial.println("[cues] aucun echantillon nomme");
     } else {
       /* Armer le lecteur une fois — il ne charge rien, tout est deja en PSRAM.
@@ -343,8 +360,19 @@ void _appliquer(const Cue& c) {
                               surCue ? "lances" : "armes pour le clavier");
     }
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
-     * charge. Une cue sans liste les retire (une banque vide). */
+       charge. Une cue sans liste les retire (une banque vide). */
     AudioEngine::poserListes(c.params);
+    /* L'INSTRUMENT SFZ DE LA CUE (§207) : charge a l'arrivee s'il ne l'est
+       pas (lecture SD, ~0,4 s pour un kit — l'app dira ce que chaque cue
+       coute), propose a la tache audio ; une cue sans sfz= tait celui qui
+       jouait. Puis l'entretien : un instrument qu'AUCUNE cue ne nomme plus
+       se decharge (decision du 6 octobre). */
+    {
+      String raisonSfz;
+      if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
+        Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
+      SfzStore::entretenir(_sfzEmployes());
+    }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
@@ -353,7 +381,8 @@ void _appliquer(const Cue& c) {
   /* Et une cue qui ne parle plus d'echantillon du tout (engine != -2) arrete
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
-  if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String()); }
+  if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String());
+                        String r; SfzStore::proposer("", r); SfzStore::entretenir(_sfzEmployes()); }
 
   /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
    * one too. The NEXT cue — the one GO would play, the first after the last if the list
@@ -570,8 +599,10 @@ int moteurEmploye(String& son) {
     if (m != -2) return true;
     const String params = _champ(l, 4);
     const String premier = _premierSon(_valeurDe(params, "sample"));
-    /* Un son de play-sf, ou une play list (§196) — sans clavier : son vide. */
-    if (!premier.length() && !_valeurDe(params, "liste").length())
+    /* Un son de play-sf, une play list (§196) ou un instrument SFZ (§207) —
+       sans clavier pour le sfz : son vide. */
+    if (!premier.length() && !_valeurDe(params, "liste").length()
+        && !_valeurDe(params, "sfz").length())
       return true;                               // un bloc sans son : la suivante
     son = premier;
     moteur = -2;

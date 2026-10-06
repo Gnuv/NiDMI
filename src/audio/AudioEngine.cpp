@@ -17,6 +17,7 @@
 #include <PlaitsDSP.h>
 #include "SampleStore.h"
 #include "SdStream.h"
+#include "SfzStore.h"
 #include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
@@ -662,12 +663,18 @@ void _sweepStreams() {
 
 void rendreSample() {
   uint8_t underruns = 0;                // the streamed voices that ran short of data this block
+  /* THE SFZ BLOCK first (§207): the kernel renders float into two scratch
+   * buffers, this mixer adds them to the int32 sum below — one conversion per
+   * sample and voice-independent. False when nothing plays. */
+  static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state
+  const bool sfz = SfzStore::rendreBloc(sfzG, sfzD, FRAMES);
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
   const bool mesurer = mesureVu && !gSilence;
   for (size_t i = 0; i < FRAMES; i++) {
     int32_t g = 0, d = 0;
+    if (sfz) { g = (int32_t)(sfzG[i] * 32768.0f); d = (int32_t)(sfzD[i] * 32768.0f); }
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
@@ -773,6 +780,14 @@ void appliquer(const Evenement& e) {
      * armee. Le clavier d'un play-sf la recoit aussi, s'il est en mode MIDI :
      * deux blocs, deux instruments. */
     if (e.velo != 0) _notePourLesListes(e.note);
+    /* THE SFZ OF THE CUE TAKES THE KEYBOARD (§207): a cue that names sfz=
+     * routes its notes to the SFZ engine — before the play-s keyboard, after
+     * the lists (a note still picks the clip of an armed play-list). */
+    if (SfzStore::notesArmees()) {
+      if (e.velo == 0) SfzStore::noteOff(e.note);
+      else             SfzStore::noteOn(e.note, e.velo);
+      return;
+    }
     /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
      * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
      * tomberait sur le sinus plus bas, et on entendrait un bip a chaque touche
@@ -844,6 +859,7 @@ void boucleAudio(void*) {
     /* LES PLAY LIST PROPOSEES s'adoptent AVANT les notes de ce bloc (§196) :
      * une liste posee puis jouee (l'ecoute de l'inspecteur) trouve la sienne. */
     if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
+    SfzStore::adopter();                 // the proposed SFZ instrument, same pattern (§207)
     Evenement e;
     while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
     _servePendingNotes();               // notes whose head was awaited start as soon as it is there

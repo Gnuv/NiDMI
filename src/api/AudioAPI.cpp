@@ -7,6 +7,7 @@
 #include <esp_intr_alloc.h>
 #include <stdio.h>
 #include "../audio/AudioEngine.h"
+#include "../audio/SfzStore.h"
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
 #include "../mapping/MappingEngine.h"
@@ -127,7 +128,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         /* LES MOTEURS QUE CETTE IMAGE JOUE (CONVERGENCE §9.7, MESURES §190) : un
          * fichier de composition les compare aux siens avant d'arriver. Dits par
          * la carte, pas devines par l'app. */
-        json += String("\"moteurs\":[\"play-sf\",\"play-list\",\"midi-script\"")
+        json += String("\"moteurs\":[\"play-sf\",\"play-list\",\"play-sfz\",\"midi-script\"")
               + (AudioEngine::syntheseLourdeDisponible() ? ",\"plaits\"" : "") + "],";
         /* LES PLAY LIST ARMEES (§196) : le clip que chacune joue — 0 aucun — et
          * son nombre de clips. L'app l'apprend par l'annonce NIDMI_LISTE ; ceci
@@ -150,6 +151,17 @@ void setupAudioAPI(AsyncWebServer& server) {
             json += "],";
         }
         json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
+        /* L'INSTRUMENT SFZ (§207) : ce qui joue — chemin, regions, samples,
+           PCM tenu en PSRAM, voix actives — et le DERNIER REFUS, pour que
+           l'app le dise AVANT le concert. gen bouge a chaque changement. */
+        json += "\"sfz\":{";
+        json += "\"chemin\":\"" + SfzStore::chemin() + "\",";
+        json += "\"regions\":" + String(SfzStore::regions()) + ",";
+        json += "\"samples\":" + String(SfzStore::samples()) + ",";
+        json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
+        json += "\"voix\":" + String(SfzStore::voixActives()) + ",";
+        json += "\"gen\":" + String((unsigned)SfzStore::generation()) + ",";
+        json += "\"erreur\":\"" + SfzStore::erreur() + "\"},";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -433,6 +445,33 @@ void setupAudioAPI(AsyncWebServer& server) {
         }
         json += "]}";
         request->send(200, "application/json", json);
+    });
+
+    /* L'INSTRUMENT SFZ, TOUT DE SUITE — le chemin VIVANT de l'inspecteur :
+     * sfz=kit-test/kit.sfz charge l'instrument (lecture SD) et l'arme pour
+     * les notes ; vide, il le tait. Le lecteur s'arme s'il ne l'est pas.
+     * Rien ne s'ecrit en flash — la liste de cues, tenue a jour par le
+     * suivi, la redira a la prochaine arrivee sur la cue. L'adoption par la
+     * tache audio suit au bloc pres : les chiffres sont dans /api/audio/status. */
+    server.on("/api/audio/sfz", HTTP_POST, [](AsyncWebServerRequest *request){
+        const String chemin = request->hasParam("sfz", true)
+                            ? request->getParam("sfz", true)->value() : String("");
+        if (!AudioEngine::samplerActif()) {
+            String raison;
+            if (!AudioEngine::setSampler("", raison)) {
+                request->send(409, "application/json",
+                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                return;
+            }
+        }
+        String raison;
+        if (!SfzStore::proposer(chemin.c_str(), raison)) {
+            request->send(422, "application/json",
+                "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+            return;
+        }
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"chemin\":\"" + chemin + "\"}");
     });
 
     /* DECLENCHER L'ECHANTILLON MAINTENANT — le chemin VIVANT.
