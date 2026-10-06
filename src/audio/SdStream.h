@@ -43,7 +43,14 @@ namespace SdStream {
  * all of them play was refused, the old clip was already fading: silence. */
 constexpr uint8_t  MAX_STREAMS  = 5;
 constexpr uint8_t  MAX_HEADS    = 64;       // table entries (a few dozen bytes each)
-constexpr uint32_t HEAD_FRAMES  = 16384;    // a clip's head: 0.37 s at 44.1 kHz
+/* A clip's head, in FRAMES (so 0.37 s at 44.1 kHz, 0.34 s at 48 kHz, 0.74 s at 22.05 kHz). It must
+ * outlast the time a (re)started stream takes to deliver its first data — see `firstData` in the
+ * diagnostics, which MEASURES that time. Overridable at build time (-DNIDMI_HEAD_FRAMES=...) to try
+ * a length without touching the source. */
+#ifndef NIDMI_HEAD_FRAMES
+#define NIDMI_HEAD_FRAMES 16384
+#endif
+constexpr uint32_t HEAD_FRAMES  = NIDMI_HEAD_FRAMES;
 /* THE HEAD BUDGET, IN BYTES, not a count: a stereo head takes 64 KB, a mono one 32 KB.
  * 2 MB = ~32 stereo clips (~64 mono) with a head — a quarter of the free PSRAM
  * (8.2 MB at boot). Sum of the PSRAM ceilings: storage sounds 1.56 MB + preloaded SD
@@ -89,7 +96,8 @@ void     recordDrop();                                  // ... or was given up o
 void     recordNoStream();                              // a clip did not start: every stream was taken
 void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
 bool     failedHeads();
-bool     anyActive();                                   // some stream is playing (a measure would take its bandwidth)
+bool     anyActive();
+void     resetFirstData();                              // zero the first-data latency counters (a bench measures one scenario at a time)                                   // some stream is playing (a measure would take its bandwidth)
 uint32_t trouble();                                     // everything missed so far: silent blocks, dropped notes, read errors, clips without a stream (the health reads it)                                 // some failed head may be read again (SdCard::service asks)
 
 // ── Streams ──────────────────────────────────────────────────────────────────

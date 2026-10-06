@@ -32,6 +32,7 @@
 #include <stdarg.h>
 #include "../audio/AudioEngine.h"
 #include "../audio/SampleStore.h"
+#include "../audio/SdStream.h"
 #include "../mapping/ScriptStore.h"
 #include "../mapping/CueStore.h"
 #include "../mapping/CompoStore.h"
@@ -276,6 +277,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * `measure.state == "finished"`. `?simulate_loss=1[&ms=1500]` (bench): every read fails
    * for that long, as a card pulled out and put back. A gesture, on demand: nothing polls it. */
   server.on("/api/diag/sd", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (request->hasParam("reset_first_data")) SdStream::resetFirstData();
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
     /* The bench hooks BREAK things on purpose: never during a concert (the lock answers 423). */

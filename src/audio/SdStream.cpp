@@ -108,6 +108,10 @@ struct Stream {
   File             file;
   char             openName[SampleStore::NOM_MAX] = {0};
   uint32_t         readEnd = 0;         // the end it aims for (copy of `endFrame` at the last request)
+  volatile uint32_t reqMs = 0;          // written by the audio: when the (re)start was asked (millis)
+  uint32_t         reqSnap = 0;         // the reader's copy, taken when it positions
+  bool             awaitFirst = false;  // positioned, no data delivered yet: the latency is being timed
+  uint8_t          waitK = 0;           // how many streams were waiting for their first data at that moment, itself included
   uint32_t         retryAtMs = 0;       // a read failed: not before this time (0: no retry pending)
   uint8_t          errStreak = 0;       // failed reads in a row; MAX_ERRORS and the stream gives up
 };
@@ -122,6 +126,12 @@ Stream* _streams = nullptr;           // MAX_STREAMS, likewise
 volatile uint32_t _underrunsTotal = 0;
 volatile uint32_t _delayedNotes = 0, _droppedNotes = 0, _worstWaitMs = 0, _noHeadNotes = 0, _readErrors = 0, _noStream = 0;
 volatile uint32_t _refusals = 0, _anticipatedRefusals = 0;
+/* THE FIRST-DATA LATENCY (§205): from the audio's (re)start request to the first chunk in the
+ * ring. A clip plays its head meanwhile, so the head must be LONGER than this — in the worst
+ * case, when several streams restart together and the reader serves them one after the other.
+ * Counters only (the reader writes them); `byK[k]`: the worst latency seen with k streams waiting. */
+volatile uint32_t _fdN = 0, _fdSum = 0, _fdWorst = 0, _fdLast = 0, _fdOver100 = 0, _fdOver150 = 0, _fdOver200 = 0;
+volatile uint32_t _fdWorstByK[MAX_STREAMS + 1] = {0};
 volatile uint32_t _readerAlive = 0;
 volatile bool     _stopReader = false;
 
@@ -168,6 +178,11 @@ bool _serve(Stream& x) {
       x.readEnd = from;                                   // nothing to read: silence
     }
     x.starts = x.starts + 1;
+    x.reqSnap = x.reqMs;
+    uint8_t k = 1;
+    for (uint8_t j = 0; j < MAX_STREAMS; j++) if (&_streams[j] != &x && _streams[j].state == 1 && _streams[j].awaitFirst) k++;
+    x.waitK = k;
+    x.awaitFirst = true;
     __sync_synchronize();
     x.seqSeen = s;
     return true;
@@ -226,6 +241,17 @@ bool _serve(Stream& x) {
     return false;
   }
   x.errStreak = 0;
+  if (x.awaitFirst) {                                     // the first chunk of this (re)start is in the ring
+    x.awaitFirst = false;
+    const uint32_t lat = millis() - x.reqSnap;
+    _fdN = _fdN + 1; _fdSum = _fdSum + lat; _fdLast = lat;
+    if (lat > _fdWorst) _fdWorst = lat;
+    if (lat > 100) _fdOver100 = _fdOver100 + 1;
+    if (lat > 150) _fdOver150 = _fdOver150 + 1;
+    if (lat > 200) _fdOver200 = _fdOver200 + 1;
+    const uint8_t kk = x.waitK > MAX_STREAMS ? MAX_STREAMS : x.waitK;
+    if (lat > _fdWorstByK[kk]) _fdWorstByK[kk] = lat;
+  }
   return true;
 }
 
@@ -410,6 +436,10 @@ void recordWait(uint32_t ms) {
 void recordDrop() { _droppedNotes = _droppedNotes + 1; }
 void recordNoHead() { _noHeadNotes = _noHeadNotes + 1; }
 void recordNoStream() { _noStream = _noStream + 1; }
+void resetFirstData() {
+  _fdN = _fdSum = _fdWorst = _fdLast = _fdOver100 = _fdOver150 = _fdOver200 = 0;
+  for (uint8_t i = 0; i <= MAX_STREAMS; i++) _fdWorstByK[i] = 0;
+}
 uint32_t trouble() { return _underrunsTotal + _noHeadNotes + _noStream + _droppedNotes + _readErrors; }
 
 // ── Streams: API ─────────────────────────────────────────────────────────────
@@ -423,7 +453,7 @@ int8_t acquire(uint8_t voice) {
       if (!x.ring) { NIDMI_WEB_LOG("[SD] flux : PSRAM insuffisante pour un tampon"); return -1; }
     }
     x.voice = voice; x.lo = x.hi = 0; x.consumer = 0;
-    x.underruns = 0; x.jumps = 0; x.starts = 0;
+    x.underruns = 0; x.jumps = 0; x.starts = 0; x.awaitFirst = false;
     x.seqSeen = x.seq;                  // nothing to serve until `start` has spoken
     __sync_synchronize();
     x.state = 1;
@@ -448,6 +478,7 @@ void start(int8_t f, const char* name, uint32_t startFrame, uint32_t endFrame, u
   x.dataOffset = dataOffsetBytes; x.channels = channels;
   x.startFrame = startFrame; x.endFrame = endFrame;
   x.consumer = 0;
+  x.reqMs = millis();                    // for the first-data latency (a counter, safe from the audio task)
   __sync_synchronize();
   x.seq = x.seq + 1;
   _startReader();
@@ -457,6 +488,7 @@ void restart(int8_t f) {
   if (!_streams || f < 0 || f >= (int8_t)MAX_STREAMS) return;
   Stream& x = _streams[f];
   x.consumer = 0;
+  x.reqMs = millis();
   __sync_synchronize();
   x.seq = x.seq + 1;
   _startReader();
@@ -503,6 +535,16 @@ String diagnostics() {
            + ",\"notes_without_head\":" + String((unsigned long)_noHeadNotes)
            + ",\"read_errors\":" + String((unsigned long)_readErrors)
            + ",\"clips_without_stream\":" + String((unsigned long)_noStream)
+           + ",\"first_data\":{\"n\":" + String((unsigned long)_fdN)
+           + ",\"avg_ms\":" + String((unsigned long)(_fdN ? _fdSum / _fdN : 0))
+           + ",\"last_ms\":" + String((unsigned long)_fdLast)
+           + ",\"worst_ms\":" + String((unsigned long)_fdWorst)
+           + ",\"over_100\":" + String((unsigned long)_fdOver100)
+           + ",\"over_150\":" + String((unsigned long)_fdOver150)
+           + ",\"over_200\":" + String((unsigned long)_fdOver200)
+           + ",\"worst_by_waiting\":[" + String((unsigned long)_fdWorstByK[1]) + "," + String((unsigned long)_fdWorstByK[2])
+           + "," + String((unsigned long)_fdWorstByK[3]) + "," + String((unsigned long)_fdWorstByK[4])
+           + "," + String((unsigned long)_fdWorstByK[5]) + "]}"
            + ",\"refused_heads\":" + String((unsigned long)_refusals)
            + ",\"refused_anticipated\":" + String((unsigned long)_anticipatedRefusals) + ",\"streams\":[";
   bool first = true;
