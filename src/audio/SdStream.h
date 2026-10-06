@@ -16,8 +16,9 @@
 //
 // TWO PIECES.
 //
-//  THE HEAD. A clip that starts in the middle of a long file cannot wait for 68 ms
-//  + 24 ms of reading. The START of every armed clip (HEAD_FRAMES, 0.37 s at
+//  THE HEAD. A clip that starts in the middle of a long file cannot wait for its stream's
+//  first data (FatFs's seek alone was 25 to 400+ ms; with the cluster maps, SdClusters.h, 7 to
+//  50 ms measured, whatever the position). The START of every armed clip (HEAD_FRAMES, 0.2 s at
 //  44.1 kHz) is therefore read ahead, once, by the SD-card task, and kept in
 //  PSRAM: the clip starts from the head, instantly, while the reader positions
 //  itself behind and fills the buffer from the end of the head. A head is
@@ -42,17 +43,20 @@ namespace SdStream {
  * stream: the new one needs another. With as many streams as lists, retriggering a list while
  * all of them play was refused, the old clip was already fading: silence. */
 constexpr uint8_t  MAX_STREAMS  = 5;
-constexpr uint8_t  MAX_HEADS    = 64;       // table entries (a few dozen bytes each)
-/* A clip's head, in FRAMES (so 0.37 s at 44.1 kHz, 0.34 s at 48 kHz, 0.74 s at 22.05 kHz). It must
- * outlast the time a (re)started stream takes to deliver its first data — see `firstData` in the
- * diagnostics, which MEASURES that time. Overridable at build time (-DNIDMI_HEAD_FRAMES=...) to try
- * a length without touching the source. */
+constexpr uint8_t  MAX_HEADS    = 120;      // table entries (a few dozen bytes each); stays under 128: indices are int8_t
+/* A clip's head, in FRAMES (so 0.2 s at 44.1 kHz, 0.18 s at 48 kHz, 0.4 s at 22.05 kHz). It must
+ * outlast the time a (re)started stream takes to deliver its first data — `first_data` in the
+ * diagnostics MEASURES that time. With the cluster maps, at 20 MHz: 7-10 ms for one stream, 24 for two,
+ * 50 for four restarting together, 42-64 under stress (the Files panel reading the SD, a noisy bus, the
+ * clock fallen back to 10 MHz): 0.2 s is about 3 times the worst. It was 16 384 frames (0.37 s) while
+ * FatFs's seek made that delay depend on the position in the file (MESURES §205). Overridable at build
+ * time (-DNIDMI_HEAD_FRAMES=...) to try another length. */
 #ifndef NIDMI_HEAD_FRAMES
-#define NIDMI_HEAD_FRAMES 16384
+#define NIDMI_HEAD_FRAMES 8820
 #endif
 constexpr uint32_t HEAD_FRAMES  = NIDMI_HEAD_FRAMES;
-/* THE HEAD BUDGET, IN BYTES, not a count: a stereo head takes 64 KB, a mono one 32 KB.
- * 2 MB = ~32 stereo clips (~64 mono) with a head — a quarter of the free PSRAM
+/* THE HEAD BUDGET, IN BYTES, not a count: a stereo head takes 35 KB, a mono one 17 KB (0.2 s at
+ * 44.1 kHz). 2 MB = ~59 stereo clips (~118 mono) with a head — a quarter of the free PSRAM
  * (8.2 MB at boot). Sum of the PSRAM ceilings: storage sounds 1.56 MB + preloaded SD
  * sounds 3 MB + heads 2 MB + buffers ~0.5 MB ≈ 7 MB — hence the reserve below: NO head
  * is taken if the free PSRAM falls under 1 MB (the web server's response buffers, the
