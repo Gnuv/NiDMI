@@ -27,6 +27,7 @@
 #include "APICommon.h"
 #include "../config/Stockage.h"
 #include "../config/SdCard.h"
+#include "../audio/SfzStore.h"  // lister() : le diagnostic des dossiers de la SD (§208)
 #include "../config/Concert.h"
 #include <LittleFS.h>
 #include <stdarg.h>
@@ -280,6 +281,14 @@ void setupFichiersAPI(AsyncWebServer& server) {
     if (request->hasParam("reset_first_data")) SdStream::resetFirstData();
     if (request->hasParam("retry")) SdCard::tryMount();
     if (request->hasParam("wiring")) SdCard::probeWiring();
+    /* LISTER un dossier de la SD TEL QUE LE FatFs DE LA CARTE LE VOIT (§208) :
+     * lecture seule — le panneau Fichiers ne parcourt que /samples, et un
+     * instrument /sfz refusé doit pouvoir se DIAGNOSTIQUER depuis la carte. */
+    if (request->hasParam("lister")) {
+      request->send(200, "application/json",
+                    SfzStore::lister(request->getParam("lister")->value().c_str()));
+      return;
+    }
     /* The bench hooks BREAK things on purpose: never during a concert (the lock answers 423). */
     if ((request->hasParam("simulate_noise") || request->hasParam("simulate_loss") || request->hasParam("simulate_stale"))
         && Concert::refuse(request, "simulation de panne de la carte SD refusee : la carte est verrouillee pour le concert")) return;

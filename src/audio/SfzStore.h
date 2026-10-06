@@ -56,6 +56,10 @@ void noteOff(uint8_t note);
 bool rendreBloc(float* g, float* d, uint32_t trames);
 
 // ── Status (/api/audio/status, refusals for the app) ───────────────────────
+/* What the card's own FatFs sees in a folder of the SD (the Fichiers panel
+ * walks /samples only): names, sizes, dir flags — the diagnostic of a /sfz
+ * that will not open (§208). Read-only. */
+String  lister(const char* dossier);
 bool    charge();                     // an instrument plays (or is proposed)
 String  chemin();                     // "" when silent
 int     regions();

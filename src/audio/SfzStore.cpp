@@ -275,6 +275,21 @@ bool rendreBloc(float* g, float* d, uint32_t trames) {
 
 // ── status ──────────────────────────────────────────────────────────────────
 
+String lister(const char* dossier) {
+  File d = SdCard::open(dossier);
+  if (!d) return String("{\"erreur\":\"introuvable : ") + dossier + "\"}";
+  if (!d.isDirectory()) return String("{\"erreur\":\"pas un dossier : ") + dossier + "\"}";
+  String j = "[";
+  int n = 0;
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    if (n++) j += ",";
+    j += String("{\"nom\":\"") + f.name() + "\",\"octets\":" + String((unsigned)f.size())
+       + ",\"dossier\":" + (f.isDirectory() ? "true" : "false") + "}";
+    if (n >= 48) break;
+  }
+  return j + "]";
+}
+
 bool    charge()        { return _actif >= 0 || _proposition >= 0; }
 String  chemin()        { return (_actif >= 0) ? String(_instrs[_actif].chemin) : String(""); }
 int     regions()       { return (_actif >= 0 && _instrs[_actif].inst) ? _instrs[_actif].inst->region_count : 0; }
