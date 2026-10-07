@@ -216,6 +216,7 @@ bool proposer(const char* chemin, String& raison) {
     _instrs[j].libererApres = 0;                 // retiring, then asked again: kept
   }
   _erreur = "";
+  __sync_synchronize();          /* the flag crosses cores: published with the proposal */
   _proposition = j;
   return true;
 }
@@ -247,6 +248,7 @@ void adopter() {
   const int32_t p = _proposition;
   if (p == -1) return;
   _proposition = -1;
+  __sync_synchronize();          /* ...and read the flag only after seeing the proposal */
   if (p == -2) {
     if (_eng.inst) sfz16_set_instrument(&_eng, nullptr);
     _actif = -1;

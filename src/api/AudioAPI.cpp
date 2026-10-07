@@ -161,6 +161,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
         json += "\"voix\":" + String(SfzStore::voixActives()) + ",";
         json += "\"gen\":" + String((unsigned)SfzStore::generation()) + ",";
+        json += "\"arme\":" + String(SfzStore::notesArmees() ? "true" : "false") + ",";
         json += "\"erreur\":\"" + SfzStore::erreur() + "\"},";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
