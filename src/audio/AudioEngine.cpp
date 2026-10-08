@@ -770,12 +770,19 @@ float frequenceDeNote(uint8_t note) {
   return 440.0f * powf(2.0f, (float(note) - 69.0f) / 12.0f);
 }
 
+/* THE READER IS READY: engine -2 with something to play — a sound of storage or
+ * the SD, or an SFZ kit. A board whose kits all live in /sfz has no sound in
+ * storage: the reader used to count as not ready, and the kit rendered nothing.
+ * actif(), not charge(): voices still draining after an unload must be rendered
+ * too (the frozen-voice defect, through another door). */
+bool lecteurPret() { return moteurCourant == -2 && (SampleStore::nombreCharges() > 0 || SfzStore::actif()); }
+
 void appliquer(const Evenement& e) {
   // La porte n'est PAS ouverte par les notes : c'est le TRANSPORT qui decide.
   // Sans play, le clavier ne doit rien produire — regle demandee explicitement.
   // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
   if (e.sorte == SORTE_CLIP) { _clipDemande(e.bloc, e.clip); return; }   // §196
-  if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
+  if (lecteurPret()) {
     /* LES PLAY LIST D'ABORD (§196) : une note choisit le clip de chaque liste
      * armee. Le clavier d'un play-sf la recoit aussi, s'il est en mode MIDI :
      * deux blocs, deux instruments. */
@@ -877,7 +884,7 @@ void boucleAudio(void*) {
     const uint32_t u0 = micros();
     const uint32_t e0 = ecrituresFlash;
     const uint32_t c0 = ESP.getCycleCount();
-    if (moteurCourant == -2 && SampleStore::nombreCharges() > 0) {
+    if (lecteurPret()) {
       rendreSample();
     } else if (moteurCourant >= 0 && plaitsVoix) {
       if (plaitsTrigger) { plaitsMod.trigger = 1.0f; plaitsTrigger = false; }
@@ -1925,7 +1932,7 @@ void arreterSampler() {
    * a l'abri de la tache audio (echantillonArrive / echantillonParti). */
 }
 
-bool samplerActif() { return moteurCourant == -2 && SampleStore::nombreCharges() > 0; }
+bool samplerActif() { return lecteurPret(); }
 const char* samplerNom() { return echantillonClavier; }
 
 /* RENDRE LA PSRAM D'UN SON RETIRE, quand la tache audio ne peut plus la lire.

@@ -84,6 +84,7 @@ int     regions();
 int     samples();
 size_t  octets();                     // int16 PCM held, all instruments
 int     voixActives();
+bool    actif();                      // the engine has something to render: an instrument, or voices still draining
 uint32_t generation();                // bumps on every instrument change
 uint32_t notesRecues();               // diagnostic: notes that reached the engine (§208)
 bool    moteurInstValide();          // diagnostic: the engine's instrument pointer (§208)

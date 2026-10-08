@@ -573,6 +573,7 @@ String regionPremiere() {
   if (!i || i->inst->region_count < 1) return String("{}");
   const sfz16_region* r = &i->inst->regions[0];
   return String("{\"lo\":") + r->lokey + ",\"hi\":" + r->hikey
+bool    actif()         { return sfz16_needs_render(&_eng) != 0; }
        + ",\"lovel\":" + r->lovel + ",\"hivel\":" + r->hivel
        + ",\"sample_index\":" + r->sample_index + ",\"cc\":" + r->cc_count + "}";
 }
