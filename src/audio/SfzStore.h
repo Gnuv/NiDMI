@@ -22,9 +22,8 @@
 //     which stays alive until they drained — freeing waits RETRAIT_MARGIN_MS.
 //
 // The kernel is sfz16.{h,c} next to this file (MESURES §207: host-tested,
-// parity 0.35-0.61 LSB against the reference core). NOT WIRED YET: MIDI CC
-// (locc/hicc gating needs a CC path to the audio task — the event queue
-// carries notes only); the first test kit uses none.
+// parity 0.35-0.61 LSB against the reference core). MIDI CC reaches the
+// regions' locc/hicc gates through controle().
 #pragma once
 #include <Arduino.h>
 
@@ -81,6 +80,15 @@ float    gainCible();                 // status: its target gain
  * its int16 bus). False when nothing plays; buffers untouched then. */
 bool rendreBloc(float* g, float* d, uint32_t trames);
 
+// ── Any task (the MIDI side) ────────────────────────────────────────────────
+/* A Control Change reached the board (MidiRouter::ccEntrant, after the script
+ * chain — whichever source: USB, RTP, the app's socket). Kept in a table of
+ * bytes; the audio task copies it into the engine at each note-on, which is the
+ * only moment an SFZ region reads it (locc/hicc gate the TRIGGER: a hi-hat
+ * pedal at CC4 picks the open or the closed sample). A byte store is atomic:
+ * nothing waits, nothing is queued, nothing can be lost. */
+void controle(uint8_t cc, uint8_t valeur);
+
 // ── Status (/api/audio/status, refusals for the app) — any task ─────────────
 /* What the card's own FatFs sees in a folder of the SD (the Fichiers panel
  * walks /samples only): names, sizes, dir flags — the diagnostic of a /sfz
@@ -113,6 +121,6 @@ void blocRendu();  void evenementVu();     // the audio loop's heartbeat, and po
 uint32_t blocsRendus(); uint32_t evenementsVus();
 String  erreur();                     // the last refusal, "" if none
 String  echapper(const String& s);   // a text made safe inside a JSON string
-String  diagnostic();                 // the pool as JSON: held instruments, PCM bytes, last load time
+String  diagnostic();                 // the pool as JSON: held instruments, PCM bytes, last load time, the CC held
 
 }  // namespace SfzStore

@@ -64,6 +64,8 @@ static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§
 static volatile uint32_t _blocId = 0;        // the app's block that asked for the kit (0: none)
 static volatile float    _gain = 1.0f;       // the target gain, any task writes it
 static float             _gainLisse = 1.0f;  // the audio task's smoothed copy
+static volatile uint8_t  _ccEntrant[128];    // the Control Change table, written by the MIDI side
+static volatile uint32_t _ccRecus = 0;       // diagnostic: CC that reached the table
 
 // ── helpers (sd-card task) ──────────────────────────────────────────────────
 
@@ -503,9 +505,18 @@ float gainLisse() {
   return _gainLisse;
 }
 
+void controle(uint8_t cc, uint8_t valeur) {
+  _ccEntrant[cc & 127] = valeur;
+  _ccRecus++;
+}
+
 void noteOn(uint8_t note, uint8_t velo) {
   if (!velo) return;
   _notesRecues++;
+  /* The CC state the regions' locc/hicc gates read: copied now, the one moment
+   * they do (a CC that came before this note, in the order the MIDI arrived —
+   * it was stored before the note was queued). */
+  for (int i = 0; i < 128; i++) _eng.cc[i] = _ccEntrant[i];
   sfz16_note_on(&_eng, note, velo);
 }
 void noteOff(uint8_t note)             { sfz16_note_off(&_eng, note); }
@@ -544,7 +555,7 @@ String lister(const char* dossier) {
 String diagnostic() {
   String j = String("{\"dossier\":\"") + DOSSIER + "\",\"budget\":" + String((unsigned)BUDGET_PSRAM)
            + ",\"octets\":" + String((unsigned)_octets) + ",\"en_memoire\":" + String(_nbPris)
-           + ",\"dernier_ms\":" + String((unsigned)_dernierMs)
+           + ",\"dernier_ms\":" + String((unsigned)_dernierMs) + ",\"cc_recus\":" + String((unsigned)_ccRecus)
            + ",\"instruments\":[";
   bool premier = true;
   for (int i = 0; i < SIMULTANES; i++) {
@@ -554,7 +565,16 @@ String diagnostic() {
     j += String("{\"chemin\":\"") + echapper(_instrs[i].chemin) + "\",\"actif\":"
        + (_actif == i ? "true" : "false") + ",\"retire\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
   }
-  return j + "]}";
+  /* The Control Changes held (the ones that are not 0): what a locc/hicc gate sees. */
+  j += "],\"cc\":{";
+  bool premierCc = true;
+  for (int i = 0; i < 128; i++) {
+    if (!_ccEntrant[i]) continue;
+    if (!premierCc) j += ",";
+    premierCc = false;
+    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[i];
+  }
+  return j + "}}";
 }
 
 static bool _finit(const char* nom, const char* ext) {

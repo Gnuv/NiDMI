@@ -16,6 +16,7 @@
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
+#include "../audio/SfzStore.h"   // controle() : les CC des portes locc/hicc du lecteur SFZ
 
 /* ── LE RTP-MIDI SORTANT PASSE PAR LA BOUCLE (MESURES §175) ────────────────
  * La bibliotheque AppleMIDI n'est pas faite pour deux taches : un envoi
@@ -360,6 +361,10 @@ void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
     CcMap::apprendre(c, n);
     // 3. Table CC -> parametre (moteur audio ou parametre de script).
     CcMap::appliquer(c, n, v);
+    // 3b. Le lecteur SFZ : les portes locc/hicc de ses regions lisent ce CC (une
+    //     pedale de charley au CC4 choisit le son ouvert ou ferme). Un octet
+    //     range, rien n'attend, rien ne se perd.
+    SfzStore::controle(n, v);
     // 4. Composants : comportement historique, conserve tel quel.
     g_componentManager.handleMidiControlChange(c, n, v);
 }
