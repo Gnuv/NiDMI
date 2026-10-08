@@ -67,6 +67,11 @@ int     samples();
 size_t  octets();                     // int16 PCM held, all instruments
 int     voixActives();
 uint32_t generation();                // bumps on every instrument change
+uint32_t notesRecues();               // diagnostic: notes that reached the engine (§208)
+bool    moteurInstValide();          // diagnostic: the engine's instrument pointer (§208)
+String  regionPremiere();            // diagnostic: the parsed first region, as the card sees it (§208)
+void blocRendu();  void evenementVu();     // the audio loop's heartbeat, and popped events (§208)
+uint32_t blocsRendus(); uint32_t evenementsVus();
 String  erreur();                     // the last refusal, "" if none
 
 }  // namespace SfzStore

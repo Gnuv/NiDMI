@@ -37,6 +37,9 @@ static volatile bool    _armeur = false;    // the cue named sfz=
 static volatile bool    _notesArmees = false; // adopted side of _armeur
 static volatile int8_t  _actif = -1;        // _instrs index the engine plays
 static uint32_t         _gen = 0;
+static volatile uint32_t _notesRecues = 0;   // diagnostic: how far the notes travel (§208)
+static volatile uint32_t _blocsRendus = 0;    // the audio loop's heartbeat (§208)
+static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§208)
 
 // ── helpers (loader side) ───────────────────────────────────────────────────
 
@@ -245,6 +248,12 @@ void entretenir(const String& employesCsv) {
 // ── audio task ──────────────────────────────────────────────────────────────
 
 void adopter() {
+  /* THE FORGOTTEN INIT (§208, found by the voice photograph: inc_int was the
+   * 1e9 clamp catching 44100/0 — a static engine starts zeroed, and nothing
+   * had ever set its rate). The host tests all called sfz16_engine_init;
+   * the card's loader never did. */
+  static bool engInit = false;
+  if (!engInit) { sfz16_engine_init(&_eng, 48000.0f); engInit = true; }
   const int32_t p = _proposition;
   if (p == -1) return;
   _proposition = -1;
@@ -264,7 +273,11 @@ void adopter() {
 
 bool notesArmees() { return _notesArmees; }
 
-void noteOn(uint8_t note, uint8_t velo) { if (velo) sfz16_note_on(&_eng, note, velo); }
+void noteOn(uint8_t note, uint8_t velo) {
+  if (!velo) return;
+  _notesRecues++;
+  sfz16_note_on(&_eng, note, velo);
+}
 void noteOff(uint8_t note)             { sfz16_note_off(&_eng, note); }
 
 bool rendreBloc(float* g, float* d, uint32_t trames) {
@@ -299,6 +312,27 @@ int     samples()       { return (_actif >= 0 && _instrs[_actif].inst) ? _instrs
 size_t  octets()        { return _octets; }
 int     voixActives()   { return sfz16_active_voices(&_eng); }
 uint32_t generation()   { return _gen; }
+uint32_t notesRecues()  { return _notesRecues; }
+/* DIAGNOSTIC (§208) : le moteur tient-il un instrument, et que vaut sa
+ * premiere region ? Dit par la carte, pas devine. */
+bool moteurInstValide() {
+  if (!_eng.inst || _actif < 0) return false;
+  const sfz16_instrument* in = _eng.inst;
+  if (in->region_count < 1) return false;
+  return true;
+}
+String regionPremiere() {
+  if (_actif < 0 || !_instrs[_actif].inst || _instrs[_actif].inst->region_count < 1)
+    return String("{}");
+  const sfz16_region* r = &_instrs[_actif].inst->regions[0];
+  return String("{\"lo\":") + r->lokey + ",\"hi\":" + r->hikey
+       + ",\"lovel\":" + r->lovel + ",\"hivel\":" + r->hivel
+       + ",\"sample_index\":" + r->sample_index + ",\"cc\":" + r->cc_count + "}";
+}
+void blocRendu()       { _blocsRendus++; }
+void evenementVu()     { _evenementsVus++; }
+uint32_t blocsRendus()    { return _blocsRendus; }
+uint32_t evenementsVus()  { return _evenementsVus; }
 String  erreur()        { return _erreur; }
 
 }  // namespace SfzStore

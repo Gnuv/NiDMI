@@ -21,6 +21,11 @@
 #include <math.h>
 #include <stdio.h>
 
+/* The bench measured this kernel at -O3 (MESURES 206); it was never proven
+ * at -Os, and the whole firmware stays at its long-proven -Os (platform.txt:35)
+ * — the pragma keeps just this file where it was measured. */
+#pragma GCC optimize ("O3")
+
 /* ── small string helpers (no allocation) ────────────────────────────────── */
 
 static int s16_strncasecmp(const char *a, const char *b, size_t n) {

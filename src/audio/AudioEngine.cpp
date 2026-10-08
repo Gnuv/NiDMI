@@ -860,8 +860,9 @@ void boucleAudio(void*) {
      * une liste posee puis jouee (l'ecoute de l'inspecteur) trouve la sienne. */
     if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
     SfzStore::adopter();                 // the proposed SFZ instrument, same pattern (§207)
+    SfzStore::blocRendu();              // the heartbeat: the loop is alive (§208)
     Evenement e;
-    while (xQueueReceive(evenements, &e, 0) == pdTRUE) appliquer(e);
+    while (xQueueReceive(evenements, &e, 0) == pdTRUE) { SfzStore::evenementVu(); appliquer(e); }
     _servePendingNotes();               // notes whose head was awaited start as soon as it is there
     /* UN SON RETIRE (remplace, supprime — §177) se tait ici, au debut du bloc :
      * sa memoire ne se rend que deux blocs plus tard (rendreApresLecture). Sans
@@ -932,6 +933,10 @@ void boucleAudio(void*) {
 }
 
 }  // namespace
+
+/* LE MOTEUR EN COURS, pour le diagnostic (§208) : la note du SFZ mourrait
+ * sans que rien le dise — le statut nommera maintenant la porte. */
+int moteurActif() { return moteurCourant; }
 
 // ── Le moteur de la composition, et le garde-fou ────────────────────────────
 // LE MOTEUR N'EST PLUS MEMORISE : il se DEDUIT de la composition ouverte

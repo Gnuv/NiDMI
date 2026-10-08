@@ -129,6 +129,7 @@ void ouvrirSon();
 #endif
 // true si cette image accepte les moteurs de synthèse (0..23).
 bool syntheseLourdeDisponible();
+int moteurActif();              // le diagnostic de la porte des notes (§208)
 
 // Indices des moteurs Plaits SUBSTITUÉS dans cette image (liste "2,3,4,..."),
 // chaîne vide si l'image est complète. Sous -DPLAITS_LEGER, sept emplacements
