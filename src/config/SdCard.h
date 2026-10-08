@@ -71,6 +71,9 @@ const char* state();
 void loadSounds();
 /* HEADS of streamed clips were requested (SdStream.h): the task reads them, one by one. */
 void loadHeads();
+/* The SFZ store has a wish or housekeeping waiting (SfzStore.h): the task serves it —
+ * reads the kit, retires what no cue names. Callable from ANY task; never waits. */
+void requestSfz();
 
 // Opens a card file for reading; an empty File when the card is not mounted.
 File open(const char* path);

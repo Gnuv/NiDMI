@@ -371,7 +371,8 @@ void _appliquer(const Cue& c) {
       String raisonSfz;
       if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
         Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
-      SfzStore::entretenir(_sfzEmployes());
+      /* The walk over the whole list costs: only when a kit is held or asked for. */
+      if (cheminSfz.length() || SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
     }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
@@ -382,7 +383,8 @@ void _appliquer(const Cue& c) {
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
   if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String());
-                        String r; SfzStore::proposer("", r); SfzStore::entretenir(_sfzEmployes()); }
+                        String r; SfzStore::proposer("", r);
+                        if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes()); }
 
   /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
    * one too. The NEXT cue — the one GO would play, the first after the last if the list

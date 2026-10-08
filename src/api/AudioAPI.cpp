@@ -155,7 +155,10 @@ void setupAudioAPI(AsyncWebServer& server) {
            PCM tenu en PSRAM, voix actives — et le DERNIER REFUS, pour que
            l'app le dise AVANT le concert. gen bouge a chaque changement. */
         json += "\"sfz\":{";
-        json += "\"chemin\":\"" + SfzStore::chemin() + "\",";
+        json += "\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin()) + "\",";
+        json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande()) + "\",";
+        json += "\"chargement\":" + String(SfzStore::chargement() ? "true" : "false") + ",";
+        json += "\"en_memoire\":" + String(SfzStore::enMemoire()) + ",";
         json += "\"regions\":" + String(SfzStore::regions()) + ",";
         json += "\"samples\":" + String(SfzStore::samples()) + ",";
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
@@ -168,7 +171,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"moteur\":" + String(AudioEngine::moteurActif()) + ",";
         json += "\"inst\":" + String(SfzStore::moteurInstValide() ? "true" : "false") + ",";
         json += "\"region0\":" + SfzStore::regionPremiere() + ",";
-        json += "\"erreur\":\"" + SfzStore::erreur() + "\"},";
+        json += "\"erreur\":\"" + SfzStore::echapper(SfzStore::erreur()) + "\"},";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -455,11 +458,14 @@ void setupAudioAPI(AsyncWebServer& server) {
     });
 
     /* L'INSTRUMENT SFZ, TOUT DE SUITE — le chemin VIVANT de l'inspecteur :
-     * sfz=kit-test/kit.sfz charge l'instrument (lecture SD) et l'arme pour
-     * les notes ; vide, il le tait. Le lecteur s'arme s'il ne l'est pas.
-     * Rien ne s'ecrit en flash — la liste de cues, tenue a jour par le
-     * suivi, la redira a la prochaine arrivee sur la cue. L'adoption par la
-     * tache audio suit au bloc pres : les chiffres sont dans /api/audio/status. */
+     * sfz=kit-test/kit.sfz le demande (lecture SD) et l'arme pour les notes ;
+     * vide, il le tait. La route REND LA MAIN AU PLUS VITE : la lecture de la SD
+     * est le travail de la tache sd-card (async_tcp a un chien de garde de 5 s,
+     * un kit prend ~1 s par Mo). Le resultat se lit dans /api/audio/status (sfz :
+     * chargement, chemin, erreur) et s'annonce (NIDMI_SFZ:charge|pret|refus).
+     * Seul un chemin impossible a essayer est refuse ici (422). Le lecteur
+     * s'arme s'il ne l'est pas. Rien ne s'ecrit en flash — la liste de cues,
+     * tenue a jour par le suivi, la redira a la prochaine arrivee sur la cue. */
     server.on("/api/audio/sfz", HTTP_POST, [](AsyncWebServerRequest *request){
         const String chemin = request->hasParam("sfz", true)
                             ? request->getParam("sfz", true)->value() : String("");
@@ -467,18 +473,19 @@ void setupAudioAPI(AsyncWebServer& server) {
             String raison;
             if (!AudioEngine::setSampler("", raison)) {
                 request->send(409, "application/json",
-                    "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                    "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(raison) + "\"}");
                 return;
             }
         }
         String raison;
         if (!SfzStore::proposer(chemin.c_str(), raison)) {
             request->send(422, "application/json",
-                "{\"status\":\"error\",\"message\":\"" + raison + "\"}");
+                "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(raison) + "\"}");
             return;
         }
         request->send(200, "application/json",
-            "{\"status\":\"ok\",\"chemin\":\"" + chemin + "\"}");
+            "{\"status\":\"ok\",\"chemin\":\"" + SfzStore::echapper(chemin) + "\",\"chargement\":"
+            + String(SfzStore::chargement() ? "true" : "false") + "}");
     });
 
     /* DECLENCHER L'ECHANTILLON MAINTENANT — le chemin VIVANT.

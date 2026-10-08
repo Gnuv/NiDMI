@@ -311,6 +311,20 @@ void setupFichiersAPI(AsyncWebServer& server) {
     request->send(200, "application/json", SdCard::diagnostics());
   });
 
+  /* LE MAGASIN SFZ (§208) : les instruments tenus en PSRAM, leur poids, la duree du
+   * dernier chargement. `?decharger=1` (banc) : plus aucune cue ne nomme rien — la
+   * carte se tait et rend tout ce qu'elle tenait, au silence ; refuse sous le verrou
+   * de concert (il decharge ce que la scene attend). Un GESTE, jamais un sondage. */
+  server.on("/api/diag/sfz", HTTP_GET, [](AsyncWebServerRequest* request) {
+    if (request->hasParam("decharger")) {
+      if (Concert::refuse(request, "dechargement des instruments SFZ refuse : la carte est verrouillee pour le concert")) return;
+      String raison;
+      SfzStore::proposer("", raison);
+      SfzStore::entretenir("");
+    }
+    request->send(200, "application/json", SfzStore::diagnostic());
+  });
+
   /* LA LISTE. Parcourt storage a chaque appel : c'est un GESTE (ouvrir la colonne,
    * apres un televersement), jamais un sondage — la regle du §161. L'occupation,
    * elle, est celle que la carte garde et remesure au silence (ScriptStore). */

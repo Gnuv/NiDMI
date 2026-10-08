@@ -10,6 +10,7 @@
 #include "../audio/AudioEngine.h"
 #include "../audio/SampleStore.h"
 #include "../audio/SdStream.h"
+#include "../audio/SfzStore.h"
 #include "../audio/SdClusters.h"
 #include "../server/WebDebugConsole.h"
 #include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES the card's state
@@ -31,6 +32,7 @@ volatile bool     _wantLoad    = false;
 volatile bool     _wantMeasure = false;
 volatile bool     _wantWiring  = false;
 volatile bool     _wantHeads   = false;
+volatile bool     _wantSfz     = false;
 volatile uint32_t _taskAlive   = 0;         // the task lives: only one at a time
 volatile uint32_t _lastAttemptMs = 0;
 volatile uint32_t _attempts    = 0;
@@ -302,6 +304,7 @@ void _mount() {
                 (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisk::cmd8Echo());
   _wantLoad = true;
   _wantHeads = true;                                    // clip heads may have been waiting for the card
+  _wantSfz = true;                                      // so may an SFZ kit that was asked for (SfzStore::servir)
 }
 
 /* The card's sounds, one by one: each goes through echantillonArrive(), the same
@@ -438,11 +441,12 @@ void _task(void*) {
     if (_wantWiring)  { _wantWiring  = false; if (_declared && !_mounted) _probeWiring(); continue; }
     if (_wantHeads)   { _wantHeads   = false; SdStream::loadHeads(); continue; }
     if (_wantLoad)    { _wantLoad    = false; _loadSounds(); continue; }
+    if (_wantSfz)     { _wantSfz     = false; SfzStore::servir(); continue; }
     break;
   }
   __sync_lock_release(&_taskAlive);
   // A flag raised between the last turn and the release: start again.
-  if (_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads) _startTask();
+  if (_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads || _wantSfz) _startTask();
   vTaskDelete(nullptr);
 }
 
@@ -559,6 +563,11 @@ void tryMount() {
 
 void loadHeads() {
   _wantHeads = true;
+  _startTask();
+}
+
+void requestSfz() {
+  _wantSfz = true;
   _startTask();
 }
 
