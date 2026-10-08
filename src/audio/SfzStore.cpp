@@ -589,6 +589,7 @@ static void _balayerKit(File& d, int profondeur, String* sfz, uint32_t* tailles,
   for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (++vus > 400 || millis() - t0 > 900) { tronque = true; return; }
     const char* nom = f.name();
+    if (nom[0] == '.') continue;                 // what a Mac leaves on a card: ._kit.sfz, .DS_Store, .Spotlight-V100...
     if (f.isDirectory()) {
       if (profondeur < 1) _balayerKit(f, profondeur + 1, sfz, tailles, ns, wavOctets, wavN, vus, t0, tronque);
       if (tronque) return;
@@ -612,6 +613,7 @@ String listerKits() {
     for (File d = racine.openNextFile(); d && !tronque; d = racine.openNextFile()) {
       if (++vus > 32 || nKits >= 64) { tronque = true; break; }
       const String dossier = d.name();
+      if (dossier[0] == '.') continue;           // hidden entries are not kits (nor folders of kits)
       if (!d.isDirectory()) {                    // a .sfz at the root of /sfz: no folder, no WAV to weigh
         if (_finit(dossier.c_str(), ".sfz")) {
           if (nKits++) j += ",";
