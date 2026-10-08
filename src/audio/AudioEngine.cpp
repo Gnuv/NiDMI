@@ -668,13 +668,14 @@ void rendreSample() {
    * sample and voice-independent. False when nothing plays. */
   static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state
   const bool sfz = SfzStore::rendreBloc(sfzG, sfzD, FRAMES);
+  const float sfzK = 32768.0f * SfzStore::gainLisse();   // the block's fader, glided (§208)
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
   const bool mesurer = mesureVu && !gSilence;
   for (size_t i = 0; i < FRAMES; i++) {
     int32_t g = 0, d = 0;
-    if (sfz) { g = (int32_t)(sfzG[i] * 32768.0f); d = (int32_t)(sfzD[i] * 32768.0f); }
+    if (sfz) { g = (int32_t)(sfzG[i] * sfzK); d = (int32_t)(sfzD[i] * sfzK); }
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
@@ -1458,6 +1459,9 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
  * suivantes, si le bloc est le sien. Un seul flottant par voix : l'ecriture est
  * atomique, la tache audio lit l'ancienne valeur ou la nouvelle. */
 uint8_t fixerGainBloc(uint32_t bloc, float gain) {
+  /* The SFZ kit is one block's too: its fader is the same living path (§208). The count of voices
+   * stays the sampler's own — the kit answers through SfzStore. */
+  SfzStore::fixerGainBloc(bloc, gain);
   if (!bloc) return 0;                     // 0 = voix sans bloc : on n'y touche pas
   const float g = _borneGain(gain);
   /* Une play list de ce bloc (§196) : ses clips A VENIR aussi. Un flottant

@@ -159,6 +159,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande()) + "\",";
         json += "\"chargement\":" + String(SfzStore::chargement() ? "true" : "false") + ",";
         json += "\"en_memoire\":" + String(SfzStore::enMemoire()) + ",";
+        json += "\"bloc\":" + String((unsigned)SfzStore::blocId()) + ",";
+        json += "\"gain\":" + String(SfzStore::gainCible(), 3) + ",";
         json += "\"regions\":" + String(SfzStore::regions()) + ",";
         json += "\"samples\":" + String(SfzStore::samples()) + ",";
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
@@ -477,6 +479,12 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
         }
+        /* Le bloc de l'app qui demande le kit, et son gain (faders compris) : la route vivante
+         * du fader le retrouvera par cet identifiant, comme pour un son. */
+        if (request->hasParam("bloc", true))
+            SfzStore::fixerBloc((uint32_t)request->getParam("bloc", true)->value().toInt(),
+                                request->hasParam("gain", true)
+                                    ? request->getParam("gain", true)->value().toFloat() : 1.0f);
         String raison;
         if (!SfzStore::proposer(chemin.c_str(), raison)) {
             request->send(422, "application/json",

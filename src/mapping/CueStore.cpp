@@ -266,7 +266,7 @@ void _appliquer(const Cue& c) {
      * avec sa derniere valeur : ecrire « loop=0 » une fois vaut pour tous.
      * `bloc=` porte l'identifiant du bloc de chaque son (MESURES §165), sans
      * completion : c'est par lui que le volume retrouve une voix qui joue. */
-    String noms, boucles, gains, blocs, cheminSfz;
+    String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
     int debut = 0;
     while (debut < (int)c.params.length()) {
@@ -281,6 +281,8 @@ void _appliquer(const Cue& c) {
         else if (cle == "gain")   { gains   = kv.substring(eq + 1); gains.trim(); }
         else if (cle == "bloc")   { blocs   = kv.substring(eq + 1); blocs.trim(); }
         else if (cle == "sfz")    { cheminSfz = kv.substring(eq + 1); cheminSfz.trim(); }
+        else if (cle == "sfzbloc") { blocSfz = kv.substring(eq + 1); blocSfz.trim(); }
+        else if (cle == "sfzgain") { gainSfz = kv.substring(eq + 1); gainSfz.trim(); }
         else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
         else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
       }
@@ -369,6 +371,8 @@ void _appliquer(const Cue& c) {
        se decharge (decision du 6 octobre). */
     {
       String raisonSfz;
+      /* Which block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
+      SfzStore::fixerBloc((uint32_t)blocSfz.toInt(), gainSfz.length() ? gainSfz.toFloat() : 1.0f);
       if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
         Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
       /* The walk over the whole list costs: only when a kit is held or asked for. */

@@ -65,6 +65,18 @@ void adopter();                       // block start: swap the proposed instrume
 bool notesArmees();                   // the current cue routes notes here
 void noteOn(uint8_t note, uint8_t velo);
 void noteOff(uint8_t note);
+
+// ── The block's fader: the cue says which block asked for the kit, and its gain ──
+/* `sfzbloc=<id>;sfzgain=<g>` in the cue line: the app's id of the block that names this kit, and its
+ * effective gain (track, group and main faders included). The living path is the sampler's own,
+ * POST /api/audio/sampler/gain (bloc=…&gain=…): fixerGainBloc answers 1 when the block is the kit's.
+ * Any task writes the target; the audio task glides to it (a block of 2.5 ms at a time: no zipper). */
+void     fixerBloc(uint32_t bloc, float gain);
+uint8_t  fixerGainBloc(uint32_t bloc, float gain);
+float    gainLisse();                 // audio task only: the gain to apply to THIS block of audio
+uint32_t blocId();                    // status: the block that asked for the kit
+float    gainCible();                 // status: its target gain
+
 /* Renders the block into g/d (cleared first, float — the caller converts at
  * its int16 bus). False when nothing plays; buffers untouched then. */
 bool rendreBloc(float* g, float* d, uint32_t trames);
@@ -75,7 +87,16 @@ bool rendreBloc(float* g, float* d, uint32_t trames);
  * that will not open (§208). Read-only, for the web: never waits on a card in
  * doubt. */
 String  lister(const char* dossier);
+/* The kits the SD holds, for the app's picker: every `.sfz` under /sfz (at the root, or in a
+ * folder) with its size and the weight of the WAV files beside it (that folder and one level
+ * of sub-folders: an UPPER BOUND of what the kit takes in PSRAM, since a folder may serve several
+ * .sfz and a .sfz may not use every WAV). Walks the card FOR THE WEB (never a card in doubt),
+ * bounded in entries and in time — `truncated` says so. A gesture, never a poll. JSON:
+ * {"sd":"ok","folder":"/sfz","budget":4194304,"kits":[{"path","bytes","wav_bytes","wav_count"}],
+ *  "truncated":false} — `budget`: the PSRAM the board allows its kits, all together. */
+String  listerKits();
 bool    charge();                     // an instrument plays (or is proposed)
+bool    actif();                      // the engine has something to render: an instrument, or voices still draining
 bool    chargement();                 // a wish is not served yet (loading, or waiting for the card)
 int     enMemoire();                  // instruments held in PSRAM (loaded, retiring included)
 String  demande();                    // the path asked for last ("" = silence)
@@ -84,7 +105,6 @@ int     regions();
 int     samples();
 size_t  octets();                     // int16 PCM held, all instruments
 int     voixActives();
-bool    actif();                      // the engine has something to render: an instrument, or voices still draining
 uint32_t generation();                // bumps on every instrument change
 uint32_t notesRecues();               // diagnostic: notes that reached the engine (§208)
 bool    moteurInstValide();          // diagnostic: the engine's instrument pointer (§208)

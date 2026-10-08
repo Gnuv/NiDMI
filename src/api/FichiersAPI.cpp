@@ -311,6 +311,13 @@ void setupFichiersAPI(AsyncWebServer& server) {
     request->send(200, "application/json", SdCard::diagnostics());
   });
 
+  /* LES KITS DE LA SD (§208) : tout `.sfz` sous /sfz, avec le poids des WAV a cote (un majorant de
+   * ce qu'il prend en PSRAM) — ce que l'inspecteur de l'app propose au choix. Un GESTE (ouvrir
+   * le choix), jamais un sondage ; la SD se parcourt « pour le web » (jamais une carte douteuse). */
+  server.on("/api/sfz/kits", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "application/json", SfzStore::listerKits());
+  });
+
   /* LE MAGASIN SFZ (§208) : les instruments tenus en PSRAM, leur poids, la duree du
    * dernier chargement. `?decharger=1` (banc) : plus aucune cue ne nomme rien — la
    * carte se tait et rend tout ce qu'elle tenait, au silence ; refuse sous le verrou

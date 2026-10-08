@@ -13,6 +13,7 @@
 //   - the ENGINE (_eng) belongs to the audio task.
 #include "SfzStore.h"
 #include "sfz16.h"
+#include <strings.h>                    // strcasecmp
 #include "SampleStore.h"
 #include "../config/SdCard.h"
 #include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES what it loads
@@ -60,6 +61,9 @@ static uint32_t         _gen = 0;
 static volatile uint32_t _notesRecues = 0;   // diagnostic: how far the notes travel (§208)
 static volatile uint32_t _blocsRendus = 0;    // the audio loop's heartbeat (§208)
 static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§208)
+static volatile uint32_t _blocId = 0;        // the app's block that asked for the kit (0: none)
+static volatile float    _gain = 1.0f;       // the target gain, any task writes it
+static float             _gainLisse = 1.0f;  // the audio task's smoothed copy
 
 // ── helpers (sd-card task) ──────────────────────────────────────────────────
 
@@ -479,6 +483,26 @@ void adopter() {
 
 bool notesArmees() { return _notesArmees; }
 
+void fixerBloc(uint32_t bloc, float gain) {
+  _blocId = bloc;
+  _gain = (gain < 0.0f) ? 0.0f : (gain > 4.0f ? 4.0f : gain);
+}
+
+uint8_t fixerGainBloc(uint32_t bloc, float gain) {
+  if (!bloc || bloc != _blocId) return 0;
+  _gain = (gain < 0.0f) ? 0.0f : (gain > 4.0f ? 4.0f : gain);
+  return 1;
+}
+
+uint32_t blocId()   { return _blocId; }
+float    gainCible() { return _gain; }
+
+float gainLisse() {
+  _gainLisse += (_gain - _gainLisse) * 0.25f;     // ~10 ms to get there at 2.5 ms a block
+  if (fabsf(_gain - _gainLisse) < 0.0005f) _gainLisse = _gain;
+  return _gainLisse;
+}
+
 void noteOn(uint8_t note, uint8_t velo) {
   if (!velo) return;
   _notesRecues++;
@@ -520,7 +544,8 @@ String lister(const char* dossier) {
 String diagnostic() {
   String j = String("{\"dossier\":\"") + DOSSIER + "\",\"budget\":" + String((unsigned)BUDGET_PSRAM)
            + ",\"octets\":" + String((unsigned)_octets) + ",\"en_memoire\":" + String(_nbPris)
-           + ",\"dernier_ms\":" + String((unsigned)_dernierMs) + ",\"instruments\":[";
+           + ",\"dernier_ms\":" + String((unsigned)_dernierMs)
+           + ",\"instruments\":[";
   bool premier = true;
   for (int i = 0; i < SIMULTANES; i++) {
     if (!_instrs[i].pris) continue;
@@ -530,6 +555,61 @@ String diagnostic() {
        + (_actif == i ? "true" : "false") + ",\"retire\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
   }
   return j + "]}";
+}
+
+static bool _finit(const char* nom, const char* ext) {
+  const size_t n = strlen(nom), e = strlen(ext);
+  return n >= e && !strcasecmp(nom + n - e, ext);
+}
+
+/* One folder of /sfz, and the sub-folders (depth 1) below it: the .sfz it holds and the weight
+ * of its WAV files. `d` is an open directory. */
+static void _balayerKit(File& d, int profondeur, String* sfz, uint32_t* tailles, int& ns,
+                        uint32_t& wavOctets, int& wavN, int& vus, uint32_t t0, bool& tronque) {
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    if (++vus > 400 || millis() - t0 > 900) { tronque = true; return; }
+    const char* nom = f.name();
+    if (f.isDirectory()) {
+      if (profondeur < 1) _balayerKit(f, profondeur + 1, sfz, tailles, ns, wavOctets, wavN, vus, t0, tronque);
+      if (tronque) return;
+    } else if (_finit(nom, ".wav")) {
+      wavOctets += (f.size() > 44) ? (uint32_t)f.size() - 44 : 0;   // the PCM, not the header
+      wavN++;
+    } else if (profondeur == 0 && _finit(nom, ".sfz") && ns < 8) {
+      sfz[ns] = nom; tailles[ns] = (uint32_t)f.size(); ns++;
+    }
+  }
+}
+
+String listerKits() {
+  String j = String("{\"sd\":\"") + SdCard::state() + "\",\"folder\":\"" + DOSSIER
+           + "\",\"budget\":" + String((unsigned)BUDGET_PSRAM) + ",\"kits\":[";
+  bool tronque = false;
+  File racine = SdCard::openForWeb(DOSSIER);
+  if (racine && racine.isDirectory()) {
+    const uint32_t t0 = millis();
+    int nKits = 0, vus = 0;
+    for (File d = racine.openNextFile(); d && !tronque; d = racine.openNextFile()) {
+      if (++vus > 32 || nKits >= 64) { tronque = true; break; }
+      const String dossier = d.name();
+      if (!d.isDirectory()) {                    // a .sfz at the root of /sfz: no folder, no WAV to weigh
+        if (_finit(dossier.c_str(), ".sfz")) {
+          if (nKits++) j += ",";
+          j += String("{\"path\":\"") + echapper(dossier) + "\",\"bytes\":" + String((unsigned)d.size())
+             + ",\"wav_bytes\":0,\"wav_count\":0}";
+        }
+        continue;
+      }
+      String sfz[8]; uint32_t tailles[8]; int ns = 0; uint32_t wavOctets = 0; int wavN = 0, vusKit = 0;
+      _balayerKit(d, 0, sfz, tailles, ns, wavOctets, wavN, vusKit, t0, tronque);
+      for (int i = 0; i < ns && nKits < 64; i++) {
+        if (nKits++) j += ",";
+        j += String("{\"path\":\"") + echapper(dossier + "/" + sfz[i]) + "\",\"bytes\":" + String((unsigned)tailles[i])
+           + ",\"wav_bytes\":" + String((unsigned)wavOctets) + ",\"wav_count\":" + String(wavN) + "}";
+      }
+    }
+  }
+  return j + "],\"truncated\":" + (tronque ? "true" : "false") + "}";
 }
 
 String echapper(const String& s) {
@@ -552,6 +632,7 @@ static const InstrSfz* _jouant() {
 }
 
 bool    charge()        { return _actif >= 0 || _proposition >= 0; }
+bool    actif()         { return sfz16_needs_render(&_eng) != 0; }
 bool    chargement()    { bool b; portENTER_CRITICAL(&_mux); b = (_servi != _veutTicket); portEXIT_CRITICAL(&_mux); return b; }
 int     enMemoire()     { return _nbPris; }
 String  demande()       { char s[CHEMIN_MAX]; portENTER_CRITICAL(&_mux); strlcpy(s, _veut, sizeof s); portEXIT_CRITICAL(&_mux); return String(s); }
@@ -573,7 +654,6 @@ String regionPremiere() {
   if (!i || i->inst->region_count < 1) return String("{}");
   const sfz16_region* r = &i->inst->regions[0];
   return String("{\"lo\":") + r->lokey + ",\"hi\":" + r->hikey
-bool    actif()         { return sfz16_needs_render(&_eng) != 0; }
        + ",\"lovel\":" + r->lovel + ",\"hivel\":" + r->hivel
        + ",\"sample_index\":" + r->sample_index + ",\"cc\":" + r->cc_count + "}";
 }
