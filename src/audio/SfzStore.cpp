@@ -281,7 +281,11 @@ void noteOn(uint8_t note, uint8_t velo) {
 void noteOff(uint8_t note)             { sfz16_note_off(&_eng, note); }
 
 bool rendreBloc(float* g, float* d, uint32_t trames) {
-  if (!_eng.inst) return false;
+  /* A NULL instrument still has voices to drain (sfz16_needs_render): skipping
+   * the render left them active for good, holding pointers into an instrument
+   * freed 150 ms later — reproduced on the card: a ringing crash, the
+   * instrument unloaded, "voix: 1" forever. */
+  if (!sfz16_needs_render(&_eng)) return false;
   memset(g, 0, trames * sizeof(float));
   memset(d, 0, trames * sizeof(float));
   sfz16_render(&_eng, g, d, trames);

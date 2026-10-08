@@ -446,6 +446,10 @@ int sfz16_active_voices(const sfz16_engine *eng) {
     return n;
 }
 
+int sfz16_needs_render(const sfz16_engine *eng) {
+    return eng->inst != NULL || sfz16_active_voices(eng) > 0;
+}
+
 /* ── region matching — sparse CC entries instead of the 128-slot walk ────── */
 
 static int region_matches(const sfz16_engine *eng, const sfz16_region *r,

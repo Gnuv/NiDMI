@@ -201,6 +201,12 @@ void sfz16_all_notes_off(sfz16_engine *eng);
 void sfz16_cc(sfz16_engine *eng, uint8_t cc, uint8_t value);
 int  sfz16_active_voices(const sfz16_engine *eng);
 
+/* Does the host have to call sfz16_render? True with an instrument, and ALSO
+ * with none while voices are still sounding: set_instrument only starts their
+ * fast release, a voice dies by being rendered (render never reads eng->inst).
+ * A host that skips the render on a NULL instrument freezes them. */
+int  sfz16_needs_render(const sfz16_engine *eng);
+
 /* Render `frames` of stereo audio, summing every active voice into out_l and
  * out_r (float, as the reference core — the firmware converts at its bus).
  * Buffers are NOT cleared: the caller zeroes them first. */
