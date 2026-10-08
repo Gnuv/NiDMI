@@ -364,11 +364,12 @@ void _appliquer(const Cue& c) {
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
        charge. Une cue sans liste les retire (une banque vide). */
     AudioEngine::poserListes(c.params);
-    /* L'INSTRUMENT SFZ DE LA CUE (§207) : charge a l'arrivee s'il ne l'est
-       pas (lecture SD, ~0,4 s pour un kit — l'app dira ce que chaque cue
-       coute), propose a la tache audio ; une cue sans sfz= tait celui qui
-       jouait. Puis l'entretien : un instrument qu'AUCUNE cue ne nomme plus
-       se decharge (decision du 6 octobre). */
+    /* L'INSTRUMENT SFZ DE LA CUE (§207-208) : la cue DEPOSE son voeu et passe
+       son chemin. La lecture du kit est le travail de la tache sd-card (environ
+       une seconde par Mo : ni la boucle ni async_tcp n'attendent la SD), puis la
+       tache audio l'adopte ; en attendant, l'ancien instrument garde le clavier.
+       Une cue sans sfz= tait celui qui jouait. Puis l'entretien : un instrument
+       qu'AUCUNE cue ne nomme plus se decharge (decision du 6 octobre). */
     {
       String raisonSfz;
       /* Which block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
