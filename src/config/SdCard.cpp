@@ -41,6 +41,19 @@ volatile uint32_t _attempts    = 0;
 volatile bool     _lost        = false;
 volatile uint32_t _lostCount   = 0;         // times it was lost since boot
 volatile uint32_t _remounts    = 0;         // times it came back after a loss
+/* A LOST CARD THAT COMES BACK GETS ONE NEW CHANCE AT THE NOMINAL CLOCK (MESURES §208). The driver's
+ * clock falls back on a burst of failed reads and never climbs by itself — right for a flaky wire,
+ * wrong after a POWER TRANSIENT: unplugging the computer's charger resets the card, the first read
+ * after it fails in a burst, the clock falls to 5 MHz, the card is declared lost, remounts a quarter
+ * of a second later — and stayed at 5 MHz until the next restart (cold loads 2.5 times slower, the
+ * four streams of §205 out of reach). So: the first remount after a loss tries the nominal clock
+ * again; a wire that is really bad makes the driver fall back again, and a SECOND loss within
+ * RESTORE_WINDOW_MS keeps the low clock. At most one such try per window. */
+constexpr uint32_t RESTORE_WINDOW_MS = 10UL * 60UL * 1000UL;
+volatile bool     _restoreDecided = true;    // the decision for the current loss has been taken
+bool              _restoredOnce   = false;
+uint32_t          _lastRestoreMs  = 0;
+volatile uint32_t _restores       = 0;         // times the nominal clock was given back after a loss
 constexpr uint32_t RETRY_MS    = 5000;      // between two mounting attempts, headless
 /* PROBES sector-0 reads, PROBE_GAP_MS apart, that must ALL fail to declare the card lost — about a
  * second of silence from it. Shorter would unmount a card that comes back 0.3 s later and kill
@@ -94,7 +107,7 @@ void _unmount() {
   if (!_mounted) return;
   _mounted = false;
   _capacity = 0;
-  if (SdSpiDisk::frequency() && SdSpiDisk::frequency() < _hz) _hz = SdSpiDisk::frequency();   // a fallback is kept: the wire has not improved
+  if (SdSpiDisk::frequency() && SdSpiDisk::frequency() < _hz) _hz = SdSpiDisk::frequency();   // a fallback is kept (a LOST card gets one new chance when it comes back: see _mount)
   SdStream::stopAll();                   // no open file under the unmount
   SdSpiDisk::unmount();
   NIDMI_WEB_LOG("[SD] demontee");
@@ -276,6 +289,22 @@ void _mount() {
   _lastAttemptMs = millis();
   _attempts++;
   _reason[0] = 0;
+  if (_lost && !_restoreDecided) {
+    _restoreDecided = true;                              // once per loss: the retries every 5 s keep what is decided here
+    if (_hz < DEFAULT_FREQUENCY_HZ) {
+      const uint32_t now = millis();
+      if (!_restoredOnce || now - _lastRestoreMs > RESTORE_WINDOW_MS) {
+        NIDMI_WEB_LOG("[SD] carte perdue : la prochaine tentative se fait a %lu MHz (elle tournait a %lu)",
+                      (unsigned long)(DEFAULT_FREQUENCY_HZ / 1000000UL), (unsigned long)(_hz / 1000000UL));
+        _hz = DEFAULT_FREQUENCY_HZ;
+        _restoredOnce = true; _lastRestoreMs = now;
+        _restores = _restores + 1;
+      } else {
+        NIDMI_WEB_LOG("[SD] deuxieme perte en moins de %lu min : l'horloge reste a %lu MHz",
+                      (unsigned long)(RESTORE_WINDOW_MS / 60000UL), (unsigned long)(_hz / 1000000UL));
+      }
+    }
+  }
   /* The bus first, with its pins and WITHOUT a hardware CS (-1): our SPI-SD driver
    * drives CS itself (digitalWrite). The LIS3DH in SPI mode shares this bus on its
    * own CS — begin() does nothing if it was already opened. */
@@ -414,6 +443,7 @@ void _check() {
     vTaskDelay(pdMS_TO_TICKS(PROBE_GAP_MS));
   }
   _lost = true;
+  _restoreDecided = false;                               // the first remount decides about the clock
   _lostCount = _lostCount + 1;
   NIDMI_WEB_LOG("[SD] carte PERDUE : elle ne repond plus — demontee, nouvelles tentatives toutes les %lu s",
                 (unsigned long)(RETRY_MS / 1000));
@@ -637,6 +667,7 @@ String diagnostics() {
            + ",\"miso\":" + String(_miso) + ",\"mosi\":" + String(_mosi) + "}"
            + ",\"hz\":" + String((unsigned long)(_mounted ? SdSpiDisk::frequency() : _hz))
            + ",\"hz_fallbacks\":" + String((unsigned long)(_mounted ? SdSpiDisk::fallbacks() : 0))
+           + ",\"hz_restores\":" + String((unsigned long)_restores)
            + ",\"attempts\":" + String((unsigned long)_attempts)
            + ",\"task\":" + String(_taskAlive ? "true" : "false")
            + ",\"total_kb\":" + String((unsigned long)(_capacity / 1024ULL));

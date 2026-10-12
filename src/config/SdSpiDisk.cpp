@@ -40,7 +40,9 @@ volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 
 /* THE BUS SPEED FALLS BACK BY ITSELF: a flaky wire at 20 MHz shows as reads that must be done
  * again. TROUBLE_LIMIT of them within TROUBLE_WINDOW_MS and the clock is HALVED (down to
  * MIN_HZ) — slower, but the streams hold; a card that answers badly at 5 MHz is another
- * problem. It never climbs back by itself (a stable concert beats a fast one). */
+ * problem. It never climbs back by itself (a stable concert beats a fast one) — except that
+ * SdCard gives a card that was LOST and comes back one new chance at the nominal clock (a power
+ * transient resets the card, and the driver reads that as a burst of failed reads: §208). */
 constexpr uint32_t TROUBLE_LIMIT = 3, TROUBLE_WINDOW_MS = 3000, MIN_HZ = 5000000;
 uint32_t _troubleStartMs = 0, _troubleCount = 0;
 volatile uint32_t _fallbacks = 0;
