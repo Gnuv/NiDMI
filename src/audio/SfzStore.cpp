@@ -67,6 +67,26 @@ static float             _gainLisse = 1.0f;  // the audio task's smoothed copy
 static volatile uint8_t  _ccEntrant[128];    // the Control Change table, written by the MIDI side
 static volatile uint32_t _ccRecus = 0;       // diagnostic: CC that reached the table
 
+// ── what a note and a block COST, measured on the audio task itself (§208) ───
+// noteOn and rendreBloc both run there, one after the other, at the head of every block. A burst of notes pays
+// sfz16_note_on in series, then its new voices read their samples cold: both are timed in CPU cycles, and the
+// blocks are sorted by how many notes started in the last three of them. The block's budget is FRAMES x 5000
+// cycles (240 MHz / 48 kHz); the firmware counts a block late only past 20 ms, after the notes were applied.
+struct CostClass { uint32_t n, kcyc, max, tranche[5]; };  // blocks; sum of the kernel's cycles / 1024; its worst; by 1/2, 1, 2, 4 budgets
+struct CostSlow   { uint32_t total, kernel, notes; uint8_t fresh, recent, voices; };
+static CostClass _costClass[4];                  // notes started in the last 3 blocks: 0, 1-4, 5-15, 16 or more
+static uint32_t   _costOnN = 0, _costOnKcyc = 0, _costOnMax = 0;   // sfz16_note_on calls: count, sum / 1024, worst
+static uint32_t   _costBurstMax = 0, _costBurstNotes = 0;               // the worst note-on total paid in front of ONE block, and its notes
+static uint32_t   _costBlockOn = 0;             // cycles spent in note-ons since the last render
+static uint8_t    _costBlockNotes = 0;          // notes since the last render
+static uint8_t    _costRecents[2] = {0, 0};    // notes of the two blocks before
+static uint32_t   _costKernel = 0;              // the kernel's cycles in the block just rendered
+static uint32_t   _costNotesCyc = 0;            // ... and the note-on cycles paid in front of it
+static uint8_t    _costFresh = 0, _costRecent = 0;
+static uint32_t   _costTotalN = 0, _costTotalMax = 0, _costTotalOver = 0;  // whole renders: count, worst, past one budget
+static CostSlow   _costSlow[8];               // the last blocks that took more than a budget, whole render
+static uint32_t   _costNSlow = 0;
+
 // ── helpers (sd-card task) ──────────────────────────────────────────────────
 
 enum Manque { RIEN = 0, PLACE, BUDGET };    // why a load failed, when MORE ROOM could cure it
@@ -517,7 +537,11 @@ void noteOn(uint8_t note, uint8_t velo) {
    * they do (a CC that came before this note, in the order the MIDI arrived —
    * it was stored before the note was queued). */
   for (int i = 0; i < 128; i++) _eng.cc[i] = _ccEntrant[i];
+  const uint32_t c0 = ESP.getCycleCount();
   sfz16_note_on(&_eng, note, velo);
+  const uint32_t dc = ESP.getCycleCount() - c0;
+  _costOnN++; _costOnKcyc += dc >> 10; if (dc > _costOnMax) _costOnMax = dc;
+  _costBlockOn += dc; if (_costBlockNotes < 255) _costBlockNotes++;
 }
 void noteOff(uint8_t note)             { sfz16_note_off(&_eng, note); }
 
@@ -526,11 +550,65 @@ bool rendreBloc(float* g, float* d, uint32_t trames) {
    * the render left them active for good, holding pointers into an instrument
    * freed 150 ms later — reproduced on the card: a ringing crash, the
    * instrument unloaded, "voix: 1" forever. */
-  if (!sfz16_needs_render(&_eng)) return false;
+  const uint8_t fresh = _costBlockNotes;
+  const uint32_t recents = (uint32_t)fresh + _costRecents[0] + _costRecents[1];   // this block and the two before
+  _costRecents[1] = _costRecents[0]; _costRecents[0] = fresh;
+  if (_costBlockOn > _costBurstMax) { _costBurstMax = _costBlockOn; _costBurstNotes = fresh; }
+  _costNotesCyc = _costBlockOn;
+  _costBlockOn = 0; _costBlockNotes = 0;
+  if (!sfz16_needs_render(&_eng)) { _costKernel = 0; return false; }
+  const uint32_t c0 = ESP.getCycleCount();
   memset(g, 0, trames * sizeof(float));
   memset(d, 0, trames * sizeof(float));
   sfz16_render(&_eng, g, d, trames);
+  const uint32_t dc = ESP.getCycleCount() - c0;
+  const uint32_t budget = trames * 5000u;
+  CostClass& c = _costClass[recents == 0 ? 0 : recents < 5 ? 1 : recents < 16 ? 2 : 3];
+  c.n++; c.kcyc += dc >> 10; if (dc > c.max) c.max = dc;
+  c.tranche[dc < budget / 2 ? 0 : dc < budget ? 1 : dc < 2 * budget ? 2 : dc < 4 * budget ? 3 : 4]++;
+  _costKernel = dc; _costRecent = (uint8_t)(recents > 255 ? 255 : recents); _costFresh = fresh;
   return true;
+}
+
+void costBlock(uint32_t cyclesTotal) {
+  _costTotalN++;
+  if (cyclesTotal > _costTotalMax) _costTotalMax = cyclesTotal;
+  if (cyclesTotal > 120u * 5000u) {                 // past one budget (FRAMES = 120): remember who it was
+    _costTotalOver++;
+    CostSlow& l = _costSlow[_costNSlow++ & 7];
+    l.total = cyclesTotal; l.kernel = _costKernel; l.notes = _costNotesCyc;
+    l.fresh = _costFresh; l.recent = _costRecent; l.voices = (uint8_t)sfz16_active_voices(&_eng);
+  }
+}
+
+void resetCost() {
+  memset(_costClass, 0, sizeof _costClass); memset(_costSlow, 0, sizeof _costSlow);
+  _costOnN = _costOnKcyc = _costOnMax = _costBurstMax = _costBurstNotes = 0;
+  _costTotalN = _costTotalMax = _costTotalOver = _costNSlow = 0;
+}
+
+String cost() {
+  String j = String("{\"budget\":") + String((unsigned)(120u * 5000u)) + ",\"note_on\":{\"n\":" + String((unsigned)_costOnN)
+           + ",\"avg\":" + String((unsigned)(_costOnN ? (uint64_t)_costOnKcyc * 1024u / _costOnN : 0))
+           + ",\"max\":" + String((unsigned)_costOnMax) + "},\"burst\":{\"max\":" + String((unsigned)_costBurstMax)
+           + ",\"notes\":" + String((unsigned)_costBurstNotes) + "},\"classes\":[";
+  for (int k = 0; k < 4; k++) {
+    const CostClass& c = _costClass[k];
+    j += String(k ? "," : "") + "{\"n\":" + String((unsigned)c.n) + ",\"avg\":" + String((unsigned)(c.n ? (uint64_t)c.kcyc * 1024u / c.n : 0))
+       + ",\"max\":" + String((unsigned)c.max) + ",\"buckets\":[" + String((unsigned)c.tranche[0]);
+    for (int t = 1; t < 5; t++) j += "," + String((unsigned)c.tranche[t]);
+    j += "]}";
+  }
+  j += String("],\"total\":{\"n\":") + String((unsigned)_costTotalN) + ",\"max\":" + String((unsigned)_costTotalMax)
+     + ",\"over_budget\":" + String((unsigned)_costTotalOver) + "},\"slow\":[";
+  const uint32_t nl = _costNSlow < 8 ? _costNSlow : 8;
+  for (uint32_t i = 0; i < nl; i++) {
+    const CostSlow& l = _costSlow[(_costNSlow - nl + i) & 7];
+    j += String(i ? "," : "") + "{\"total\":" + String((unsigned)l.total) + ",\"kernel\":" + String((unsigned)l.kernel)
+       + ",\"notes\":" + String((unsigned)l.notes) + ",\"fresh\":" + String((unsigned)l.fresh)
+       + ",\"recent\":" + String((unsigned)l.recent) + ",\"voices\":" + String((unsigned)l.voices) + "}";
+  }
+  return j + "]}";
 }
 
 // ── status ──────────────────────────────────────────────────────────────────

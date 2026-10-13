@@ -894,6 +894,7 @@ void boucleAudio(void*) {
       rendre();
     }
     cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
+    SfzStore::costBlock(cyclesEch * FRAMES);          // what the SFZ blocks cost, kernel and whole (§208)
     _suivreLesListes();                 // le clip qui joue, depuis les voix (§196)
     /* VOLUME. Avant la porte, donc avant la mesure de crete : ce qu'on mesure
      * reste ce qui part vraiment. A 1.0 on ne touche a rien — le cas courant ne

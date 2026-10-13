@@ -329,6 +329,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
       SfzStore::proposer("", raison);
       SfzStore::entretenir("");
     }
+    if (request->hasParam("reset_cost")) SfzStore::resetCost();                  // counters back to zero: a trial starts
+    if (request->hasParam("cost")) { request->send(200, "application/json", SfzStore::cost()); return; }
     request->send(200, "application/json", SfzStore::diagnostic());
   });
 
