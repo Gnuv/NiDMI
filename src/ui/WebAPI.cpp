@@ -258,6 +258,12 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
          * (MESURES §200) : il tourne tant qu'un onglet le demande, et sa
          * telemetrie ne va qu'aux onglets qui l'ont demande. La reponse dit
          * l'etat de CET onglet. */
+        /* THE LOAD OF THE TWO CORES (§210): this tab wants it in its menu bar. The card
+         * sends NIDMI_CPU:<core 0>,<core 1> once a second to the tabs that asked. */
+        if (message.startsWith("CPU_LOAD:")) {
+            if (client) nidmi_ws_abonner(client->id(), NIDMI_ABO_CHARGE, message.substring(9) == "1");
+            return;
+        }
         if (message.startsWith("PIN_MONITORING:")) {
             const bool oui = (message.substring(15) == "1");
             if (client) {

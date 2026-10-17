@@ -227,6 +227,33 @@ extern "C" void nidmi_santeTexte(unsigned short f, char* out, unsigned n) {
     }
 }
 
+/* THE LOAD OF THE TWO CORES (§210), for the app's menu bar: once a second, from the
+ * idle task's run-time counter of each core (a read, not a walk of the tasks — no
+ * scheduler suspended), sent ONLY to the tabs that asked (CPU_LOAD:1). Never polled. */
+static void announceLoad() {
+    static uint32_t next = 0, lastUs = 0, lastIdle[2] = {0, 0};
+    const uint32_t now = millis();
+    if ((long)(now - next) < 0) return;
+    next = now + 1000;
+    const uint32_t us = (uint32_t)esp_timer_get_time();
+    const uint32_t idle[2] = {(uint32_t)ulTaskGetIdleRunTimeCounterForCore(0),
+                              (uint32_t)ulTaskGetIdleRunTimeCounterForCore(1)};
+    const uint32_t dt = us - lastUs;
+    int load[2] = {0, 0};
+    for (int c = 0; c < 2; c++) {
+        const uint32_t di = idle[c] - lastIdle[c];
+        load[c] = dt ? 100 - (int)((uint64_t)di * 100 / dt) : 0;
+        load[c] = load[c] < 0 ? 0 : (load[c] > 100 ? 100 : load[c]);
+        lastIdle[c] = idle[c];
+    }
+    const bool first = (lastUs == 0);
+    lastUs = us;
+    if (first || !nidmi_ws_abonne(NIDMI_ABO_CHARGE)) return;
+    char frame[40];
+    snprintf(frame, sizeof frame, "NIDMI_CPU:%d,%d", load[0], load[1]);
+    nidmi_ws_envoyer_aux_abonnes(NIDMI_ABO_CHARGE, frame);
+}
+
 static void verifierSante() {
     const unsigned long maintenant = millis();
     if ((long)(maintenant - s_santeProchain) < 0) return;
@@ -1753,6 +1780,7 @@ void nidmi_loop() {
     // La sante de la carte : calculee une fois par seconde, annoncee si elle change.
     tc = nidmi_section("sante");
     verifierSante();
+    announceLoad();                     // the load of the two cores, to the tabs that asked (§210)
     nidmi_chrono("sante", tc);
 
     // Recharger pins si demandé (débounce 500 ms pour grouper les sauvegardes séquentielles)

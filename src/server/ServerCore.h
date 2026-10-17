@@ -214,7 +214,8 @@ void nidmi_ws_clients_ecrire(String& j);                       // « "n":…,"co
  * lui. Le suivi tourne tant qu'UN onglet le demande ; ce qui ne concerne que les
  * abonnes — la telemetrie des broches, les lignes de la console — ne va qu'a eux :
  * les autres onglets n'en recoivent plus un paquet. */
-enum : uint8_t { NIDMI_ABO_BROCHES = 1, NIDMI_ABO_CONSOLE = 2 };
+/* NIDMI_ABO_CHARGE (§210): the load of the two cores, once a second (CPU_LOAD:1). */
+enum : uint8_t { NIDMI_ABO_BROCHES = 1, NIDMI_ABO_CONSOLE = 2, NIDMI_ABO_CHARGE = 4 };
 void nidmi_ws_abonner(uint32_t id, uint8_t abo, bool oui);          // async_tcp : PIN_MONITORING, DEBUG_CONSOLE
 bool nidmi_ws_abonne(uint8_t abo);                                  // un octet, sans verrou : un onglet au moins ?
 bool nidmi_ws_pousser_aux_abonnes(uint8_t abo, const char* trame);  // depuis N'IMPORTE QUELLE tache

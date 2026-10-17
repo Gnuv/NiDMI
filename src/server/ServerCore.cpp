@@ -716,9 +716,15 @@ void nidmi_ws_clients_ecrire(String& j) {
         /* Ce a quoi elle est abonnee (§200) : ce qu'elle recoit de plus que les autres,
          * par n'importe laquelle de ses sockets. */
         j += ",\"abonnements\":[";
-        j += (abos & NIDMI_ABO_BROCHES) ? "\"broches\"" : "";
-        j += ((abos & NIDMI_ABO_BROCHES) && (abos & NIDMI_ABO_CONSOLE)) ? "," : "";
-        j += (abos & NIDMI_ABO_CONSOLE) ? "\"console\"" : "";
+        bool premierAbo = true;
+        auto abo = [&](uint8_t bit, const char* nom) {
+            if (!(abos & bit)) return;
+            j += premierAbo ? "\"" : ",\""; j += nom; j += "\"";
+            premierAbo = false;
+        };
+        abo(NIDMI_ABO_BROCHES, "broches");
+        abo(NIDMI_ABO_CONSOLE, "console");
+        abo(NIDMI_ABO_CHARGE, "cpu");
         j += "],\"connexions\":" + String((unsigned)connexions) + "}";
     }
     j += "]";
