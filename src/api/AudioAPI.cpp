@@ -1348,9 +1348,11 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
     /* THE DSP BENCH (measurement images only, DspBench.h). GET: what each stage
      * costs the audio task, per sample, since the last reset (`?reset=1` opens a
      * clean window: reset, load, then read). POST: the configuration — plaits
-     * (0..2), engines ("8,16"), plaits_where (internal|psram), lowpass, reverb,
-     * reverb_where, audible (0/1), note_ms, gain, cutoff, q, wet, room, damp.
-     * A POST is not a game gesture: refused under the concert lock. */
+     * (0..2), engines ("8,16"), plaits_where (internal|psram), plaits_core (1|0),
+     * worker_prio, lowpass, reverb (none|freeverb|ambience), reverb_where,
+     * audible (0/1), note_ms, gain, cutoff, q, wet, room, damp (freeverb),
+     * decay, adamp, awet (ambience). A POST is not a game gesture: refused
+     * under the concert lock. */
     server.on("/api/diag/dsp", HTTP_GET, [](AsyncWebServerRequest *request){
         if (request->hasParam("reset")) DspBench::resetCounters();
         request->send(200, "application/json", DspBench::report());
@@ -1367,8 +1369,14 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
             c.engines[1] = comma >= 0 ? (uint8_t)e.substring(comma + 1).toInt() : c.engines[0];
         }
         if (has("plaits_where")) c.plaitsPsram = val("plaits_where") == "psram";
+        if (has("plaits_core")) c.plaitsCore = val("plaits_core").toInt() == 0 ? 0 : 1;
+        if (has("worker_prio")) c.workerPriority = (uint8_t)constrain(val("worker_prio").toInt(), 1, 22);
         if (has("lowpass")) c.lowpass = val("lowpass").toInt() != 0;
-        if (has("reverb")) c.reverb = val("reverb").toInt() != 0;
+        if (has("reverb")) {
+            const String r = val("reverb");
+            c.reverb = (r == "freeverb" || r == "1") ? DspBench::REVERB_FREEVERB
+                     : (r == "ambience" || r == "2") ? DspBench::REVERB_AMBIENCE : DspBench::REVERB_NONE;
+        }
         if (has("reverb_where")) c.reverbPsram = val("reverb_where") != "internal";
         if (has("audible")) c.audible = val("audible").toInt() != 0;
         if (has("note_ms")) c.notePeriodMs = (uint16_t)val("note_ms").toInt();
@@ -1378,6 +1386,9 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         if (has("wet")) c.wet = val("wet").toFloat();
         if (has("room")) c.room = val("room").toFloat();
         if (has("damp")) c.damp = val("damp").toFloat();
+        if (has("decay")) c.decay = val("decay").toFloat();
+        if (has("adamp")) c.adamp = val("adamp").toFloat();
+        if (has("awet")) c.awet = val("awet").toFloat();
         String reason;
         if (!DspBench::configure(c, reason)) {
             request->send(507, "application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");

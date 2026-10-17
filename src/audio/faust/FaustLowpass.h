@@ -47,9 +47,6 @@ inline int faust_wrap_mul(int a, int b) { return int((unsigned int)a * (unsigned
 #define RESTRICT __restrict__
 #endif
 
-static float FaustLowpass_faustpower2_f(float value) {
-	return value * value;
-}
 
 class FaustLowpass : public FaustDsp {
 	
@@ -61,11 +58,22 @@ class FaustLowpass : public FaustDsp {
 	float fConst2;
 	FAUSTFLOAT fHslider0;
 	float fConst3;
-	float fRec1[2];
 	FAUSTFLOAT fHslider1;
+	float fConst4;
+	float fRec1[2];
+	float fVec0[2];
+	float fConst5;
 	float fRec2[2];
-	float fRec0[3];
-	float fRec3[3];
+	float fVec1[2];
+	float fRec3[2];
+	float fVec2[2];
+	float fConst6;
+	float fRec4[2];
+	float fRec0[2];
+	float fVec3[2];
+	float fVec4[2];
+	float fVec5[2];
+	float fRec5[2];
 	
  public:
 	FaustLowpass() {
@@ -80,22 +88,10 @@ class FaustLowpass : public FaustDsp {
 	void metadata(Meta* m) { 
 		m->declare("compile_options", "-a src/audio/faust/faust-arch.h.in -lang cpp -fpga-mem-th 4 -ct 1 -cn FaustLowpass -scn FaustDsp -es 1 -mcd 16 -mdd 1024 -mdy 33 -single -ftz 2");
 		m->declare("filename", "lowpass.dsp");
-		m->declare("filters.lib/fir:author", "Julius O. Smith III");
-		m->declare("filters.lib/fir:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
-		m->declare("filters.lib/fir:license", "LicenseRef-STK-4.3");
-		m->declare("filters.lib/iir:author", "Julius O. Smith III");
-		m->declare("filters.lib/iir:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
-		m->declare("filters.lib/iir:license", "LicenseRef-STK-4.3");
 		m->declare("filters.lib/name", "Faust Filters Library");
-		m->declare("filters.lib/resonlp:author", "Julius O. Smith III");
-		m->declare("filters.lib/resonlp:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
-		m->declare("filters.lib/resonlp:license", "LicenseRef-STK-4.3");
-		m->declare("filters.lib/tf2:author", "Julius O. Smith III");
-		m->declare("filters.lib/tf2:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
-		m->declare("filters.lib/tf2:license", "LicenseRef-STK-4.3");
-		m->declare("filters.lib/tf2s:author", "Julius O. Smith III");
-		m->declare("filters.lib/tf2s:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
-		m->declare("filters.lib/tf2s:license", "LicenseRef-STK-4.3");
+		m->declare("filters.lib/tf22t:author", "Julius O. Smith III");
+		m->declare("filters.lib/tf22t:copyright", "Copyright (C) 2003-2019 by Julius O. Smith III <jos@ccrma.stanford.edu>");
+		m->declare("filters.lib/tf22t:license", "LicenseRef-STK-4.3");
 		m->declare("filters.lib/version", "1.9.0");
 		m->declare("maths.lib/author", "GRAME");
 		m->declare("maths.lib/copyright", "GRAME");
@@ -122,9 +118,12 @@ class FaustLowpass : public FaustDsp {
 	virtual void instanceConstants(int sample_rate) {
 		fSampleRate = sample_rate;
 		fConst0 = std::min<float>(1.92e+05f, std::max<float>(1.0f, static_cast<float>(fSampleRate)));
-		fConst1 = 3.1415927f / fConst0;
-		fConst2 = 44.1f / fConst0;
-		fConst3 = 1.0f - fConst2;
+		fConst1 = 44.1f / fConst0;
+		fConst2 = 6.2831855f / fConst0;
+		fConst3 = 0.45f * fConst0;
+		fConst4 = 1.0f - fConst1;
+		fConst5 = 22.05f / fConst0;
+		fConst6 = 88.2f / fConst0;
 	}
 	
 	virtual void instanceResetUserInterface() {
@@ -137,13 +136,37 @@ class FaustLowpass : public FaustDsp {
 			fRec1[l0] = 0.0f;
 		}
 		for (int l1 = 0; l1 < 2; l1 = faust_wrap_add(l1, 1)) {
-			fRec2[l1] = 0.0f;
+			fVec0[l1] = 0.0f;
 		}
-		for (int l2 = 0; l2 < 3; l2 = faust_wrap_add(l2, 1)) {
-			fRec0[l2] = 0.0f;
+		for (int l2 = 0; l2 < 2; l2 = faust_wrap_add(l2, 1)) {
+			fRec2[l2] = 0.0f;
 		}
-		for (int l3 = 0; l3 < 3; l3 = faust_wrap_add(l3, 1)) {
-			fRec3[l3] = 0.0f;
+		for (int l3 = 0; l3 < 2; l3 = faust_wrap_add(l3, 1)) {
+			fVec1[l3] = 0.0f;
+		}
+		for (int l4 = 0; l4 < 2; l4 = faust_wrap_add(l4, 1)) {
+			fRec3[l4] = 0.0f;
+		}
+		for (int l5 = 0; l5 < 2; l5 = faust_wrap_add(l5, 1)) {
+			fVec2[l5] = 0.0f;
+		}
+		for (int l6 = 0; l6 < 2; l6 = faust_wrap_add(l6, 1)) {
+			fRec4[l6] = 0.0f;
+		}
+		for (int l7 = 0; l7 < 2; l7 = faust_wrap_add(l7, 1)) {
+			fRec0[l7] = 0.0f;
+		}
+		for (int l8 = 0; l8 < 2; l8 = faust_wrap_add(l8, 1)) {
+			fVec3[l8] = 0.0f;
+		}
+		for (int l9 = 0; l9 < 2; l9 = faust_wrap_add(l9, 1)) {
+			fVec4[l9] = 0.0f;
+		}
+		for (int l10 = 0; l10 < 2; l10 = faust_wrap_add(l10, 1)) {
+			fVec5[l10] = 0.0f;
+		}
+		for (int l11 = 0; l11 < 2; l11 = faust_wrap_add(l11, 1)) {
+			fRec5[l11] = 0.0f;
 		}
 	}
 	
@@ -179,31 +202,52 @@ class FaustLowpass : public FaustDsp {
 		FAUSTFLOAT* input1 = inputs[1];
 		FAUSTFLOAT* output0 = outputs[0];
 		FAUSTFLOAT* output1 = outputs[1];
-		float fSlow0 = fConst2 * static_cast<float>(fHslider0);
-		float fSlow1 = fConst2 * static_cast<float>(fHslider1);
+		float fSlow0 = fConst2 * std::min<float>(static_cast<float>(fHslider0), fConst3);
+		float fSlow1 = std::cos(fSlow0);
+		float fSlow2 = 0.5f * (std::sin(fSlow0) / static_cast<float>(fHslider1));
+		float fSlow3 = fSlow2 + 1.0f;
+		float fSlow4 = (1.0f - fSlow1) / fSlow3;
+		float fSlow5 = fConst1 * fSlow4;
+		float fSlow6 = fConst5 * fSlow4;
+		float fSlow7 = fConst1 * ((1.0f - fSlow2) / fSlow3);
+		float fSlow8 = fConst6 * (fSlow1 / fSlow3);
 		for (int i0 = 0; i0 < count; i0 = faust_wrap_add(i0, 1)) {
-			float fTemp0 = fSlow0 + fConst3 * fRec1[1];
-			fRec1[0] = ((*reinterpret_cast<int*>(&fTemp0) & 2139095040) ? fTemp0 : 0.0f);
-			float fTemp1 = std::tan(fConst1 * fRec1[0]);
-			float fTemp2 = 1.0f / fTemp1;
-			float fTemp3 = fSlow1 + fConst3 * fRec2[1];
-			fRec2[0] = ((*reinterpret_cast<int*>(&fTemp3) & 2139095040) ? fTemp3 : 0.0f);
-			float fTemp4 = 1.0f / fRec2[0];
-			float fTemp5 = 1.0f + (fTemp2 - fTemp4) / fTemp1;
-			float fTemp6 = 1.0f - 1.0f / FaustLowpass_faustpower2_f(fTemp1);
-			float fTemp7 = 1.0f + (fTemp2 + fTemp4) / fTemp1;
-			float fTemp8 = static_cast<float>(input0[i0]) - (fRec0[2] * fTemp5 + 2.0f * fRec0[1] * fTemp6) / fTemp7;
-			fRec0[0] = ((*reinterpret_cast<int*>(&fTemp8) & 2139095040) ? fTemp8 : 0.0f);
-			output0[i0] = static_cast<FAUSTFLOAT>((fRec0[2] + fRec0[0] + 2.0f * fRec0[1]) / fTemp7);
-			float fTemp9 = static_cast<float>(input1[i0]) - (fTemp5 * fRec3[2] + 2.0f * fTemp6 * fRec3[1]) / fTemp7;
-			fRec3[0] = ((*reinterpret_cast<int*>(&fTemp9) & 2139095040) ? fTemp9 : 0.0f);
-			output1[i0] = static_cast<FAUSTFLOAT>((fRec3[2] + fRec3[0] + 2.0f * fRec3[1]) / fTemp7);
+			float fTemp0 = static_cast<float>(input0[i0]);
+			float fTemp1 = fSlow5 + fConst4 * fRec1[1];
+			fRec1[0] = ((*reinterpret_cast<int*>(&fTemp1) & 2139095040) ? fTemp1 : 0.0f);
+			fVec0[0] = fTemp0 * fRec1[0];
+			float fTemp2 = fSlow6 + fConst4 * fRec2[1];
+			fRec2[0] = ((*reinterpret_cast<int*>(&fTemp2) & 2139095040) ? fTemp2 : 0.0f);
+			float fTemp3 = fTemp0 * fRec2[0];
+			fVec1[0] = fTemp3;
+			float fTemp4 = fSlow7 + fConst4 * fRec3[1];
+			fRec3[0] = ((*reinterpret_cast<int*>(&fTemp4) & 2139095040) ? fTemp4 : 0.0f);
+			fVec2[0] = fVec1[1] - fRec0[1] * fRec3[0];
+			float fTemp5 = fConst4 * fRec4[1] - fSlow8;
+			fRec4[0] = ((*reinterpret_cast<int*>(&fTemp5) & 2139095040) ? fTemp5 : 0.0f);
+			float fTemp6 = fVec0[1] + fTemp3 + fVec2[1] - fRec0[1] * fRec4[0];
+			fRec0[0] = ((*reinterpret_cast<int*>(&fTemp6) & 2139095040) ? fTemp6 : 0.0f);
+			output0[i0] = static_cast<FAUSTFLOAT>(fRec0[0]);
+			float fTemp7 = static_cast<float>(input1[i0]);
+			fVec3[0] = fTemp7 * fRec1[0];
+			float fTemp8 = fTemp7 * fRec2[0];
+			fVec4[0] = fTemp8;
+			fVec5[0] = fVec4[1] - fRec3[0] * fRec5[1];
+			float fTemp9 = fVec3[1] + fTemp8 + fVec5[1] - fRec4[0] * fRec5[1];
+			fRec5[0] = ((*reinterpret_cast<int*>(&fTemp9) & 2139095040) ? fTemp9 : 0.0f);
+			output1[i0] = static_cast<FAUSTFLOAT>(fRec5[0]);
 			fRec1[1] = fRec1[0];
+			fVec0[1] = fVec0[0];
 			fRec2[1] = fRec2[0];
-			fRec0[2] = fRec0[1];
-			fRec0[1] = fRec0[0];
-			fRec3[2] = fRec3[1];
+			fVec1[1] = fVec1[0];
 			fRec3[1] = fRec3[0];
+			fVec2[1] = fVec2[0];
+			fRec4[1] = fRec4[0];
+			fRec0[1] = fRec0[0];
+			fVec3[1] = fVec3[0];
+			fVec4[1] = fVec4[0];
+			fVec5[1] = fVec5[0];
+			fRec5[1] = fRec5[0];
 		}
 	}
 
