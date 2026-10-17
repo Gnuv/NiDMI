@@ -295,6 +295,52 @@ void setupAudioAPI(AsyncWebServer& server) {
         }
     });
 
+    /* THE CAPTURE OF WHAT GOES TO THE DAC (§210, diagnostics): `?ms=N` arms N ms
+     * (at most 10 s, PSRAM) from the next block; then, without `ms`, the WAV once
+     * filled (stereo, 16 bits, the card's rate) — or its state as JSON. To compare
+     * with the file the card plays: what the card SENDS, not what one hears. Arming
+     * is refused under the concert lock. */
+    server.on("/api/diag/capture", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("ms")) {
+            if (Concert::refuse(request, "capture refusee : la carte est verrouillee pour le concert")) return;
+            const uint32_t ms = (uint32_t)constrain(request->getParam("ms")->value().toInt(), 10, 10000);
+            const uint32_t frames = ms * AudioEngine::SAMPLE_RATE / 1000;
+            const bool ok = AudioEngine::armerCapture(frames);
+            request->send(ok ? 200 : 507, "application/json",
+                          String("{\"armed\":") + (ok ? "true" : "false") + ",\"frames\":" + frames + "}");
+            return;
+        }
+        const int16_t* data; uint32_t frames; bool finie;
+        if (!AudioEngine::capture(data, frames, finie) || !finie) {
+            request->send(200, "application/json",
+                          String("{\"finished\":false,\"frames\":") + frames + "}");
+            return;
+        }
+        const uint32_t octets = frames * 4;
+        uint8_t* entete = (uint8_t*)malloc(44);
+        if (!entete) { request->send(507, "application/json", "{\"erreur\":\"memoire\"}"); return; }
+        auto le32 = [&](int at, uint32_t v) { for (int i = 0; i < 4; i++) entete[at + i] = (uint8_t)(v >> (8 * i)); };
+        auto le16 = [&](int at, uint16_t v) { entete[at] = (uint8_t)v; entete[at + 1] = (uint8_t)(v >> 8); };
+        memcpy(entete, "RIFF", 4); le32(4, 36 + octets); memcpy(entete + 8, "WAVEfmt ", 8);
+        le32(16, 16); le16(20, 1); le16(22, 2); le32(24, AudioEngine::SAMPLE_RATE);
+        le32(28, AudioEngine::SAMPLE_RATE * 4); le16(32, 4); le16(34, 16);
+        memcpy(entete + 36, "data", 4); le32(40, octets);
+        AsyncWebServerResponse* r = request->beginResponse("audio/wav", 44 + octets,
+            [entete, data, octets](uint8_t* out, size_t maxLen, size_t index) -> size_t {
+                size_t n = 0;
+                if (index < 44) { n = (44 - index < maxLen) ? 44 - index : maxLen; memcpy(out, entete + index, n); }
+                if (n < maxLen && index + n >= 44) {
+                    const size_t at = index + n - 44, k = (octets - at < maxLen - n) ? octets - at : maxLen - n;
+                    memcpy(out + n, (const uint8_t*)data + at, k);
+                    n += k;
+                }
+                return n;
+            });
+        r->addHeader("Cache-Control", "no-store");
+        request->onDisconnect([entete]() { free(entete); });
+        request->send(r);
+    });
+
     /* THE EFFECTS, LIVE (§210): the low-pass of the chosen instruments and the
      * reverb — the cue's keys (lowpass, lpblocs, lpcutoff, lpq, reverb, rvwet,
      * rvdecay, rvdamp), only those sent change. A game gesture: allowed under

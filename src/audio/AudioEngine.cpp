@@ -153,6 +153,12 @@ int16_t entrelace[FRAMES * 2];
 /* THE MIX, IN FLOAT (§210): `mix` what goes straight on, `bus` what the low-pass
  * takes (Effects.h) — the instruments of its group. Full scale = 1.0. */
 float mixL[FRAMES], mixR[FRAMES], busL[FRAMES], busR[FRAMES], synthMono[FRAMES];
+/* THE CAPTURE OF WHAT GOES TO THE DAC (§210, diagnostics): a PSRAM buffer the web
+ * arms, the audio task fills block by block just before i2s.write — the samples
+ * the DAC receives, after the volume and the gate. Read back as WAV. */
+int16_t*          captureBuf = nullptr;
+volatile uint32_t captureFrames = 0, captureFilled = 0;
+volatile bool     captureArmed = false;
 
 // ---- Plaits ---------------------------------------------------------------
 // Tout est alloué à la demande sur le TAS INTERNE (jamais la PSRAM : trop lente
@@ -980,6 +986,12 @@ void boucleAudio(void*) {
       niveauCrete = crete;
       if (crete > SEUIL_AUDIBLE) dernierSonMs = t0;
     }
+    if (captureArmed) {
+      const uint32_t reste = captureFrames - captureFilled, k = reste < FRAMES ? reste : FRAMES;
+      memcpy(captureBuf + captureFilled * 2, entrelace, k * 2 * sizeof(int16_t));
+      captureFilled = captureFilled + k;
+      if (captureFilled >= captureFrames) captureArmed = false;
+    }
     const uint32_t ur = micros();
     i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
@@ -1428,6 +1440,25 @@ void noteOn(uint8_t canal, uint8_t note, uint8_t velocity) {
 void noteOff(uint8_t canal, uint8_t note) {
   if (!demarre) return;
   deposerEvenement(Evenement{note, 0, SORTE_NOTE, 0, 0, canal});
+}
+
+bool armerCapture(uint32_t frames) {
+  captureArmed = false;
+  vTaskDelay(pdMS_TO_TICKS(5));               // the audio task leaves the buffer
+  if (captureBuf && frames > captureFrames) { heap_caps_free(captureBuf); captureBuf = nullptr; }
+  if (!captureBuf) captureBuf = (int16_t*)heap_caps_malloc(frames * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+  if (!captureBuf) return false;
+  captureFrames = frames;
+  captureFilled = 0;
+  captureArmed = true;
+  return true;
+}
+
+bool capture(const int16_t*& data, uint32_t& frames, bool& finie) {
+  data = captureBuf;
+  frames = captureFilled;
+  finie = captureBuf && !captureArmed && captureFilled >= captureFrames;
+  return captureBuf != nullptr;
 }
 
 void fixerCanaux(uint8_t clavier, uint8_t sfz) {

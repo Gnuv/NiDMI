@@ -100,6 +100,11 @@ void noteOn(uint8_t canal, uint8_t note, uint8_t velocity);
 void noteOff(uint8_t canal, uint8_t note);
 /* The channels of the play-sf keyboard and of the SFZ kit, from the cue (0 = all). */
 void fixerCanaux(uint8_t clavier, uint8_t sfz);
+/* THE CAPTURE OF WHAT GOES TO THE DAC (diagnostics, §210): `frames` stereo frames
+ * from the next block on, into PSRAM; `capture` gives them back (`finie` when the
+ * count is reached). What the DAC receives — after the volume and the gate. */
+bool armerCapture(uint32_t frames);
+bool capture(const int16_t*& data, uint32_t& frames, bool& finie);
 
 // Bip de test : fréquence en Hz, durée en ms. 0 Hz = silence immédiat.
 void testTone(float hz, uint32_t ms);
