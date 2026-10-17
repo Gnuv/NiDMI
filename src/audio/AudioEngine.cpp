@@ -18,6 +18,7 @@
 #include "SampleStore.h"
 #include "SdStream.h"
 #include "SfzStore.h"
+#include "DspBench.h"
 #include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
@@ -893,8 +894,12 @@ void boucleAudio(void*) {
     } else {
       rendre();
     }
-    cyclesEch = (ESP.getCycleCount() - c0) / FRAMES;
+    const uint32_t renderCycles = ESP.getCycleCount() - c0;
+    cyclesEch = renderCycles / FRAMES;
     SfzStore::costBlock(cyclesEch * FRAMES);          // what the SFZ blocks cost, kernel and whole (§208)
+#if NIDMI_DSP_BENCH
+    DspBench::process(entrelace, FRAMES, renderCycles);   // measurement images only (DspBench.h)
+#endif
     _suivreLesListes();                 // le clip qui joue, depuis les voix (§196)
     /* VOLUME. Avant la porte, donc avant la mesure de crete : ce qu'on mesure
      * reste ce qui part vraiment. A 1.0 on ne touche a rien — le cas courant ne

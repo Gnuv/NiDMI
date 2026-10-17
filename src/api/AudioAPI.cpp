@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include "../audio/AudioEngine.h"
 #include "../audio/SfzStore.h"
+#include "../audio/DspBench.h"
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
 #include "../mapping/MappingEngine.h"
@@ -1342,6 +1343,49 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         json += "}}";
         request->send(200, "application/json", json);
     });
+
+#if NIDMI_DSP_BENCH
+    /* THE DSP BENCH (measurement images only, DspBench.h). GET: what each stage
+     * costs the audio task, per sample, since the last reset (`?reset=1` opens a
+     * clean window: reset, load, then read). POST: the configuration — plaits
+     * (0..2), engines ("8,16"), plaits_where (internal|psram), lowpass, reverb,
+     * reverb_where, audible (0/1), note_ms, gain, cutoff, q, wet, room, damp.
+     * A POST is not a game gesture: refused under the concert lock. */
+    server.on("/api/diag/dsp", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("reset")) DspBench::resetCounters();
+        request->send(200, "application/json", DspBench::report());
+    });
+    server.on("/api/diag/dsp", HTTP_POST, [](AsyncWebServerRequest *request){
+        auto has = [&](const char* k) { return request->hasParam(k, true); };
+        auto val = [&](const char* k) { return request->getParam(k, true)->value(); };
+        DspBench::Config c;
+        if (has("plaits")) c.plaitsVoices = (uint8_t)val("plaits").toInt();
+        if (has("engines")) {
+            const String e = val("engines");
+            const int comma = e.indexOf(',');
+            c.engines[0] = (uint8_t)e.toInt();
+            c.engines[1] = comma >= 0 ? (uint8_t)e.substring(comma + 1).toInt() : c.engines[0];
+        }
+        if (has("plaits_where")) c.plaitsPsram = val("plaits_where") == "psram";
+        if (has("lowpass")) c.lowpass = val("lowpass").toInt() != 0;
+        if (has("reverb")) c.reverb = val("reverb").toInt() != 0;
+        if (has("reverb_where")) c.reverbPsram = val("reverb_where") != "internal";
+        if (has("audible")) c.audible = val("audible").toInt() != 0;
+        if (has("note_ms")) c.notePeriodMs = (uint16_t)val("note_ms").toInt();
+        if (has("gain")) c.plaitsGain = val("gain").toFloat();
+        if (has("cutoff")) c.cutoff = val("cutoff").toFloat();
+        if (has("q")) c.q = val("q").toFloat();
+        if (has("wet")) c.wet = val("wet").toFloat();
+        if (has("room")) c.room = val("room").toFloat();
+        if (has("damp")) c.damp = val("damp").toFloat();
+        String reason;
+        if (!DspBench::configure(c, reason)) {
+            request->send(507, "application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");
+            return;
+        }
+        request->send(200, "application/json", DspBench::report());
+    });
+#endif
 
     /* ── OU PASSE LE TEMPS DE CALCUL : TACHE PAR TACHE, COEUR PAR COEUR ─────
      * Compteurs de FreeRTOS (horloge esp_timer, µs, 32 bits : ils repassent par
