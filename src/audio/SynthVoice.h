@@ -37,6 +37,9 @@ constexpr uint8_t LEAD = 3;          // blocks rendered ahead: +7.5 ms for a not
  * false + reason if that fails. */
 bool configure(int engine, uint32_t bloc, uint8_t channel, float gain, String& reason);
 void setParams(const AudioEngine::Params& p);
+/* The engine, live (POST /api/audio/params synth_engine=…): a write, nothing
+ * allocated — a game gesture. The next cue's `synth=` says it again. */
+void setEngine(int engine);
 AudioEngine::Params params();
 uint8_t setBlockGain(uint32_t bloc, float gain);   // 1 if the block is the voice's
 bool active();                       // a cue names it, and the guard has not stopped it

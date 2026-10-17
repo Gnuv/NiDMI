@@ -362,6 +362,11 @@ void setupAudioAPI(AsyncWebServer& server) {
                                   == AudioEngine::Bascule::Armee);
         }
 
+        /* THE SYNTH VOICE'S ENGINE (§210): a write, nothing allocated — unlike
+         * `engine` above (the exclusive Plaits, refused on this card), it is a
+         * game gesture, allowed under the concert lock. */
+        if (request->hasParam("synth_engine", true))
+            SynthVoice::setEngine(request->getParam("synth_engine", true)->value().toInt());
         AudioEngine::Params p = AudioEngine::params();
         auto lire = [&](const char* nom, float& dest){
             if (request->hasParam(nom, true))

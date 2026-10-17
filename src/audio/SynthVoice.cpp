@@ -157,6 +157,12 @@ void setParams(const AudioEngine::Params& p) {
   droneWanted = p.drone >= 0.5f;
 }
 
+void setEngine(int engine) {
+  if (engine < 0) return;
+  patch.engine = engine % 24;
+  if (enabled) engineNow = engine % 24;
+}
+
 AudioEngine::Params params() {
   return AudioEngine::Params{patch.harmonics, patch.timbre, patch.morph, patch.decay, patch.lpg_colour,
                              droneWanted ? 1.0f : 0.0f};

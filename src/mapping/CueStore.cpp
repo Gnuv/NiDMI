@@ -182,6 +182,7 @@ namespace {
       else if (!strcmp(n, "lpg_colour")) { p.lpgColour = v; toucheParams = true; }
       else if (!strcmp(n, "drone"))      { p.drone     = v; toucheParams = true; }
       else if (!strcmp(n, "volume"))     { AudioEngine::setVolume(v); }
+      else if (!strcmp(n, "synthgain"))  { SynthVoice::setBlockGain(SynthVoice::bloc(), v); }   // §210
     }
     if (toucheParams) AudioEngine::setParams(p);
   }
