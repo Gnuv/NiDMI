@@ -1550,6 +1550,31 @@ bool MappingEngine::executeMidiNote(const char* script,
     return sortie.emise;
 }
 
+bool MappingEngine::executeMidiTouch(const char* script,
+                                     uint8_t noteIn, uint8_t pressionIn, uint8_t canalIn,
+                                     SortieCc& sortie, Etat* etats, int nEtats,
+                                     const char* origine) {
+    sortie.emise = sortie.traite = false;
+    Evenement e;
+    e.type = Evenement::PolyTouch;
+    e.canal = canalIn; e.a = noteIn; e.b = pressionIn;
+    if (origine) snprintf(e.origine, sizeof e.origine, "%s", origine);
+
+    Sortie liste[MAX_SORTIES];
+    bool traite = false;
+    const int n = executer(script, e, liste, MAX_SORTIES, traite, etats, nEtats);
+    sortie.traite = traite;
+    for (int i = 0; i < n; i++) {
+        if (liste[i].type != Sortie::Cc) continue;
+        sortie.cc     = liste[i].a;
+        sortie.valeur = liste[i].b;
+        sortie.canal  = canalValide(liste[i].canal);
+        sortie.emise  = true;
+        break;
+    }
+    return sortie.emise;
+}
+
 bool MappingEngine::executeMidiCc(const char* script,
                                   uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
                                   SortieCc& sortie, Etat* etats, int nEtats,

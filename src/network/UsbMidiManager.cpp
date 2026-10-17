@@ -493,6 +493,9 @@ bool UsbMidiManager::traiterEntree(TickType_t attente) {
                 case 0xB:
                     if (onControlChange) onControlChange(canal, o[2], o[3]);
                     break;
+                case 0xA:    // polyphonic aftertouch: the pressure of a pad (§210)
+                    if (onPolyTouch) onPolyTouch(canal, o[2], o[3]);
+                    break;
                 default:
                     break;   // horloge, SysEx, pitch bend : pas encore route
             }

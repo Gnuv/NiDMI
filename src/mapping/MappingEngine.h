@@ -395,6 +395,14 @@ public:
         uint8_t valeur = 0;
         uint8_t canal  = 1;
     };
+    /* A pad's PRESSURE (polyphonic aftertouch) entering the card (§210): the
+     * event `polytouch.in(ch, note)` answers. What a script makes of it — a
+     * s("sys.lp_cutoff") along the way, a ctl.out() — is its own; `sortie` is
+     * the first CC it emitted, which the caller applies as an incoming CC. */
+    static bool executeMidiTouch(const char* script,
+                                 uint8_t noteIn, uint8_t pressionIn, uint8_t canalIn,
+                                 SortieCc& sortie, Etat* etats = nullptr, int nEtats = 0,
+                                 const char* origine = nullptr);
     static bool executeMidiCc(const char* script,
                               uint8_t ccIn, uint8_t valeurIn, uint8_t canalIn,
                               SortieCc& sortie, Etat* etats = nullptr, int nEtats = 0,

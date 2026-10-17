@@ -219,6 +219,12 @@ public:
     // desormais par la table CcMap — apprentissage compris — avant d'aller
     // aux composants comme avant.
     void ccEntrant(uint8_t channel, uint8_t control, uint8_t value);
+    /* A pad's PRESSURE (polyphonic aftertouch) entering the card (§210): through
+     * the map scripts that answer `polytouch.in` — a script makes of it what it
+     * says (s("sys.lp_cutoff") smoothed by a lag opens the filter) — and a CC a
+     * script emits from it is applied as an incoming CC (CcMap, SFZ, components).
+     * Without a script that answers, it changes nothing: as before. */
+    void polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure);
 
     /* La chaine des scripts map appliquee a un CC, sans emission ni
      * apprentissage : ce que les emplacements font de (canal, cc, valeur).
@@ -229,6 +235,8 @@ public:
     /* Son pendant pour les notes, sous le meme verrou. Rend false si un
      * maillon a avale la note. */
     bool chaineScriptsNote(uint8_t& canal, uint8_t& note, uint8_t& velocite, bool estNoteOff);
+    /* What an incoming CC does after the scripts (learn, CcMap, SFZ, components). */
+    void appliquerCc(uint8_t canal, uint8_t cc, uint8_t valeur);
 
     // Réception MIDI pour piloter les LEDs
     void handleMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);

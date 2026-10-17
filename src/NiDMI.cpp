@@ -17,6 +17,7 @@
 #include "audio/AudioEngine.h"
 #include "config/SdCard.h"
 #include "audio/SdStream.h"
+#include "audio/Effects.h"     // s("sys.lp_cutoff") … : the effects, from a script (§210)
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -736,6 +737,15 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     else if (!strcmp(nom, "sys.prevcompo"))    { if (oui) g_compoSens = -1; }
     else if (!strcmp(nom, "sys.cueloop"))      g_boucleDemandee = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.autoplay"))     g_auDemarrageDemande = oui ? 1 : 0;
+    /* THE EFFECTS, FROM A SCRIPT (§210): a value, not a gesture — written at once
+     * (a float the audio task reads at its next block), never by the loop.
+     * `polytouch.in(10,38) : lag(10,5000) : curve(4) : scale(0,127,200,8000) :
+     * s("sys.lp_cutoff")` — the pressure of a pad opens the filter. */
+    else if (!strcmp(nom, "sys.lp_cutoff"))    Effects::setParam("lp_cutoff", valeur);
+    else if (!strcmp(nom, "sys.lp_q"))         Effects::setParam("lp_q", valeur);
+    else if (!strcmp(nom, "sys.rv_wet"))       Effects::setParam("rv_wet", valeur);
+    else if (!strcmp(nom, "sys.rv_decay"))     Effects::setParam("rv_decay", valeur);
+    else if (!strcmp(nom, "sys.rv_damp"))      Effects::setParam("rv_damp", valeur);
     else if (!g_sysInconnu) {
         strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
         __sync_synchronize();                  // le nom avant le drapeau
@@ -1473,6 +1483,11 @@ void nidmi_begin() {
         [](uint8_t ch, uint8_t note, uint8_t vel) { g_midiRouter.noteEntrante(ch, note, vel, true); },
         [](uint8_t ch, uint8_t cc, uint8_t val) { g_midiRouter.ccEntrant(ch, cc, val); }
     );
+    /* THE PRESSURE OF A PAD (polyphonic aftertouch, §210): it was read and
+       dropped. Through the map scripts — `polytouch.in(ch, note)` — it can now
+       open a filter (s("sys.lp_cutoff")). */
+    serverCore.usbMidi().setPolyTouchHook(
+        [](uint8_t ch, uint8_t note, uint8_t p) { g_midiRouter.polytouchEntrant(ch, note, p); });
     NIDMI_WEB_LOG("[MEM] apres MidiRouter: %d\n", (int)ESP.getFreeHeap());
 
     // Interface réseau sur le câble USB. Impérativement APRÈS MidiRouter :

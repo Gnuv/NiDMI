@@ -9,6 +9,8 @@
 #include "../audio/AudioEngine.h"
 #include "../audio/SfzStore.h"
 #include "../audio/DspBench.h"
+#include "../audio/SynthVoice.h"    // the synth voice beside the sampler (§210)
+#include "../audio/Effects.h"       // the low-pass and the reverb (§210)
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
 #include "../mapping/MappingEngine.h"
@@ -155,6 +157,10 @@ void setupAudioAPI(AsyncWebServer& server) {
         /* L'INSTRUMENT SFZ (§207) : ce qui joue — chemin, regions, samples,
            PCM tenu en PSRAM, voix actives — et le DERNIER REFUS, pour que
            l'app le dise AVANT le concert. gen bouge a chaque changement. */
+        /* THE SYNTH VOICE AND THE EFFECTS (§210): what plays, what the guard
+           stopped, how late the core 0 task was. */
+        json += "\"synth\":" + SynthVoice::status() + ",";
+        json += "\"fx\":" + Effects::status() + ",";
         json += "\"sfz\":{";
         json += "\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin()) + "\",";
         json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande()) + "\",";
@@ -194,7 +200,7 @@ void setupAudioAPI(AsyncWebServer& server) {
 
         if (request->hasParam("note", true)) {
             const int n = request->getParam("note", true)->value().toInt();
-            AudioEngine::noteOn((uint8_t)constrain(n, 0, 127), 100);
+            AudioEngine::noteOn(0, (uint8_t)constrain(n, 0, 127), 100);
             request->send(200, "application/json",
                 "{\"status\":\"ok\",\"note\":" + String(n) + "}");
             return;
@@ -287,6 +293,28 @@ void setupAudioAPI(AsyncWebServer& server) {
             request->send(507, "application/json",
                 "{\"status\":\"error\",\"message\":\"Plaits indisponible (tas insuffisant ?) — sinus conserve\"}");
         }
+    });
+
+    /* THE EFFECTS, LIVE (§210): the low-pass of the chosen instruments and the
+     * reverb — the cue's keys (lowpass, lpblocs, lpcutoff, lpq, reverb, rvwet,
+     * rvdecay, rvdamp), only those sent change. A game gesture: allowed under
+     * the concert lock. GET: their state. */
+    server.on("/api/audio/fx", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", Effects::status());
+    });
+    server.on("/api/audio/fx", HTTP_POST, [](AsyncWebServerRequest *request){
+        static const char* const KEYS[] = {"lowpass", "lpblocs", "lpcutoff", "lpq",
+                                           "reverb", "rvwet", "rvdecay", "rvdamp"};
+        String keys;
+        for (const char* k : KEYS)
+            if (request->hasParam(k, true))
+                keys += String(k) + "=" + request->getParam(k, true)->value() + ";";
+        String reason;
+        if (!Effects::applyKeys(keys, reason)) {
+            request->send(507, "application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");
+            return;
+        }
+        request->send(200, "application/json", Effects::status());
     });
 
     /* Réglages Plaits — la charge d'une CUE. Occasionnelle et courte, donc dans
@@ -2069,7 +2097,7 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         // suivante (jeu live apres un STOP).
         AudioEngine::couperSon();
         g_midiRouter.fixerTransport(false);  // et l'horloge des scripts s'arrete
-        for (int n = 0; n < 128; n++) AudioEngine::noteOff((uint8_t)n);
+        for (int n = 0; n < 128; n++) AudioEngine::noteOff(0, (uint8_t)n);
         AudioEngine::testTone(0.0f, 0);
         request->send(200, "application/json", "{\"status\":\"ok\"}");
     });

@@ -5,6 +5,8 @@
 #include "../Globals.h"
 #include "../audio/AudioEngine.h"
 #include "../audio/SfzStore.h"
+#include "../audio/SynthVoice.h"   // the synth voice beside the sampler (§210)
+#include "../audio/Effects.h"      // the low-pass and the reverb (§210)
 #include "../server/ServerCore.h"     // nidmi_ws_pousser : la carte ANNONCE son etat
 #include "../config/EcrituresDifferees.h"
 #include "Repertoire.h"
@@ -267,6 +269,10 @@ void _appliquer(const Cue& c) {
      * `bloc=` porte l'identifiant du bloc de chaque son (MESURES §165), sans
      * completion : c'est par lui que le volume retrouve une voix qui joue. */
     String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
+    /* §210: the channels of the keyboard and of the kit, and the synth voice. */
+    String canalClavier, canalSfz, synth, synthBloc, synthCanal, synthGain;
+    AudioEngine::Params synthParams = AudioEngine::params();
+    bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
     int debut = 0;
     while (debut < (int)c.params.length()) {
@@ -283,6 +289,23 @@ void _appliquer(const Cue& c) {
         else if (cle == "sfz")    { cheminSfz = kv.substring(eq + 1); cheminSfz.trim(); }
         else if (cle == "sfzbloc") { blocSfz = kv.substring(eq + 1); blocSfz.trim(); }
         else if (cle == "sfzgain") { gainSfz = kv.substring(eq + 1); gainSfz.trim(); }
+        else if (cle == "sfzch")   { canalSfz = kv.substring(eq + 1); canalSfz.trim(); }
+        else if (cle == "keych")   { canalClavier = kv.substring(eq + 1); canalClavier.trim(); }
+        else if (cle == "synth")     { synth = kv.substring(eq + 1); synth.trim(); }
+        else if (cle == "synthbloc") { synthBloc = kv.substring(eq + 1); synthBloc.trim(); }
+        else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
+        else if (cle == "synthgain") { synthGain = kv.substring(eq + 1); synthGain.trim(); }
+        else if (cle == "harmonics" || cle == "timbre" || cle == "morph" || cle == "decay"
+                 || cle == "lpg_colour" || cle == "drone") {
+          const float v = kv.substring(eq + 1).toFloat();
+          if      (cle == "harmonics")  synthParams.harmonics = v;
+          else if (cle == "timbre")     synthParams.timbre    = v;
+          else if (cle == "morph")      synthParams.morph     = v;
+          else if (cle == "decay")      synthParams.decay     = v;
+          else if (cle == "lpg_colour") synthParams.lpgColour = v;
+          else                          synthParams.drone     = v;
+          synthParamsVus = true;
+        }
         else if (cle == "oncue")  surCue = (kv.substring(eq + 1).toFloat() >= 0.5f);
         else if (cle == "volume") AudioEngine::setVolume(kv.substring(eq + 1).toFloat());
       }
@@ -299,8 +322,25 @@ void _appliquer(const Cue& c) {
     AudioEngine::fixerDeclenchementSurCue(surCue);
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
+    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
 
-    if (!noms.length() && !listes && !cheminSfz.length()) {
+    /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
+     * longer instead of it. A cue without `synth=` silences the voice (its state
+     * stays in PSRAM); without `lowpass` / `reverb`, that effect is off. Before
+     * the sampler: a cue with only a synth arms the reader too (lecteurPret). */
+    {
+      String raison;
+      if (synthParamsVus) AudioEngine::setParams(synthParams);
+      if (!SynthVoice::configure(synth.length() ? synth.toInt() : -1, (uint32_t)synthBloc.toInt(),
+                                 (uint8_t)synthCanal.toInt(), synthGain.length() ? synthGain.toFloat() : 1.0f,
+                                 raison))
+        Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
+      raison = "";
+      if (!Effects::configureFromCue(c.params, raison))
+        Serial.printf("[cues] effects refused: %s\n", raison.c_str());
+    }
+
+    if (!noms.length() && !listes && !cheminSfz.length() && !synth.length()) {
       Serial.println("[cues] aucun echantillon nomme");
     } else {
       /* Armer le lecteur une fois — il ne charge rien, tout est deja en PSRAM.
@@ -388,6 +428,7 @@ void _appliquer(const Cue& c) {
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
   if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String());
+                        String rs; SynthVoice::configure(-1, 0, 0, 1.0f, rs); Effects::off();
                         String r; SfzStore::proposer("", r);
                         if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes()); }
 

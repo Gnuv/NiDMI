@@ -33,10 +33,11 @@ const char* const GESTES[] = {
   "/api/cues/play", "/api/cues/pause", "/api/cues/stop",
   "/api/cues/go", "/api/cues/goto", "/api/cues/prev",
   // le son : un bip, les paramètres continus (le moteur est refuse dans la
-  // route), le silence, la porte, un echantillon, un gain, un clip, un sfz
+  // route), le silence, la porte, un echantillon, un gain, un clip, un sfz,
+  // les effets (§210)
   "/api/audio/test", "/api/audio/params", "/api/audio/stop", "/api/audio/resume",
   "/api/audio/sampler/jouer", "/api/audio/sampler/gain", "/api/audio/liste/jouer",
-  "/api/audio/sfz",
+  "/api/audio/sfz", "/api/audio/fx",
   // les reglages d'un script (son code est refuse dans la route), et un CC
   // injecte dans la chaine, comme une entree
   "/api/midi/script", "/api/midi/chaine",

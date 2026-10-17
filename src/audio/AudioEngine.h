@@ -92,8 +92,14 @@ void rearmerGardeFou();
 void validerConfigBoot();
 
 // Thread-safe. velocity 0 sur noteOn = noteOff (convention MIDI).
-void noteOn(uint8_t note, uint8_t velocity);
-void noteOff(uint8_t note);
+/* `canal`: the MIDI channel the note came on, 1..16, 0 when none is said (the
+ * test tone, the app's socket). Each instrument listens to its track's channel —
+ * the lists (`lch`), the SFZ kit (`sfzch`), the play-sf keyboard (`keych`), the
+ * synth voice (`synthch`), 0 = all — as in the browser (MESURES §210). */
+void noteOn(uint8_t canal, uint8_t note, uint8_t velocity);
+void noteOff(uint8_t canal, uint8_t note);
+/* The channels of the play-sf keyboard and of the SFZ kit, from the cue (0 = all). */
+void fixerCanaux(uint8_t clavier, uint8_t sfz);
 
 // Bip de test : fréquence en Hz, durée en ms. 0 Hz = silence immédiat.
 void testTone(float hz, uint32_t ms);

@@ -57,6 +57,7 @@ private:
     HookNote onNoteOn = nullptr;
     HookNote onNoteOff = nullptr;
     HookCC   onControlChange = nullptr;
+    HookCC   onPolyTouch = nullptr;      // (channel, note, pressure): the pressure of a pad (§210)
     
 public:
     UsbMidiManager();
@@ -90,6 +91,8 @@ public:
     void setMidiInputHooks(HookNote noteOn, HookNote noteOff, HookCC cc) {
         onNoteOn = noteOn; onNoteOff = noteOff; onControlChange = cc;
     }
+    /* Polyphonic aftertouch — a pad's pressure (§210). It was read and dropped. */
+    void setPolyTouchHook(HookCC polyTouch) { onPolyTouch = polyTouch; }
 
     // État de connexion
     bool isConnected() const;

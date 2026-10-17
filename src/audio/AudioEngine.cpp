@@ -19,6 +19,8 @@
 #include "SdStream.h"
 #include "SfzStore.h"
 #include "DspBench.h"
+#include "SynthVoice.h"
+#include "Effects.h"
 #include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
@@ -126,7 +128,12 @@ void IRAM_ATTR sondeTic() {
 // demande hors du clavier (l'ecoute de l'inspecteur) — par la meme file, pour
 // que seule la tache audio touche aux voix des listes.
 constexpr uint8_t SORTE_NOTE = 0, SORTE_CLIP = 1;
-struct Evenement { uint8_t note; uint8_t velo; uint8_t sorte; uint8_t clip; uint32_t bloc; };   // velo 0 = extinction
+/* `canal`: the MIDI channel the note came on, 1..16 (0: none said — the test tone,
+ * the app's socket). Each instrument listens to ITS track's channel (§210). */
+struct Evenement { uint8_t note; uint8_t velo; uint8_t sorte; uint8_t clip; uint32_t bloc; uint8_t canal; };   // velo 0 = extinction
+/* THE CHANNELS THE KEYBOARD AND THE SFZ KIT LISTEN TO (§210), their tracks': 0 = all. */
+volatile uint8_t  canalClavier = 0, canalSfz = 0;
+static inline bool _ecoute(uint8_t veut, uint8_t vient) { return !veut || !vient || veut == vient; }
 
 struct Voix {
   bool  active   = false;
@@ -143,6 +150,9 @@ volatile uint32_t bipBlocsRestants = 0;
 float             bipPhase = 0.0f;
 
 int16_t entrelace[FRAMES * 2];
+/* THE MIX, IN FLOAT (§210): `mix` what goes straight on, `bus` what the low-pass
+ * takes (Effects.h) — the instruments of its group. Full scale = 1.0. */
+float mixL[FRAMES], mixR[FRAMES], busL[FRAMES], busR[FRAMES], synthMono[FRAMES];
 
 // ---- Plaits ---------------------------------------------------------------
 // Tout est alloué à la demande sur le TAS INTERNE (jamais la PSRAM : trop lente
@@ -332,6 +342,7 @@ struct Liste {
   uint8_t  n;                            // nombre de clips
   uint8_t  courant;                      // le clip qui joue (0 : aucun), tenu par la tache audio
   uint8_t  preload;                      // 1: "Preload" — on the cue before, its heads are read ahead
+  uint8_t  canal;                        // the MIDI channel its notes come on, 1..16 (0: all) — §210
   float    gain;
   Clip     clips[CLIPS_MAX];
 };
@@ -542,10 +553,11 @@ bool _clipSuivant(VoixEch& vo) {
 
 /* UNE NOTE CHOISIT LE CLIP, dans chaque liste armee : la note du clip 1 joue
  * le clip 1, la suivante le clip 2… ; celle juste en dessous arrete. */
-void _notePourLesListes(uint8_t note) {
+void _notePourLesListes(uint8_t note, uint8_t canal) {
   if (!banques) return;
   const Banque& b = banques[banqueActive];
   for (uint8_t li = 0; li < b.n; li++) {
+    if (!_ecoute(b.listes[li].canal, canal)) continue;   // another track's channel (§210)
     const int k = int(note) - int(b.listes[li].note) + 1;   // 0 : la note d'arret
     if (k >= 0 && k <= b.listes[li].n) _lancerClip(b, li, (uint8_t)k);
   }
@@ -669,14 +681,18 @@ void rendreSample() {
    * sample and voice-independent. False when nothing plays. */
   static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state
   const bool sfz = SfzStore::rendreBloc(sfzG, sfzD, FRAMES);
-  const float sfzK = 32768.0f * SfzStore::gainLisse();   // the block's fader, glided (§208)
+  const float sfzK = SfzStore::gainLisse();   // the block's fader, glided (§208)
+  /* WHO GOES THROUGH THE LOW-PASS (§210): asked once per block and per voice. */
+  const bool sfzFiltre = sfz && Effects::filters(SfzStore::blocId());
+  bool filtre[VOIX_MAX];
+  for (uint8_t v = 0; v < VOIX_MAX; v++) filtre[v] = voixEch[v].actif && Effects::filters(voixEch[v].bloc);
+  constexpr float IN = 1.0f / 32768.0f;
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
   const bool mesurer = mesureVu && !gSilence;
   for (size_t i = 0; i < FRAMES; i++) {
-    int32_t g = 0, d = 0;
-    if (sfz) { g = (int32_t)(sfzG[i] * sfzK); d = (int32_t)(sfzD[i] * sfzK); }
+    int32_t g = 0, d = 0, gf = 0, df = 0;
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif) continue;
@@ -734,7 +750,7 @@ void rendreSample() {
         eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
       }
       const int32_t sg = (int32_t)(eg * vo.gain), sd = (int32_t)(ed * vo.gain);
-      g += sg; d += sd;
+      if (filtre[v]) { gf += sg; df += sd; } else { g += sg; d += sd; }
       if (mesurer) {
         /* La crete de la voix, APRES son gain : ce qu'elle apporte au melange.
          * Au-dela de 32 767 (gain de fader > 1), elle sature : le vu-metre
@@ -745,13 +761,35 @@ void rendreSample() {
       }
       vo.pos += vo.pas;
     }
-    if (g >  32767) g =  32767; else if (g < -32768) g = -32768;
-    if (d >  32767) d =  32767; else if (d < -32768) d = -32768;
-    entrelace[i * 2] = (int16_t)g; entrelace[i * 2 + 1] = (int16_t)d;
+    /* Float from here: the sum saturates once, at the end (_finirLeMelange). */
+    mixL[i] = g * IN;  mixR[i] = d * IN;
+    busL[i] = gf * IN; busR[i] = df * IN;
+    if (sfz) {
+      if (sfzFiltre) { busL[i] += sfzG[i] * sfzK; busR[i] += sfzD[i] * sfzK; }
+      else           { mixL[i] += sfzG[i] * sfzK; mixR[i] += sfzD[i] * sfzK; }
+    }
   }
   if (underruns)
     for (uint8_t v = 0; v < VOIX_MAX; v++)
       if (underruns & (1u << v)) SdStream::underrun(voixEch[v].stream);
+}
+
+/* THE END OF THE MIX (§210): the synth voice (rendered ahead on core 0), the
+ * effects, then the int16 bus of the DAC — saturated here, once. */
+void _finirLeMelange() {
+  memset(synthMono, 0, sizeof(synthMono));
+  if (SynthVoice::take(synthMono, FRAMES)) {
+    float* l = Effects::filters(SynthVoice::bloc()) ? busL : mixL;
+    float* r = (l == busL) ? busR : mixR;
+    for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
+  }
+  Effects::process(mixL, mixR, busL, busR, FRAMES);
+  for (size_t i = 0; i < FRAMES; i++) {
+    float l = mixL[i] * 32767.0f, r = mixR[i] * 32767.0f;
+    l = l > 32767.0f ? 32767.0f : (l < -32768.0f ? -32768.0f : l);
+    r = r > 32767.0f ? 32767.0f : (r < -32768.0f ? -32768.0f : r);
+    entrelace[i * 2] = (int16_t)l; entrelace[i * 2 + 1] = (int16_t)r;
+  }
 }
 
 void rendrePlaits() {
@@ -773,11 +811,11 @@ float frequenceDeNote(uint8_t note) {
 }
 
 /* THE READER IS READY: engine -2 with something to play — a sound of storage or
- * the SD, or an SFZ kit. A board whose kits all live in /sfz has no sound in
+ * the SD, an SFZ kit, or the synth voice (§210). A board whose kits all live in /sfz has no sound in
  * storage: the reader used to count as not ready, and the kit rendered nothing.
  * actif(), not charge(): voices still draining after an unload must be rendered
  * too (the frozen-voice defect, through another door). */
-bool lecteurPret() { return moteurCourant == -2 && (SampleStore::nombreCharges() > 0 || SfzStore::actif()); }
+bool lecteurPret() { return moteurCourant == -2 && (SampleStore::nombreCharges() > 0 || SfzStore::actif() || SynthVoice::active()); }
 
 void appliquer(const Evenement& e) {
   // La porte n'est PAS ouverte par les notes : c'est le TRANSPORT qui decide.
@@ -785,17 +823,15 @@ void appliquer(const Evenement& e) {
   // Ouverture par ouvrirSon() (PLAY), fermeture par couperSon() (STOP).
   if (e.sorte == SORTE_CLIP) { _clipDemande(e.bloc, e.clip); return; }   // §196
   if (lecteurPret()) {
-    /* LES PLAY LIST D'ABORD (§196) : une note choisit le clip de chaque liste
-     * armee. Le clavier d'un play-sf la recoit aussi, s'il est en mode MIDI :
-     * deux blocs, deux instruments. */
-    if (e.velo != 0) _notePourLesListes(e.note);
-    /* THE SFZ OF THE CUE TAKES THE KEYBOARD (§207): a cue that names sfz=
-     * routes its notes to the SFZ engine — before the play-s keyboard, after
-     * the lists (a note still picks the clip of an armed play-list). */
-    if (SfzStore::notesArmees()) {
+    /* EACH INSTRUMENT ON ITS TRACK'S CHANNEL (§210), as in the browser: the
+     * lists (a note picks the clip of each armed list), the synth voice, the
+     * SFZ kit, the play-sf keyboard — every one whose channel matches plays it.
+     * (The SFZ kit used to take the keyboard; channels say it better.) */
+    if (e.velo != 0) _notePourLesListes(e.note, e.canal);
+    SynthVoice::noteOn(e.canal, e.note, e.velo);
+    if (SfzStore::notesArmees() && _ecoute(canalSfz, e.canal)) {
       if (e.velo == 0) SfzStore::noteOff(e.note);
       else             SfzStore::noteOn(e.note, e.velo);
-      return;
     }
     /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
      * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
@@ -803,6 +839,7 @@ void appliquer(const Evenement& e) {
      * sur une carte dont le moteur est le lecteur. */
     if (sampleSurCue) return;
     if (e.velo == 0) return;                 // l'échantillon va au bout
+    if (!echantillonClavier[0] || !_ecoute(canalClavier, e.canal)) return;
     /* Au clavier, c'est l'echantillon du CLAVIER qui joue — celui que la cue a
      * designe en dernier. Do central (60) = hauteur d'origine. Une voix par
      * note : jouer un accord donne un accord, ce que la version monophonique
@@ -863,6 +900,9 @@ void rendre() {
 }
 
 void boucleAudio(void*) {
+  /* 95 % of a block's cycles: 240 MHz, 120 frames at the real rate. */
+  const uint32_t budgetBloc = (uint32_t)((uint64_t)getCpuFrequencyMhz() * 1000000ULL * FRAMES
+                                         / (srReel ? srReel : SAMPLE_RATE) * 95 / 100);
   for (;;) {
     if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
     /* LES PLAY LIST PROPOSEES s'adoptent AVANT les notes de ce bloc (§196) :
@@ -888,6 +928,7 @@ void boucleAudio(void*) {
     const uint32_t c0 = ESP.getCycleCount();
     if (lecteurPret()) {
       rendreSample();
+      _finirLeMelange();
     } else if (moteurCourant >= 0 && plaitsVoix) {
       if (plaitsTrigger) { plaitsMod.trigger = 1.0f; plaitsTrigger = false; }
       rendrePlaits();
@@ -896,6 +937,15 @@ void boucleAudio(void*) {
     }
     const uint32_t renderCycles = ESP.getCycleCount() - c0;
     cyclesEch = renderCycles / FRAMES;
+    /* THE GUARD OF CORE 1 (§209-210): a render over 95 % of its block, 20 blocks
+     * in a row — the audio task would never yield again, and the watchdog
+     * restarts the card. The effects go first (the reverb, then the low-pass),
+     * until the next cue; samples and kit never. */
+    {
+      static uint32_t surCharge = 0;
+      if (renderCycles > budgetBloc) { if (++surCharge >= 20) { Effects::shed(); surCharge = 0; } }
+      else surCharge = 0;
+    }
     SfzStore::costBlock(cyclesEch * FRAMES);          // what the SFZ blocks cost, kernel and whole (§208)
 #if NIDMI_DSP_BENCH
     DspBench::process(entrelace, FRAMES, renderCycles);   // measurement images only (DspBench.h)
@@ -1370,14 +1420,19 @@ static void deposerEvenement(const Evenement& e) {
   if (xQueueSend(evenements, &e, pdMS_TO_TICKS(10)) != pdTRUE) notesPerduesCompte = notesPerduesCompte + 1;
 }
 
-void noteOn(uint8_t note, uint8_t velocity) {
+void noteOn(uint8_t canal, uint8_t note, uint8_t velocity) {
   if (!demarre) return;
-  deposerEvenement(Evenement{note, velocity});
+  deposerEvenement(Evenement{note, velocity, SORTE_NOTE, 0, 0, canal});
 }
 
-void noteOff(uint8_t note) {
+void noteOff(uint8_t canal, uint8_t note) {
   if (!demarre) return;
-  deposerEvenement(Evenement{note, 0});
+  deposerEvenement(Evenement{note, 0, SORTE_NOTE, 0, 0, canal});
+}
+
+void fixerCanaux(uint8_t clavier, uint8_t sfz) {
+  canalClavier = clavier > 16 ? 0 : clavier;
+  canalSfz     = sfz > 16 ? 0 : sfz;
 }
 
 uint32_t notesPerdues() { return notesPerduesCompte; }
@@ -1468,6 +1523,7 @@ uint8_t fixerGainBloc(uint32_t bloc, float gain) {
   /* The SFZ kit is one block's too: its fader is the same living path (§208). The count of voices
    * stays the sampler's own — the kit answers through SfzStore. */
   SfzStore::fixerGainBloc(bloc, gain);
+  SynthVoice::setBlockGain(bloc, gain);    // the synth voice is one block's too (§210)
   if (!bloc) return 0;                     // 0 = voix sans bloc : on n'y touche pas
   const float g = _borneGain(gain);
   /* Une play list de ce bloc (§196) : ses clips A VENIR aussi. Un flottant
@@ -1626,13 +1682,13 @@ String _partieCompletee(const String& s, char sep, int k) {
   return n ? _partie(s, sep, (k < n) ? k : n - 1) : String();
 }
 
-struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle, preload; };
+struct Champs { String liste, bloc, note, suite, gain, debut, fin, boucle, preload, canal; };
 Champs _champs(const String& params) {
   return Champs{ _valeurParam(params, "liste"),  _valeurParam(params, "lbloc"),
                  _valeurParam(params, "lnote"),  _valeurParam(params, "lsuite"),
                  _valeurParam(params, "lgain"),  _valeurParam(params, "ldebut"),
                  _valeurParam(params, "lfin"),   _valeurParam(params, "lboucle"),
-                 _valeurParam(params, "lpreload") };
+                 _valeurParam(params, "lpreload"), _valeurParam(params, "lch") };
 }
 
 /* Le son d'un clip, cherche dans le magasin ; ses secondes, en trames DU
@@ -1724,6 +1780,8 @@ bool _remplirListe(Liste& L, const Champs& ch, int i, String* absents, bool anti
   L.suite = s.length() ? (uint8_t)constrain(s.toInt(), 0, 2)   : 0;
   L.gain  = g.length() ? _borneGain(g.toFloat()) : 1.0f;
   L.preload = (_partie(ch.preload, ',', i).toInt() != 0) ? 1 : 0;      // absent: no
+  const String c = _partieCompletee(ch.canal, ',', i);                  // its track's channel (§210)
+  L.canal = c.length() ? (uint8_t)constrain(c.toInt(), 0, 16) : 0;
   const String noms = _partie(ch.liste, ',', i), debs = _partie(ch.debut,  ',', i),
                fins = _partie(ch.fin,   ',', i), bcls = _partie(ch.boucle, ',', i);
   const int nc = _nbParties(noms, '/');
@@ -2046,6 +2104,7 @@ int engine() { return moteurCourant; }
 Bascule derniereBascule() { return derniereBasc; }
 
 void setParams(const Params& p) {
+  SynthVoice::setParams(p);   // the synth voice beside the sampler (§210)
   // Écriture directe : ce sont des float alignés, lus par la tâche audio au
   // bloc suivant. Un verrou coûterait plus cher que le pire cas — un bloc rendu
   // avec un mélange de l'ancien et du nouveau réglage, soit 2,5 ms.

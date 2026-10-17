@@ -123,7 +123,7 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     // Écho AUDIO : le boîtier s'entend lui-même. Le moteur démarre à la
     // première note (init paresseuse) — rien au boot, l'OTA reste sauf.
-    AudioEngine::noteOn(note, velocity);
+    AudioEngine::noteOn(ch, note, velocity);
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -147,7 +147,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     // Écho local (cf. sendNoteOn) : éteint les LEDs appairées à cette note.
     g_componentManager.handleMidiNoteOff(ch, note, velocity);
 
-    AudioEngine::noteOff(note);
+    AudioEngine::noteOff(ch, note);
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -345,15 +345,31 @@ bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
     return true;
 }
 
-void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
-    uint8_t c = channel, n = control, v = value;
-    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
+void MidiRouter::polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure) {
+    noterTrafic();
+    uint8_t c = 0, n = 0, v = 0;
+    bool cc = false;
+    {
+        MappingEngine::Verrou verrou;   // like the notes and the CCs (§170)
+        const uint16_t genre = MappingEngine::masqueDe(MappingEngine::Evenement::PolyTouch);
+        for (uint8_t e = 0; e < emplacements.size() && !cc; e++) {
+            Emplacement& em = *emplacements[e];
+            if (!(em.repond & genre)) continue;   // nothing in this link answers a pressure
+            MappingEngine::SortieCc sortie;
+            char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
+            if (MappingEngine::executeMidiTouch(em.contenu.c_str(), note, pressure, channel, sortie,
+                                                em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
+                c = sortie.canal; n = sortie.cc; v = sortie.valeur; cc = true;
+            }
+        }
+    }
+    if (cc) appliquerCc(c, n, v);   // what a script made a CC of goes where an incoming CC goes
+}
 
-    // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
-    //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
-    //    renumerote un CC doit donc renumeroter aussi ce qu'apprend CcMap.
-    if (!chaineScriptsCc(c, n, v)) return;   // un emplacement a avale le CC
-
+/* What an incoming CC does once the scripts have said what it becomes: learnt,
+ * applied, read by the SFZ kit, shown by the components. Shared by ccEntrant and
+ * polytouchEntrant (§210). */
+void MidiRouter::appliquerCc(uint8_t c, uint8_t n, uint8_t v) {
     // 2. Apprentissage. Il precede l'application pour que la cible bouge des
     //    le geste qui l'apprend — sans ca il faut toucher le potentiometre une
     //    seconde fois pour entendre quoi que ce soit, et l'apprentissage a
@@ -369,8 +385,16 @@ void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
     g_componentManager.handleMidiControlChange(c, n, v);
 }
 
+void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
+    uint8_t c = channel, n = control, v = value;
+    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
 
-
+    // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
+    //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
+    //    renumerote un CC doit donc renumeroter aussi ce qu'apprend CcMap.
+    if (!chaineScriptsCc(c, n, v)) return;   // un emplacement a avale le CC
+    appliquerCc(c, n, v);
+}
 
 // ── Script .nms sur le MIDI entrant ────────────────────────────────────────
 void MidiRouter::setParamsScript(const String& params) {
@@ -611,10 +635,10 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
     // Hors du verrou : elles ne lisent plus rien d'un maillon.
     if (estNoteOff) {
         g_componentManager.handleMidiNoteOff(c, n, v);
-        AudioEngine::noteOff(n);
+        AudioEngine::noteOff(c, n);
     } else {
         g_componentManager.handleMidiNoteOn(c, n, v);
-        AudioEngine::noteOn(n, v);
+        AudioEngine::noteOn(c, n, v);
     }
 }
 
