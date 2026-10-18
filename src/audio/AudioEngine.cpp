@@ -353,6 +353,19 @@ volatile bool     kitReleased = false, synthReleased = false;   // a leaving kit
  * would dip, and stop if the Release were shorter than a block. Consumed by _adopter. */
 float             listReleaseS = 0.0f;      // audio task
 
+/* THE GATE CLOSES IN A FADE (STOP, §211): closed from one block to the next, with every voice cut
+ * at the same instant, it was a click. It now falls to silence in 10 ms; the voices stop behind it
+ * once it is closed — only those started before the STOP (`stopGen`): a PLAY right after keeps
+ * its own. */
+constexpr float   GATE_FADE_S = 0.010f;
+float             gateGain = 0.0f;          // audio task: 1 open, 0 closed
+volatile uint32_t stopGen = 0;              // the cue generation at the STOP
+volatile bool     stopVoices = false;       // posted by couperSon, served by the audio task
+static void _stopVoicesUpTo(uint32_t g) {
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (voixEch[v].actif && (int32_t)(voixEch[v].gen - g) <= 0) voixEch[v].actif = false;
+}
+
 static inline float envTick(EnvCue& e) {
   if (e.wait) { e.wait--; return e.now; }
   if (e.step != 0.0f) {
@@ -1113,7 +1126,23 @@ void boucleAudio(void*) {
       }
     }
     // Porte de silence (STOP) : Plaits rend en continu et ignore le note-off.
-    if (gSilence) memset(entrelace, 0, sizeof(entrelace));
+    /* It closes in a 10 ms fade, then the voices of before the STOP stop behind it (§211). Opened
+     * again before it closed (a PLAY right after), they stop all the same: STOP stops them. */
+    if (gSilence) {
+      if (gateGain > 0.0f) {
+        const float pas = 1.0f / (GATE_FADE_S * float(srReel));
+        for (size_t i = 0; i < FRAMES; i++) {
+          gateGain = (gateGain > pas) ? gateGain - pas : 0.0f;
+          entrelace[2 * i]     = (int16_t)(entrelace[2 * i] * gateGain);
+          entrelace[2 * i + 1] = (int16_t)(entrelace[2 * i + 1] * gateGain);
+        }
+      } else {
+        memset(entrelace, 0, sizeof(entrelace));
+      }
+    } else {
+      gateGain = 1.0f;
+    }
+    if (stopVoices && (gateGain <= 0.0f || !gSilence)) { stopVoices = false; _stopVoicesUpTo(stopGen); }
     // Niveau crete de ce qui part REELLEMENT vers le DAC (donc apres la porte).
     // Sans cette mesure, « est-ce que ca sonne ? » ne se repond qu'a l'oreille,
     // et tout diagnostic audio devient une conversation au lieu d'une lecture.
@@ -1542,10 +1571,15 @@ void ouvrirSon() {
 }
 
 void couperSon() {
-  gSilence = true;                       // la porte se ferme
   bipBlocsRestants = 0;                   // coupe le bip de test
   for (auto& v : voix) v.cible = 0.0f;    // le sinus s'eteint
-  arreterEchantillon();                   // toutes les voix se taisent net
+  clearPendingNotes = true;               // a note that was waiting does not start afterwards
+  /* The voices go silent with the gate, in its 10 ms fade, then stop (§211). Without the audio
+   * task, nobody fades: they stop now. */
+  if (!demarre) arreterEchantillon();
+  else { stopGen = cueGen; __sync_synchronize(); stopVoices = true; }
+  __sync_synchronize();
+  gSilence = true;                        // la porte se ferme
 }
 
 /* UNE NOTE NE DEMARRE PLUS LE MOTEUR. Comme noteOff, elle ne joue que si un
