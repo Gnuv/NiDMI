@@ -274,6 +274,11 @@ bool plaitsAlloue() {
 #define VOIX_MAX 8
 #endif
 
+/* THE CUE'S ENVELOPE (MESURES §211) — Delay, Attack to Sustain, Release: what a cue
+ * applies to everything it plays, as the app's DASDR of a case. A linear ramp toward
+ * `target`, after `wait` samples; `stop`: a release — the source stops at 0. */
+struct EnvCue { float now = 1.0f, target = 1.0f, step = 0.0f; uint32_t wait = 0; bool stop = false; };
+
 struct VoixEch {
   bool     actif  = false;
   uint8_t  iEch   = 0;        // index dans SampleStore
@@ -303,6 +308,12 @@ struct VoixEch {
   int8_t          head   = -1;
   const int16_t*  headPcm = nullptr;
   uint32_t        headStart = 0, headFrames = 0;
+  /* THE CUE THAT LAUNCHED IT, AND ITS ENVELOPE (§211). `envInit`: posed by whichever task
+   * triggers the voice; the audio task fills `env` at its next block from the arriving
+   * cue's template — only the audio task writes an envelope. */
+  uint32_t        gen = 0;
+  bool            envInit = false;
+  EnvCue          env;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
@@ -320,6 +331,67 @@ static inline float _borneGain(float g) {
 }
 VoixEch  voixEch[VOIX_MAX];
 uint32_t voixHorloge = 0;
+
+/* ── THE ENVELOPE OF A CUE (MESURES §211) ─────────────────────────────────
+ * A cue that arrives: its sounds wait its Delay, then rise in its Attack to its Sustain;
+ * the sounds of the cue that leaves fall in ITS Release instead of being cut — a
+ * cross-fade. A sound that goes on from one cue to the next (a list of the same block, a
+ * kit, the synth voice) keeps its level and glides to the new Sustain: no dip.
+ * The cue (loopTask) posts its parameters and bumps `transSeq`; the audio task applies
+ * them at the start of its next block, before it adopts the cue's lists. `cueEnv` is the
+ * template a new voice of the cue copies; the kit and the synth voice have their own. */
+EnvCue cueEnv, kitEnv, synthEnv;            // audio task only
+volatile uint32_t cueGen = 0;               // the arriving cue's generation (loopTask)
+volatile uint32_t transSeq = 0;             // bumped last, once the parameters are written
+uint32_t          transApplied = 0;         // audio task
+volatile float    transDelayS = 0.0f, transAttackS = 0.0f, transSustain = 1.0f, transReleaseS = 0.0f;
+volatile bool     transKitKeep = false, transSynthKeep = false;
+bool              kitOwned = false, synthOwned = false;    // audio task: the cue that plays has them
+volatile bool     kitReleased = false, synthReleased = false;   // a leaving kit / voice reached silence
+/* The Release of the play lists the arriving cue drops: they leave when its bank is adopted,
+ * which may be a block or two after the transition — released here, a list that goes on
+ * would dip, and stop if the Release were shorter than a block. Consumed by _adopter. */
+float             listReleaseS = 0.0f;      // audio task
+
+static inline float envTick(EnvCue& e) {
+  if (e.wait) { e.wait--; return e.now; }
+  if (e.step != 0.0f) {
+    e.now += e.step;
+    if ((e.step > 0.0f) ? (e.now >= e.target) : (e.now <= e.target)) { e.now = e.target; e.step = 0.0f; }
+  } else if (e.now != e.target) {
+    e.now = e.target;                       // after a Delay without Attack: it starts at once
+  }
+  return e.now;
+}
+static inline void envAdvance(EnvCue& e, uint32_t n) {
+  if (e.wait >= n) { e.wait -= n; return; }
+  n -= e.wait; e.wait = 0;
+  if (e.step != 0.0f) {
+    e.now += e.step * float(n);
+    if ((e.step > 0.0f) ? (e.now >= e.target) : (e.now <= e.target)) { e.now = e.target; e.step = 0.0f; }
+  } else {
+    e.now = e.target;
+  }
+}
+/* From `from`, after `delayS`, to `sustain` in `attackS`. */
+static inline void envFrom(EnvCue& e, float from, float delayS, float attackS, float sustain) {
+  const float sr = float(srReel);
+  e.now = from; e.target = sustain; e.stop = false;
+  e.wait = (delayS > 0.0f) ? (uint32_t)(delayS * sr) : 0;
+  const float n = attackS * sr;
+  e.step = (n >= 1.0f) ? (sustain - from) / n : 0.0f;
+  if (e.step == 0.0f && e.wait == 0) e.now = sustain;
+}
+/* A sound that goes on from one cue to the next glides to the new Sustain in the cue's
+ * Attack — at least 10 ms, the gain smoothing's pole: an Attack of 0 would be a jump. */
+constexpr float GLIDE_MIN_S = 0.010f;
+/* To silence in `releaseS`, then the source stops. */
+static inline void envLeave(EnvCue& e, float releaseS) {
+  const float n = releaseS * float(srReel);
+  e.target = 0.0f; e.wait = 0; e.stop = true;
+  e.step = (n >= 1.0f && e.now > 0.0f) ? -e.now / n : 0.0f;
+  if (e.step == 0.0f) e.now = 0.0f;
+}
 
 /* ── LES PLAY LIST (MESURES §196) ─────────────────────────────────────────
  * Voir AudioEngine.h. Une banque = les listes armees ; DEUX banques, en
@@ -532,6 +604,7 @@ void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   vo->fondu = 0.0f;
   vo->age   = ++voixHorloge;
   vo->picG  = 0; vo->picD = 0;
+  vo->gen   = cueGen; vo->envInit = true;   // §211
   __sync_synchronize();
   vo->actif = true;
 }
@@ -614,11 +687,27 @@ void _adopter(int8_t prop) {
     const uint32_t bloc = (vo.liste < (int8_t)an.n) ? an.listes[vo.liste].bloc : 0;
     int8_t li = -1;
     for (uint8_t k = 0; k < nv.n && bloc; k++) if (nv.listes[k].bloc == bloc) { li = (int8_t)k; break; }
-    if (li < 0) { _eteindreEnDouceur(vo); continue; }
+    if (li < 0) {
+      /* A list that leaves: in its cue's Release if it has one (§211), in 5 ms otherwise. */
+      if (listReleaseS > 0.0f) {
+        if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
+        envLeave(vo.env, listReleaseS);
+        vo.liste = -1;
+      } else {
+        _eteindreEnDouceur(vo);
+      }
+      continue;
+    }
     vo.liste = li;
     vo.cible = vo.velo * _borneGain(nv.listes[li].gain);
+    /* A list that goes on (the same block in the arriving cue): it now belongs to it, and
+     * glides from where it is to its Sustain — no Delay, no dip (§211). */
+    vo.gen = cueGen;
+    if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
+    envFrom(vo.env, vo.env.now, 0.0f, fmaxf(transAttackS, GLIDE_MIN_S), transSustain);
   }
   for (uint8_t k = 0; k < nv.n; k++) nv.listes[k].courant = 0;   // recompte au bloc
+  listReleaseS = 0.0f;
   banqueActive = prop;
   __sync_synchronize();
   banqueProposee = -1;
@@ -680,6 +769,37 @@ void _sweepStreams() {
     if (voixEch[v].actif && voixEch[v].stream >= 0) SdStream::position(voixEch[v].stream, (uint32_t)voixEch[v].pos);
 }
 
+/* THE CUE THAT ARRIVED (§211), applied at the start of a block — before its lists are
+ * adopted. The voices of older cues fall in the leaving cue's Release (none: the cue cuts
+ * them, as before) — the clips of play lists when the cue's bank is adopted (`_adopter`);
+ * the kit and the synth voice go on, start, or leave; the template a new voice copies
+ * starts its Delay and Attack. */
+void _appliquerTransition() {
+  if (transSeq == transApplied) return;
+  transApplied = transSeq;
+  __sync_synchronize();
+  const uint32_t g = cueGen;
+  const float del = transDelayS, att = transAttackS, sus = transSustain, rel = transReleaseS;
+  listReleaseS = rel;
+  if (rel > 0.0f)
+    for (uint8_t v = 0; v < VOIX_MAX; v++) {
+      VoixEch& vo = voixEch[v];
+      if (!vo.actif || vo.gen == g || vo.liste >= 0) continue;
+      if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
+      envLeave(vo.env, rel);
+    }
+  const float fresh = (del > 0.0f || att > 0.0f) ? 0.0f : sus;
+  auto instance = [&](EnvCue& e, bool& owned, bool keep) {
+    if (keep && owned)  envFrom(e, e.now, 0.0f, fmaxf(att, GLIDE_MIN_S), sus);   // goes on: glides
+    else if (keep)      envFrom(e, fresh, del, att, sus);         // starts with the cue
+    else if (owned)     { if (rel > 0.0f) envLeave(e, rel); else e = EnvCue{}; }   // no release: the cue cuts it
+    owned = keep;
+  };
+  instance(kitEnv, kitOwned, transKitKeep);
+  instance(synthEnv, synthOwned, transSynthKeep);
+  envFrom(cueEnv, fresh, del, att, sus);
+}
+
 void rendreSample() {
   uint8_t underruns = 0;                // the streamed voices that ran short of data this block
   /* THE SFZ BLOCK first (§207): the kernel renders float into two scratch
@@ -691,7 +811,10 @@ void rendreSample() {
   /* WHO GOES THROUGH THE LOW-PASS (§210): asked once per block and per voice. */
   const bool sfzFiltre = sfz && Effects::filters(SfzStore::blocId());
   bool filtre[VOIX_MAX];
-  for (uint8_t v = 0; v < VOIX_MAX; v++) filtre[v] = voixEch[v].actif && Effects::filters(voixEch[v].bloc);
+  for (uint8_t v = 0; v < VOIX_MAX; v++) {
+    filtre[v] = voixEch[v].actif && Effects::filters(voixEch[v].bloc);
+    if (voixEch[v].envInit) { voixEch[v].env = cueEnv; voixEch[v].envInit = false; }   // §211
+  }
   constexpr float IN = 1.0f / 32768.0f;
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
@@ -736,6 +859,9 @@ void rendreSample() {
         if (ecart != 0.0f)
           vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
       }
+      /* ITS CUE'S ENVELOPE (§211): a released voice stops at silence. */
+      const float ev = envTick(vo.env);
+      if (vo.env.stop && ev <= 0.0f) { vo.actif = false; continue; }
       const size_t k = (size_t)vo.pos;
       const float  f = float(vo.pos - double(k));
       const bool  st = SampleStore::stereo(vo.iEch);
@@ -755,7 +881,8 @@ void rendreSample() {
       } else {
         eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
       }
-      const int32_t sg = (int32_t)(eg * vo.gain), sd = (int32_t)(ed * vo.gain);
+      const float   gv = vo.gain * ev;
+      const int32_t sg = (int32_t)(eg * gv), sd = (int32_t)(ed * gv);
       if (filtre[v]) { gf += sg; df += sd; } else { g += sg; d += sd; }
       if (mesurer) {
         /* La crete de la voix, APRES son gain : ce qu'elle apporte au melange.
@@ -771,10 +898,15 @@ void rendreSample() {
     mixL[i] = g * IN;  mixR[i] = d * IN;
     busL[i] = gf * IN; busR[i] = df * IN;
     if (sfz) {
-      if (sfzFiltre) { busL[i] += sfzG[i] * sfzK; busR[i] += sfzD[i] * sfzK; }
-      else           { mixL[i] += sfzG[i] * sfzK; mixR[i] += sfzD[i] * sfzK; }
+      const float k = sfzK * envTick(kitEnv);    // the kit's cue envelope (§211)
+      if (sfzFiltre) { busL[i] += sfzG[i] * k; busR[i] += sfzD[i] * k; }
+      else           { mixL[i] += sfzG[i] * k; mixR[i] += sfzD[i] * k; }
     }
   }
+  if (!sfz) envAdvance(kitEnv, FRAMES);
+  if (kitEnv.stop && kitEnv.now <= 0.0f) { kitEnv.stop = false; kitReleased = true; }   // the loop silences it
+  /* Silent and owned by no cue: neutral again — a kit heard from the inspector later sounds. */
+  if (!sfz && !kitOwned && !kitEnv.stop) kitEnv = EnvCue{};
   if (underruns)
     for (uint8_t v = 0; v < VOIX_MAX; v++)
       if (underruns & (1u << v)) SdStream::underrun(voixEch[v].stream);
@@ -787,8 +919,15 @@ void _finirLeMelange() {
   if (SynthVoice::take(synthMono, FRAMES)) {
     float* l = Effects::filters(SynthVoice::bloc()) ? busL : mixL;
     float* r = (l == busL) ? busR : mixR;
-    for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
+    for (size_t i = 0; i < FRAMES; i++) {
+      const float s = synthMono[i] * envTick(synthEnv);    // the voice's cue envelope (§211)
+      l[i] += s; r[i] += s;
+    }
+  } else {
+    envAdvance(synthEnv, FRAMES);
   }
+  if (synthEnv.stop && synthEnv.now <= 0.0f) { synthEnv.stop = false; synthReleased = true; }
+  if (!SynthVoice::active() && !synthOwned && !synthEnv.stop) synthEnv = EnvCue{};
   Effects::process(mixL, mixR, busL, busR, FRAMES);
   for (size_t i = 0; i < FRAMES; i++) {
     float l = mixL[i] * 32767.0f, r = mixR[i] * 32767.0f;
@@ -913,6 +1052,7 @@ void boucleAudio(void*) {
     if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
     /* LES PLAY LIST PROPOSEES s'adoptent AVANT les notes de ce bloc (§196) :
      * une liste posee puis jouee (l'ecoute de l'inspecteur) trouve la sienne. */
+    _appliquerTransition();              // the cue that arrived, before its lists are adopted (§211)
     if (banqueProposee >= 0 && banques) _adopter(banqueProposee);
     SfzStore::adopter();                 // the proposed SFZ instrument, same pattern (§207)
     SfzStore::blocRendu();              // the heartbeat: the loop is alive (§208)
@@ -943,6 +1083,7 @@ void boucleAudio(void*) {
     }
     const uint32_t renderCycles = ESP.getCycleCount() - c0;
     cyclesEch = renderCycles / FRAMES;
+    envAdvance(cueEnv, FRAMES);          // the template of the cue's new voices follows the block (§211)
     /* THE GUARD OF CORE 1 (§209-210): a render over 95 % of its block, 20 blocks
      * in a row — the audio task would never yield again, and the watchdog
      * restarts the card. The effects go first (the reverb, then the low-pass),
@@ -1461,6 +1602,36 @@ bool capture(const int16_t*& data, uint32_t& frames, bool& finie) {
   return captureBuf != nullptr;
 }
 
+void arriveeDeCue(float delayS, float attackS, float sustain, float releaseOutS,
+                  bool kitKeep, bool synthKeep) {
+  transDelayS   = delayS > 0.0f ? delayS : 0.0f;
+  transAttackS  = attackS > 0.0f ? attackS : 0.0f;
+  transSustain  = (sustain >= 0.0f) ? (sustain > 1.0f ? 1.0f : sustain) : 1.0f;
+  transReleaseS = releaseOutS > 0.0f ? releaseOutS : 0.0f;
+  transKitKeep = kitKeep; transSynthKeep = synthKeep;
+  cueGen = cueGen + 1;
+  __sync_synchronize();                      // the parameters and the generation before the sequence
+  transSeq = transSeq + 1;
+  /* After the sequence: a block before it may still have ended a release; a block after
+   * it applies the transition first, which cancels that release. A kit or a voice the cue
+   * keeps is then not silenced by the last cue's release. */
+  if (kitKeep) kitReleased = false;
+  if (synthKeep) synthReleased = false;
+}
+
+String etatEnveloppes() {
+  uint8_t enRelease = 0;
+  for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif && voixEch[v].env.stop) enRelease++;
+  char s[200];
+  snprintf(s, sizeof s, "{\"cue\":%.3f,\"cue_target\":%.3f,\"kit\":%.3f,\"synth\":%.3f,"
+                        "\"releasing_voices\":%u,\"gen\":%lu}",
+           cueEnv.now, cueEnv.target, kitEnv.now, synthEnv.now, (unsigned)enRelease, (unsigned long)cueGen);
+  return String(s);
+}
+
+bool kitRelache()    { if (!kitReleased) return false; kitReleased = false; return true; }
+bool synthRelachee() { if (!synthReleased) return false; synthReleased = false; return true; }
+
 void fixerCanaux(uint8_t clavier, uint8_t sfz) {
   canalClavier = clavier > 16 ? 0 : clavier;
   canalSfz     = sfz > 16 ? 0 : sfz;
@@ -1539,6 +1710,7 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   /* Une voix de play-sf n'est pas un clip (§196) : le fichier entier, aucune
    * liste — une voix volee a une liste ne doit rien en garder. */
   vo->liste  = -1; vo->clip = 0; vo->debutT = 0; vo->finT = 0; vo->fondu = 0.0f;
+  vo->gen    = cueGen; vo->envInit = true;   // the cue's envelope, filled at the next block (§211)
   __sync_synchronize();
   vo->actif  = true;
   return true;

@@ -161,6 +161,7 @@ void setupAudioAPI(AsyncWebServer& server) {
            stopped, how late the core 0 task was. */
         json += "\"synth\":" + SynthVoice::status() + ",";
         json += "\"fx\":" + Effects::status() + ",";
+        json += "\"env\":" + AudioEngine::etatEnveloppes() + ",";   // the cue envelopes (§211)
         json += "\"sfz\":{";
         json += "\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin()) + "\",";
         json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande()) + "\",";

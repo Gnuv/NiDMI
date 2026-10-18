@@ -100,6 +100,21 @@ void noteOn(uint8_t canal, uint8_t note, uint8_t velocity);
 void noteOff(uint8_t canal, uint8_t note);
 /* The channels of the play-sf keyboard and of the SFZ kit, from the cue (0 = all). */
 void fixerCanaux(uint8_t clavier, uint8_t sfz);
+/* THE ENVELOPE OF A CUE (MESURES §211), the app's DASDR of a case. Called by the cue
+ * that arrives, BEFORE it triggers its sounds: its Delay, Attack and Sustain shape what
+ * it plays; the sounds of the cue that leaves fall in `releaseOutS` (its Release) instead
+ * of being cut — 0: cut, as before, by the cue itself. `kitKeep`, `synthKeep`: the cue
+ * plays an SFZ kit, the synth voice (they go on, or start, or leave in the release).
+ * Applied by the audio task at its next block. */
+void arriveeDeCue(float delayS, float attackS, float sustain, float releaseOutS,
+                  bool kitKeep, bool synthKeep);
+/* loopTask, once each: a leaving kit / synth voice reached silence at the end of its
+ * release — the cue sequencer silences it (SfzStore::proposer(""), SynthVoice off). */
+bool kitRelache();
+bool synthRelachee();
+/* Status: the arriving cue's level and target, the kit's and the synth voice's, the
+ * voices in a release — read by the audio task without a lock (a reading, not a state). */
+String etatEnveloppes();
 /* THE CAPTURE OF WHAT GOES TO THE DAC (diagnostics, §210): `frames` stereo frames
  * from the next block on, into PSRAM; `capture` gives them back (`finie` when the
  * count is reached). What the DAC receives — after the volume and the gate. */

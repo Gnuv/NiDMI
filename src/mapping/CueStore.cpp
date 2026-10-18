@@ -47,6 +47,9 @@ bool  _auDemarrage  = false;
 void (*_rappelEtat)(const Etat&) = nullptr;
 constexpr const char* NVS_OPTIONS = "nidmi-cues";
 uint32_t _debutMs = 0;      // instant d'activation de la cue courante
+/* THE RELEASE OF THE CUE THAT PLAYS, in seconds (§211): its sounds fall in it when the
+ * next cue arrives. 0: they are cut, as before. Written by _appliquer, read at the next. */
+float    _releaseSortant = 0.0f;
 /* ── LA PAUSE APPARTIENT A LA CARTE, ELLE AUSSI ─────────────────────────────
  * L'app avait la sienne, purement locale : appuyer sur STOP en lecture la
  * mettait en pause pendant que la carte CONTINUAIT. L'ecran disait « arrete »,
@@ -272,6 +275,8 @@ void _appliquer(const Cue& c) {
     String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
     /* §210: the channels of the keyboard and of the kit, and the synth voice. */
     String canalClavier, canalSfz, synth, synthBloc, synthCanal, synthGain;
+    /* THE CUE'S ENVELOPE (§211): the app's DASDR of the case, in ms (sustain 0..1). */
+    float envDelai = 0.0f, envAttaque = 0.0f, envSustain = 1.0f, envRelease = 0.0f;
     AudioEngine::Params synthParams = AudioEngine::params();
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
@@ -296,6 +301,10 @@ void _appliquer(const Cue& c) {
         else if (cle == "synthbloc") { synthBloc = kv.substring(eq + 1); synthBloc.trim(); }
         else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
         else if (cle == "synthgain") { synthGain = kv.substring(eq + 1); synthGain.trim(); }
+        else if (cle == "cdelay")    envDelai   = kv.substring(eq + 1).toFloat() / 1000.0f;
+        else if (cle == "cattack")   envAttaque = kv.substring(eq + 1).toFloat() / 1000.0f;
+        else if (cle == "csustain")  envSustain = kv.substring(eq + 1).toFloat();
+        else if (cle == "crelease")  envRelease = kv.substring(eq + 1).toFloat() / 1000.0f;
         else if (cle == "harmonics" || cle == "timbre" || cle == "morph" || cle == "decay"
                  || cle == "lpg_colour" || cle == "drone") {
           const float v = kv.substring(eq + 1).toFloat();
@@ -319,7 +328,15 @@ void _appliquer(const Cue& c) {
      * SAUF les clips des play list (§196) : poserListes, plus bas, fait taire
      * ceux d'une liste qui part, et laisse jouer celle qui CONTINUE — une
      * chaine de cellules porte le meme bloc d'une cue a la suivante. */
-    AudioEngine::arreterEchantillon(/*listesComprises=*/false);
+    /* THE ENVELOPE FIRST (§211): the sounds of the cue that leaves fall in ITS release —
+     * then they are not cut here; this cue's sounds wait its Delay, rise in its Attack. */
+    /* Capped by this cue's duration, as in the browser (D17): no release outlives the
+     * cue it overlaps, so they never pile up across cues. */
+    const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
+    AudioEngine::arriveeDeCue(envDelai, envAttaque, envSustain, releaseSortant,
+                              cheminSfz.length() > 0, synth.length() > 0);
+    _releaseSortant = envRelease;
+    if (releaseSortant <= 0.0f) AudioEngine::arreterEchantillon(/*listesComprises=*/false);
     AudioEngine::fixerDeclenchementSurCue(surCue);
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
@@ -332,9 +349,11 @@ void _appliquer(const Cue& c) {
     {
       String raison;
       if (synthParamsVus) AudioEngine::setParams(synthParams);
-      if (!SynthVoice::configure(synth.length() ? synth.toInt() : -1, (uint32_t)synthBloc.toInt(),
-                                 (uint8_t)synthCanal.toInt(), synthGain.length() ? synthGain.toFloat() : 1.0f,
-                                 raison))
+      /* A voice that leaves in the last cue's release is stopped at its end (§211). */
+      if ((synth.length() || releaseSortant <= 0.0f)
+          && !SynthVoice::configure(synth.length() ? synth.toInt() : -1, (uint32_t)synthBloc.toInt(),
+                                    (uint8_t)synthCanal.toInt(), synthGain.length() ? synthGain.toFloat() : 1.0f,
+                                    raison))
         Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
       raison = "";
       if (!Effects::configureFromCue(c.params, raison))
@@ -414,9 +433,14 @@ void _appliquer(const Cue& c) {
     {
       String raisonSfz;
       /* Which block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
-      SfzStore::fixerBloc((uint32_t)blocSfz.toInt(), gainSfz.length() ? gainSfz.toFloat() : 1.0f);
-      if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
-        Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
+      /* A kit that leaves in the last cue's release is silenced at its end (§211): its
+       * bloc and gain stay until then. */
+      const bool kitEnRelease = !cheminSfz.length() && releaseSortant > 0.0f;
+      if (!kitEnRelease) {
+        SfzStore::fixerBloc((uint32_t)blocSfz.toInt(), gainSfz.length() ? gainSfz.toFloat() : 1.0f);
+        if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
+          Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
+      }
       /* The walk over the whole list costs: only when a kit is held or asked for. */
       if (cheminSfz.length() || SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
     }
@@ -428,10 +452,23 @@ void _appliquer(const Cue& c) {
   /* Et une cue qui ne parle plus d'echantillon du tout (engine != -2) arrete
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
-  if (c.engine != -2) { AudioEngine::arreterEchantillon(); AudioEngine::poserListes(String());
-                        String rs; SynthVoice::configure(-1, 0, 0, 1.0f, rs); Effects::off();
-                        String r; SfzStore::proposer("", r);
-                        if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes()); }
+  if (c.engine != -2) {
+    /* A cue without sound: what played falls in its release (§211) — the kit and the synth
+     * voice are silenced at its end (servirReleases) — or is cut, as before. */
+    const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
+    AudioEngine::arriveeDeCue(0.0f, 0.0f, 1.0f, releaseSortant, false, false);
+    _releaseSortant = 0.0f;
+    if (releaseSortant <= 0.0f) {
+      AudioEngine::arreterEchantillon();
+      String rs; SynthVoice::configure(-1, 0, 0, 1.0f, rs);
+      String r; SfzStore::proposer("", r);
+      if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
+      Effects::off();
+    }
+    /* In a release, the effects stay as they were until the next cue sets its own: a
+     * filtered sound that fades does not lose its filter halfway. */
+    AudioEngine::poserListes(String());
+  }
 
   /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
    * one too. The NEXT cue — the one GO would play, the first after the last if the list
@@ -827,6 +864,7 @@ void arreter() {
   VerrouSeq verrou;
   _enPause = false;          // un arret franc oublie la position gelee
   _lecture = false;
+  _releaseSortant = 0.0f;    // STOP cuts: the next PLAY releases nothing (§211)
   AudioEngine::couperSon();
   g_midiRouter.fixerTransport(false);   // idem : l'horloge des scripts s'arrete
   _annoncer();
@@ -875,8 +913,20 @@ void precedent() {
   if (_lecture) AudioEngine::ouvrirSon();
 }
 
+/* WHAT LEFT IN A RELEASE, SILENCED AT ITS END (§211): the audio task says when a leaving
+ * kit or synth voice reached silence; the loop — never the audio task — unloads them. */
+static void _servirReleases() {
+  if (AudioEngine::kitRelache()) {
+    String r;
+    SfzStore::proposer("", r);
+    if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
+  }
+  if (AudioEngine::synthRelachee()) { String r; SynthVoice::configure(-1, 0, 0, 1.0f, r); }
+}
+
 void boucle() {
   VerrouSeq verrou;
+  _servirReleases();
   if (!_lecture || _dureeCourante <= 0.0f) return;   // 0 = infinie, on attend un GO
 
   /* L'AUTOMATION, bridee a 50 Hz. `boucle()` tourne a chaque tour de
