@@ -309,10 +309,11 @@ struct VoixEch {
   const int16_t*  headPcm = nullptr;
   uint32_t        headStart = 0, headFrames = 0;
   /* THE CUE THAT LAUNCHED IT, AND ITS ENVELOPE (§211). `envInit`: posed by whichever task
-   * triggers the voice; the audio task fills `env` at its next block from the arriving
-   * cue's template — only the audio task writes an envelope. */
+   * triggers the voice; the audio task fills `env` at its next block from a template —
+   * 1 the arriving cue's, 2 the leaving cue's (a note on one of its instruments during its
+   * Release) — only the audio task writes an envelope. */
   uint32_t        gen = 0;
-  bool            envInit = false;
+  uint8_t         envInit = 0;
   EnvCue          env;
 };
 /* LE GAIN GLISSE (MESURES §165) : un pole d'environ 10 ms a 48 kHz. Un saut de
@@ -352,6 +353,26 @@ volatile bool     kitReleased = false, synthReleased = false;   // a leaving kit
  * which may be a block or two after the transition — released here, a list that goes on
  * would dip, and stop if the Release were shorter than a block. Consumed by _adopter. */
 float             listReleaseS = 0.0f;      // audio task
+
+/* THE LEAVING CUE PLAYS ON DURING ITS RELEASE (§211). Gael: "during the whole release, the
+ * case must behave normally" — its instruments keep their MIDI: the play-sf keyboard and the
+ * play lists of the leaving cue stay armed (the kit and the synth voice already did, when the
+ * arriving cue does not take them). A note on them sounds at the level of its cue's Release,
+ * falling with it: `outEnv`, the leaving cue's template. When it reaches silence, they are
+ * disarmed. One leaving cue at a time: a cue that arrives during a release replaces it. */
+struct ClavierSortant { char nom[48]; uint32_t bloc; float gain; uint8_t canal; };
+ClavierSortant    transClavier = {}, outClavier = {};
+volatile bool     transClavierOk = false;   // posed by arriveeDeCue, before the sequence
+bool              outClavierOk = false;     // audio task
+EnvCue            outEnv;                   // audio task
+bool              outActive = false;        // audio task: the leaving cue is still playable
+uint32_t          outGen = 0;               // audio task: the generation its new voices take
+/* A voice's envelope from the template it asked for (envInit), at its first block. */
+static inline void _envDe(VoixEch& vo) {
+  if (!vo.envInit) return;
+  vo.env = (vo.envInit == 2) ? outEnv : cueEnv;
+  vo.envInit = 0;
+}
 
 /* THE GATE CLOSES IN A FADE (STOP, §211): closed from one block to the next, with every voice cut
  * at the same instant, it was a click. It now falls to silence in 10 ms; the voices stop behind it
@@ -434,6 +455,7 @@ struct Liste {
   uint8_t  courant;                      // le clip qui joue (0 : aucun), tenu par la tache audio
   uint8_t  preload;                      // 1: "Preload" — on the cue before, its heads are read ahead
   uint8_t  canal;                        // the MIDI channel its notes come on, 1..16 (0: all) — §210
+  uint8_t  sortante;                     // 1: the leaving cue's, played during its Release (§211)
   float    gain;
   Clip     clips[CLIPS_MAX];
 };
@@ -617,7 +639,8 @@ void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   vo->fondu = 0.0f;
   vo->age   = ++voixHorloge;
   vo->picG  = 0; vo->picD = 0;
-  vo->gen   = cueGen; vo->envInit = true;   // §211
+  /* §211: a clip of the leaving cue's list takes its envelope, falling in its Release. */
+  vo->gen   = L.sortante ? outGen : cueGen; vo->envInit = L.sortante ? 2 : 1;
   __sync_synchronize();
   vo->actif = true;
 }
@@ -650,6 +673,7 @@ void _notePourLesListes(uint8_t note, uint8_t canal) {
   const Banque& b = banques[banqueActive];
   for (uint8_t li = 0; li < b.n; li++) {
     if (!_ecoute(b.listes[li].canal, canal)) continue;   // another track's channel (§210)
+    if (b.listes[li].sortante && !outActive) continue;    // its cue's Release is over (§211)
     const int k = int(note) - int(b.listes[li].note) + 1;   // 0 : la note d'arret
     if (k >= 0 && k <= b.listes[li].n) _lancerClip(b, li, (uint8_t)k);
   }
@@ -703,7 +727,7 @@ void _adopter(int8_t prop) {
     if (li < 0) {
       /* A list that leaves: in its cue's Release if it has one (§211), in 5 ms otherwise. */
       if (listReleaseS > 0.0f) {
-        if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
+        _envDe(vo);
         envLeave(vo.env, listReleaseS);
         vo.liste = -1;
       } else {
@@ -713,10 +737,15 @@ void _adopter(int8_t prop) {
     }
     vo.liste = li;
     vo.cible = vo.velo * _borneGain(nv.listes[li].gain);
+    _envDe(vo);
+    /* The leaving cue's list, kept playable (§211): its voice falls in the cue's Release. */
+    if (nv.listes[li].sortante) {
+      if (listReleaseS > 0.0f) envLeave(vo.env, listReleaseS);
+      continue;
+    }
     /* A list that goes on (the same block in the arriving cue): it now belongs to it, and
      * glides from where it is to its Sustain — no Delay, no dip (§211). */
     vo.gen = cueGen;
-    if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
     envFrom(vo.env, vo.env.now, 0.0f, fmaxf(transAttackS, GLIDE_MIN_S), transSustain);
   }
   for (uint8_t k = 0; k < nv.n; k++) nv.listes[k].courant = 0;   // recompte au bloc
@@ -798,9 +827,21 @@ void _appliquerTransition() {
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       VoixEch& vo = voixEch[v];
       if (!vo.actif || vo.gen == g || vo.liste >= 0) continue;
-      if (vo.envInit) { vo.env = cueEnv; vo.envInit = false; }
+      _envDe(vo);
       envLeave(vo.env, rel);
     }
+  /* The leaving cue stays playable during its Release: its template falls from where the
+   * cue was; its keyboard, posed by arriveeDeCue (its lists come with the bank). */
+  if (rel > 0.0f) {
+    outEnv = cueEnv;
+    envLeave(outEnv, rel);
+    outActive = true;
+    outGen = g - 1;
+    outClavierOk = transClavierOk;
+    if (outClavierOk) outClavier = transClavier;
+  } else {
+    outActive = false; outClavierOk = false;
+  }
   const float fresh = (del > 0.0f || att > 0.0f) ? 0.0f : sus;
   auto instance = [&](EnvCue& e, bool& owned, bool keep) {
     if (keep && owned)  envFrom(e, e.now, 0.0f, fmaxf(att, GLIDE_MIN_S), sus);   // goes on: glides
@@ -826,7 +867,7 @@ void rendreSample() {
   bool filtre[VOIX_MAX];
   for (uint8_t v = 0; v < VOIX_MAX; v++) {
     filtre[v] = voixEch[v].actif && Effects::filters(voixEch[v].bloc);
-    if (voixEch[v].envInit) { voixEch[v].env = cueEnv; voixEch[v].envInit = false; }   // §211
+    _envDe(voixEch[v]);   // §211
   }
   constexpr float IN = 1.0f / 32768.0f;
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
@@ -991,6 +1032,11 @@ void appliquer(const Evenement& e) {
       if (e.velo == 0) SfzStore::noteOff(e.note);
       else             SfzStore::noteOn(e.note, e.velo);
     }
+    /* THE LEAVING CUE'S KEYBOARD, during its Release (§211): it still plays its sound, on its
+     * channel, at the level of the Release. */
+    if (e.velo != 0 && outClavierOk && outActive && _ecoute(outClavier.canal, e.canal))
+      declencherEchantillon(outClavier.nom, /*boucle=*/false, outClavier.gain, float(e.note) - 60.0f,
+                            outClavier.bloc, float(e.velo) / 127.0f, /*sortante=*/true);
     /* EN MODE « SUR CUE », le clavier ne touche pas l'echantillon : c'est la cue
      * qui le declenche. On ABSORBE la note quand meme — sans ce retour elle
      * tomberait sur le sinus plus bas, et on entendrait un bip a chaque touche
@@ -1097,6 +1143,8 @@ void boucleAudio(void*) {
     const uint32_t renderCycles = ESP.getCycleCount() - c0;
     cyclesEch = renderCycles / FRAMES;
     envAdvance(cueEnv, FRAMES);          // the template of the cue's new voices follows the block (§211)
+    envAdvance(outEnv, FRAMES);          // and the leaving cue's, until its Release ends
+    if (outActive && outEnv.now <= 0.0f) { outActive = false; outClavierOk = false; }
     /* THE GUARD OF CORE 1 (§209-210): a render over 95 % of its block, 20 blocks
      * in a row — the audio task would never yield again, and the watchdog
      * restarts the card. The effects go first (the reverb, then the low-pass),
@@ -1142,7 +1190,10 @@ void boucleAudio(void*) {
     } else {
       gateGain = 1.0f;
     }
-    if (stopVoices && (gateGain <= 0.0f || !gSilence)) { stopVoices = false; _stopVoicesUpTo(stopGen); }
+    if (stopVoices && (gateGain <= 0.0f || !gSilence)) {
+      stopVoices = false; _stopVoicesUpTo(stopGen);
+      outActive = false; outClavierOk = false;     // STOP ends the leaving cue too (§211)
+    }
     // Niveau crete de ce qui part REELLEMENT vers le DAC (donc apres la porte).
     // Sans cette mesure, « est-ce que ca sonne ? » ne se repond qu'a l'oreille,
     // et tout diagnostic audio devient une conversation au lieu d'une lecture.
@@ -1643,6 +1694,13 @@ void arriveeDeCue(float delayS, float attackS, float sustain, float releaseOutS,
   transSustain  = (sustain >= 0.0f) ? (sustain > 1.0f ? 1.0f : sustain) : 1.0f;
   transReleaseS = releaseOutS > 0.0f ? releaseOutS : 0.0f;
   transKitKeep = kitKeep; transSynthKeep = synthKeep;
+  /* The leaving cue's keyboard, before the arriving cue names its own (§211). */
+  transClavierOk = transReleaseS > 0.0f && !sampleSurCue && echantillonClavier[0];
+  if (transClavierOk) {
+    strncpy(transClavier.nom, echantillonClavier, sizeof(transClavier.nom) - 1);
+    transClavier.nom[sizeof(transClavier.nom) - 1] = 0;
+    transClavier.bloc = blocClavier; transClavier.gain = gainClavier; transClavier.canal = canalClavier;
+  }
   cueGen = cueGen + 1;
   __sync_synchronize();                      // the parameters and the generation before the sequence
   transSeq = transSeq + 1;
@@ -1656,15 +1714,22 @@ void arriveeDeCue(float delayS, float attackS, float sustain, float releaseOutS,
 String etatEnveloppes() {
   uint8_t enRelease = 0;
   for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif && voixEch[v].env.stop) enRelease++;
-  char s[200];
+  char s[320];
+  uint8_t listesSortantes = 0;
+  if (banques) for (uint8_t li = 0; li < banques[banqueActive].n; li++) listesSortantes += banques[banqueActive].listes[li].sortante;
   snprintf(s, sizeof s, "{\"cue\":%.3f,\"cue_target\":%.3f,\"kit\":%.3f,\"synth\":%.3f,"
-                        "\"releasing_voices\":%u,\"gen\":%lu}",
-           cueEnv.now, cueEnv.target, kitEnv.now, synthEnv.now, (unsigned)enRelease, (unsigned long)cueGen);
+                        "\"releasing_voices\":%u,\"gen\":%lu,\"leaving\":%s,\"leaving_level\":%.3f,"
+                        "\"leaving_keyboard\":%s,\"leaving_lists\":%u}",
+           cueEnv.now, cueEnv.target, kitEnv.now, synthEnv.now, (unsigned)enRelease, (unsigned long)cueGen,
+           outActive ? "true" : "false", outActive ? outEnv.now : 0.0f,
+           (outActive && outClavierOk) ? "true" : "false", (unsigned)(outActive ? listesSortantes : 0));
   return String(s);
 }
 
 bool kitRelache()    { if (!kitReleased) return false; kitReleased = false; return true; }
 bool synthRelachee() { if (!synthReleased) return false; synthReleased = false; return true; }
+
+uint8_t canalDuKit() { return canalSfz; }
 
 void fixerCanaux(uint8_t clavier, uint8_t sfz) {
   canalClavier = clavier > 16 ? 0 : clavier;
@@ -1711,7 +1776,7 @@ void libererPlaits() {
  * fichier » — le cas de play-sf sur cue ; le clavier passe un ecart. `gain`
  * negatif = non precise, donc plein. */
 bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiTons,
-                           uint32_t bloc, float velo) {
+                           uint32_t bloc, float velo, bool sortante) {
   if (moteurCourant != -2) return false;
   const int i = SampleStore::indexDe(nom);
   if (i < 0) return false;
@@ -1744,7 +1809,8 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   /* Une voix de play-sf n'est pas un clip (§196) : le fichier entier, aucune
    * liste — une voix volee a une liste ne doit rien en garder. */
   vo->liste  = -1; vo->clip = 0; vo->debutT = 0; vo->finT = 0; vo->fondu = 0.0f;
-  vo->gen    = cueGen; vo->envInit = true;   // the cue's envelope, filled at the next block (§211)
+  /* Its cue's envelope, filled at the next block (§211) — the leaving cue's for its keyboard. */
+  vo->gen    = sortante ? outGen : cueGen; vo->envInit = sortante ? 2 : 1;
   __sync_synchronize();
   vo->actif  = true;
   return true;
@@ -1775,6 +1841,7 @@ uint8_t fixerGainBloc(uint32_t bloc, float gain) {
     if (vo.actif && vo.bloc == bloc) { vo.cible = vo.velo * g; n++; }
   }
   if (bloc == blocClavier) gainClavier = g;
+  if (bloc == outClavier.bloc) outClavier.gain = g;   // the leaving cue's keyboard (§211)
   return n;
 }
 
@@ -2094,7 +2161,7 @@ void _headCounts(const Liste& L, uint8_t& streamed, uint8_t& ready, uint8_t& wit
 
 }  // namespace
 
-void poserListes(const String& params) {
+void poserListes(const String& params, bool keepLeaving) {
   VerrouListes v;
   const Champs ch = _champs(params);
   const int nl = _nbParties(ch.liste, ',');
@@ -2110,6 +2177,25 @@ void poserListes(const String& params) {
       break;
     }
     if (_remplirListe(b->listes[b->n], ch, i, nullptr)) b->n++;
+  }
+  /* THE LEAVING CUE'S LISTS, kept playable during its Release (§211): those the arriving cue
+   * does not continue, marked `sortante`. Not those of an older leaving cue: one at a time. */
+  if (keepLeaving && banques) {
+    const Banque& an = banques[banqueActive];
+    for (uint8_t k = 0; k < an.n; k++) {
+      const Liste& L = an.listes[k];
+      if (L.sortante || !L.bloc) continue;
+      bool continuee = false;
+      for (uint8_t j = 0; j < b->n; j++) if (b->listes[j].bloc == L.bloc) { continuee = true; break; }
+      if (continuee) continue;
+      if (b->n >= LISTES_MAX) {
+        Serial.printf("[audio] play list %lu de la cue qui part : plus de place, elle se tait\n", (unsigned long)L.bloc);
+        continue;
+      }
+      b->listes[b->n] = L;
+      b->listes[b->n].sortante = 1;
+      b->n++;
+    }
   }
   _proposer(b);
 }

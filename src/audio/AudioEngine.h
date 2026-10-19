@@ -100,6 +100,7 @@ void noteOn(uint8_t canal, uint8_t note, uint8_t velocity);
 void noteOff(uint8_t canal, uint8_t note);
 /* The channels of the play-sf keyboard and of the SFZ kit, from the cue (0 = all). */
 void fixerCanaux(uint8_t clavier, uint8_t sfz);
+uint8_t canalDuKit();   // the kit's channel now — kept for a kit that leaves in a Release (§211)
 /* THE ENVELOPE OF A CUE (MESURES §211), the app's DASDR of a case. Called by the cue
  * that arrives, BEFORE it triggers its sounds: its Delay, Attack and Sustain shape what
  * it plays; the sounds of the cue that leaves fall in `releaseOutS` (its Release) instead
@@ -235,9 +236,11 @@ void echantillonParti(const char* nom);
 /* `bloc` : l'identifiant du bloc de la composition qui l'a lance, 0 = aucun —
  * c'est par lui que fixerGainBloc() retrouve la voix pendant qu'elle joue.
  * `velo` : la part de la velocite (1 sur cue) ; la voix sonne a velo x gain. */
+/* `sortante` (§211): a note on the leaving cue's keyboard, during its Release — the voice
+ * takes the leaving cue's envelope. */
 bool declencherEchantillon(const char* nom, bool boucle = false,
                            float gain = 1.0f, float demiTons = 0.0f,
-                           uint32_t bloc = 0, float velo = 1.0f);
+                           uint32_t bloc = 0, float velo = 1.0f, bool sortante = false);
 /* LE VOLUME D'UN BLOC PENDANT QU'IL JOUE (MESURES §165) : toutes ses voix y
  * glissent en ~10 ms, et le clavier le prend si le bloc est le sien. Rend le
  * nombre de voix touchees — 0 : le bloc ne joue pas, ce n'est pas une erreur. */
@@ -284,7 +287,9 @@ constexpr uint8_t CLIPS_MAX  = 32;    // clips par liste
 /* Les listes d'une CUE — toutes, a la place des precedentes. Une liste dont
  * le bloc etait deja arme (une chaine de cellules : meme bloc d'une cue a la
  * suivante) garde le clip qui joue ; les autres se taisent. Vide : aucune. */
-void poserListes(const String& params);
+/* `keepLeaving` (§211): the leaving cue has a Release — its lists the arriving cue does not
+ * continue stay armed, playable, until the Release ends. */
+void poserListes(const String& params, bool keepLeaving = false);
 /* "Preload": the heads of the streamed clips of the marked lists of the NEXT cue, read ahead. */
 void preloadLists(const String& params);
 /* An armed list's heads: streamed clips, ready heads, clips WITHOUT a head (they will not play). */

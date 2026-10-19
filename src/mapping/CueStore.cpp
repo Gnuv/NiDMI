@@ -340,7 +340,10 @@ void _appliquer(const Cue& c) {
     AudioEngine::fixerDeclenchementSurCue(surCue);
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
-    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
+    /* A kit that leaves in the last cue's Release keeps its channel until then (§211). */
+    const bool kitSortant = !cheminSfz.length() && releaseSortant > 0.0f;
+    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(),
+                             kitSortant ? AudioEngine::canalDuKit() : (uint8_t)canalSfz.toInt());
 
     /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
      * longer instead of it. A cue without `synth=` silences the voice (its state
@@ -423,7 +426,7 @@ void _appliquer(const Cue& c) {
     }
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
        charge. Une cue sans liste les retire (une banque vide). */
-    AudioEngine::poserListes(c.params);
+    AudioEngine::poserListes(c.params, /*keepLeaving=*/releaseSortant > 0.0f);   // §211
     /* L'INSTRUMENT SFZ DE LA CUE (§207-208) : la cue DEPOSE son voeu et passe
        son chemin. La lecture du kit est le travail de la tache sd-card (environ
        une seconde par Mo : ni la boucle ni async_tcp n'attendent la SD), puis la
@@ -435,8 +438,7 @@ void _appliquer(const Cue& c) {
       /* Which block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
       /* A kit that leaves in the last cue's release is silenced at its end (§211): its
        * bloc and gain stay until then. */
-      const bool kitEnRelease = !cheminSfz.length() && releaseSortant > 0.0f;
-      if (!kitEnRelease) {
+      if (!kitSortant) {
         SfzStore::fixerBloc((uint32_t)blocSfz.toInt(), gainSfz.length() ? gainSfz.toFloat() : 1.0f);
         if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
           Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
@@ -466,8 +468,8 @@ void _appliquer(const Cue& c) {
       Effects::off();
     }
     /* In a release, the effects stay as they were until the next cue sets its own: a
-     * filtered sound that fades does not lose its filter halfway. */
-    AudioEngine::poserListes(String());
+     * filtered sound that fades does not lose its filter halfway. Its lists stay playable. */
+    AudioEngine::poserListes(String(), /*keepLeaving=*/releaseSortant > 0.0f);
   }
 
   /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
