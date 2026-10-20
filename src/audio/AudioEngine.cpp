@@ -349,6 +349,7 @@ uint32_t voixHorloge = 0;
  * loop configures a slot's instruments only while it is FREE, or after posting its arrival. */
 enum : uint8_t { SLOT_FREE = 0, SLOT_CURRENT, SLOT_LEAVING, SLOT_CUTTING, SLOT_DRAINED };
 enum : uint8_t { REQ_NONE = 0, REQ_ARRIVE, REQ_LEAVE, REQ_CUT };
+constexpr uint8_t SLOT_AUCUN = 0xFF;          // a list whose slot was drained: it answers nothing
 constexpr float SLOT_CUT_S = 0.010f;          // the brief fade-out of a cut
 struct Clavier { char nom[48] = ""; uint32_t bloc = 0; float gain = 1.0f; uint8_t canal = 0; bool surCue = true; };
 struct CueSlot {
@@ -424,9 +425,11 @@ static inline uint8_t _slotIci() {
 
 /* THE SLOT DRAINED (audio task, §212): its output is already silent — its voices stop, its
  * kit's voices too, its effects forget their tail. The loop disarms the rest and frees it. */
+static void _desarmerListes(uint8_t s);   // with the play lists, below
 static void _drainSlot(uint8_t s) {
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (voixEch[v].actif && voixEch[v].slot == s) voixEch[v].actif = false;
+  _desarmerListes(s);
   if (slots[s].kit >= 0) SfzStore::toutEteindre((uint8_t)slots[s].kit);
   Effects::clear(s);
   slots[s].env = EnvCue{};
@@ -515,6 +518,14 @@ volatile bool mesureVu = false;
 static inline bool _uneVoixSonne() {
   for (uint8_t v = 0; v < VOIX_MAX; v++) if (voixEch[v].actif) return true;
   return false;
+}
+
+/* A drained slot's lists leave with it: still in the bank until the next cue posts one, they no
+ * longer answer a note (the audio task writes its own bank, as it does `courant`) — §212. */
+static void _desarmerListes(uint8_t s) {
+  if (!banques) return;
+  for (uint8_t li = 0; li < banques[banqueActive].n; li++)
+    if (banques[banqueActive].listes[li].slot == s) banques[banqueActive].listes[li].slot = SLOT_AUCUN;
 }
 
 /* La voix libre, sinon la PLUS ANCIENNE. */
@@ -670,7 +681,7 @@ void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   vo->fondu = 0.0f;
   vo->age   = ++voixHorloge;
   vo->picG  = 0; vo->picD = 0;
-  vo->slot  = L.slot;                  // its list's cue slot (§212)
+  vo->slot  = (L.slot < CUE_SLOTS) ? L.slot : _slotIci();   // its list's cue slot (§212)
   __sync_synchronize();
   vo->actif = true;
 }
@@ -1780,10 +1791,11 @@ String etatSlots() {
     char t[300];
     snprintf(t, sizeof t, "%s{\"slot\":%u,\"state\":\"%s\",\"level\":%.3f,\"target\":%.3f,\"cut\":%.3f,"
                           "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"kit\":%d,"
-                          "\"synth\":%d,\"gen\":%lu}",
+                          "\"synth\":%d,\"synth_on\":%s,\"gen\":%lu}",
              s ? "," : "", (unsigned)s, NOMS[c.state < 5 ? c.state : 0], c.env.now, c.env.target, c.cut,
              (unsigned)voix, (unsigned)listes, c.clavier.surCue ? "" : c.clavier.nom, (unsigned)c.clavier.canal,
-             (int)c.kit, (int)c.synth, (unsigned long)c.gen);
+             (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
+             (unsigned long)c.gen);
     j += t;
   }
   return j + String("],\"current\":") + (int)slotCurrent + ",\"leaving\":" + (int)slotLeaving;
