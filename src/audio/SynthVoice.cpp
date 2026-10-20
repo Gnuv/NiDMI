@@ -54,9 +54,13 @@ TaskHandle_t         task = nullptr;
 volatile uint32_t    configureSeq = 0;
 /* THE GUARD OF THE TWO (§212): the voices render one after the other on core 0, above the SD
  * tasks (the streams of the play lists, the kit loads) and the idle task the watchdog watches.
- * Two heavy engines together left core 0 1 % idle (measured, engine 8): past 90 % of a block
- * for both, 40 blocks in a row, the voice a cue configured FIRST — the leaving cue's — stops. */
-uint32_t             bothOverInRow = 0;
+ * Two heavy engines together left core 0 1 % idle (measured, engine 8): when both play, their
+ * renders over 40 blocks (80 renders) taking more than 85 % of those 40 blocks — what is left is
+ * for TCP/IP, MIDI, the SD and the idle task —, the voice a cue
+ * configured FIRST — the leaving cue's — stops. An average: the task, woken by each voice's
+ * take, renders them in turn, rarely in the same pass. */
+uint64_t             bothCycles = 0;
+uint32_t             bothRenders = 0;
 bool                 bothSaid = false;
 
 inline Voice* voiceOf(uint8_t v) { return v < VOICES ? &voices[v] : nullptr; }
@@ -82,19 +86,36 @@ void render(Voice& s, float* out) {
 void taskLoop(void*) {
   const uint32_t limit = (uint32_t)((uint64_t)getCpuFrequencyMhz() * 1000000ULL * FRAMES
                                     / AudioEngine::SAMPLE_RATE * 9 / 10);
+  const uint32_t limitBoth = limit / 90 * 85;   // the guard of the two (below)
   for (;;) {
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5));
     /* Both voices, a block at a time each, until both are LEAD blocks ahead. */
     for (bool more = true; more;) {
       more = false;
-      uint32_t pass = 0;
-      uint8_t renderedNow = 0;
       for (Voice& s : voices) {
         if (!(s.enabled && !s.overloaded && s.voice && s.produced - s.consumed < LEAD)) continue;
         const uint32_t t = ESP.getCycleCount();
         render(s, s.ring + (s.produced % RING) * FRAMES);
         const uint32_t c = ESP.getCycleCount() - t;
-        pass += c; renderedNow++;
+        const bool deux = voices[0].enabled && !voices[0].overloaded && voices[0].voice
+                       && voices[1].enabled && !voices[1].overloaded && voices[1].voice;
+        if (deux) {
+          bothCycles += c;
+          if (++bothRenders >= 2 * OVER_RENDERS) {
+            if (bothCycles > (uint64_t)OVER_RENDERS * limitBoth) {
+              Voice& older = (voices[0].configured <= voices[1].configured) ? voices[0] : voices[1];
+              older.overloaded = true;
+              if (!bothSaid) {
+                bothSaid = true;
+                Serial.printf("[audio] two synth voices over 85 %% of core 0: voice %u (the older cue's) stopped\n",
+                              (unsigned)(&older - voices));
+              }
+            }
+            bothCycles = 0; bothRenders = 0;
+          }
+        } else {
+          bothCycles = 0; bothRenders = 0;
+        }
         __sync_synchronize();                   // the samples before the counter, seen in that order
         s.produced = s.produced + 1;
         s.rendered = s.rendered + 1;
@@ -113,22 +134,6 @@ void taskLoop(void*) {
           s.overInRow = 0;
         }
         more = true;
-      }
-      if (renderedNow == VOICES) {
-        if (pass > limit) {
-          if (++bothOverInRow >= OVER_RENDERS) {
-            bothOverInRow = 0;
-            Voice& older = (voices[0].configured <= voices[1].configured) ? voices[0] : voices[1];
-            older.overloaded = true;
-            if (!bothSaid) {
-              bothSaid = true;
-              Serial.printf("[audio] two synth voices over 90 %% of a block on core 0: voice %u (the older cue's) stopped\n",
-                            (unsigned)(&older - voices));
-            }
-          }
-        } else {
-          bothOverInRow = 0;
-        }
       }
     }
   }
