@@ -38,6 +38,9 @@ constexpr int PIN_BCLK = 1;   // D0
 constexpr int PIN_LRCK = 2;   // D1
 constexpr int PIN_DIN  = 3;   // D2
 constexpr uint32_t SAMPLE_RATE = 48000;
+/* TWO CUE SLOTS (MESURES §212): the departure case and the arrival case play at the same time
+ * during a cross-fade — no more. */
+constexpr uint8_t CUE_SLOTS = 2;
 constexpr int      VOIX        = 4;
 
 // Démarre l'I2S et la tâche si ce n'est pas déjà fait. Sûr à appeler souvent.
@@ -96,26 +99,43 @@ void validerConfigBoot();
  * test tone, the app's socket). Each instrument listens to its track's channel —
  * the lists (`lch`), the SFZ kit (`sfzch`), the play-sf keyboard (`keych`), the
  * synth voice (`synthch`), 0 = all — as in the browser (MESURES §210). */
-void noteOn(uint8_t canal, uint8_t note, uint8_t velocity);
-void noteOff(uint8_t canal, uint8_t note);
-/* The channels of the play-sf keyboard and of the SFZ kit, from the cue (0 = all). */
+/* WHICH CUE A NOTE IS FOR (§212): the scripts of the cue that plays feed ITS instruments, the
+ * scripts of the cue in its Release feed ITS own — each slot's instruments hear their own
+ * branch of the chain. Everything else (the permanent links of MAIN, the sensors, the app)
+ * reaches both. */
+enum class Pour : uint8_t { TOUS = 0, COURANTE, SORTANTE };
+void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour = Pour::TOUS);
+void noteOff(uint8_t canal, uint8_t note, Pour pour = Pour::TOUS);
+/* The channels of the play-sf keyboard and of the SFZ kit of the cue that plays (0 = all). */
 void fixerCanaux(uint8_t clavier, uint8_t sfz);
-uint8_t canalDuKit();   // the kit's channel now — kept for a kit that leaves in a Release (§211)
-/* THE ENVELOPE OF A CUE (MESURES §211), the app's DASDR of a case. Called by the cue
- * that arrives, BEFORE it triggers its sounds: its Delay, Attack and Sustain shape what
- * it plays; the sounds of the cue that leaves fall in `releaseOutS` (its Release) instead
- * of being cut — 0: cut, as before, by the cue itself. `kitKeep`, `synthKeep`: the cue
- * plays an SFZ kit, the synth voice (they go on, or start, or leave in the release).
- * Applied by the audio task at its next block. */
-void arriveeDeCue(float delayS, float attackS, float sustain, float releaseOutS,
-                  bool kitKeep, bool synthKeep);
-/* loopTask, once each: a leaving kit / synth voice reached silence at the end of its
- * release — the cue sequencer silences it (SfzStore::proposer(""), SynthVoice off). */
-bool kitRelache();
-bool synthRelachee();
-/* Status: the arriving cue's level and target, the kit's and the synth voice's, the
- * voices in a release — read by the audio task without a lock (a reading, not a state). */
-String etatEnveloppes();
+
+/* ── THE CUE SLOTS (MESURES §212) ────────────────────────────────────────────
+ * The cue sequencer (CueStore, loopTask) moves the cues through the two slots; the audio
+ * task applies each request at the start of its next block.
+ *   arriverSlot  the arriving cue takes slot `slot` (it must be FREE): its Delay, Attack and
+ *                Sustain shape the slot's output; it becomes the CURRENT slot, and what the
+ *                setters below arm (keyboard, channels) is its own;
+ *   quitterSlot  the cue that played leaves in its Release (LEAVING): its instruments still
+ *                play, their output falls with it;
+ *   couperSlot   10 ms to silence (CUTTING): a Release of 0, a third jump;
+ * then the audio task DRAINS the slot (its voices stopped, its effects cleared); the loop
+ * disarms the rest (nettoyer: synth voice, kit, keyboard) and frees it (libererSlot). */
+enum EtatSlot : uint8_t { SLOT_LIBRE = 0, SLOT_COURANT, SLOT_SORTANT, SLOT_COUPE, SLOT_VIDE };
+uint8_t etatSlot(uint8_t slot);
+int8_t  slotCourant();                // -1: no cue has played yet (or STOP freed it)
+int8_t  slotSortant();                // -1: none in a Release
+void arriverSlot(uint8_t slot, float delayS, float attackS, float sustain);
+void quitterSlot(uint8_t slot, float releaseS);
+void couperSlot(uint8_t slot);
+void libererSlot(uint8_t slot);
+/* The slot's SFZ engine and synth voice (-1: none) — the cue picks them (a kit or a voice
+ * that goes on from the leaving cue is handed over). */
+int8_t kitDuSlot(uint8_t slot);
+int8_t synthDuSlot(uint8_t slot);
+void   fixerKitSlot(uint8_t slot, int8_t moteur);
+void   fixerSynthSlot(uint8_t slot, int8_t voix);
+/* The slots, for /api/audio/status: state, envelope level and target, what is armed. */
+String etatSlots();
 /* THE CAPTURE OF WHAT GOES TO THE DAC (diagnostics, §210): `frames` stereo frames
  * from the next block on, into PSRAM; `capture` gives them back (`finie` when the
  * count is reached). What the DAC receives — after the volume and the gate. */
@@ -236,11 +256,10 @@ void echantillonParti(const char* nom);
 /* `bloc` : l'identifiant du bloc de la composition qui l'a lance, 0 = aucun —
  * c'est par lui que fixerGainBloc() retrouve la voix pendant qu'elle joue.
  * `velo` : la part de la velocite (1 sur cue) ; la voix sonne a velo x gain. */
-/* `sortante` (§211): a note on the leaving cue's keyboard, during its Release — the voice
- * takes the leaving cue's envelope. */
+/* `slot` (§212): the cue slot the voice plays in — -1, the cue that plays. */
 bool declencherEchantillon(const char* nom, bool boucle = false,
                            float gain = 1.0f, float demiTons = 0.0f,
-                           uint32_t bloc = 0, float velo = 1.0f, bool sortante = false);
+                           uint32_t bloc = 0, float velo = 1.0f, int8_t slot = -1);
 /* LE VOLUME D'UN BLOC PENDANT QU'IL JOUE (MESURES §165) : toutes ses voix y
  * glissent en ~10 ms, et le clavier le prend si le bloc est le sien. Rend le
  * nombre de voix touchees — 0 : le bloc ne joue pas, ce n'est pas une erreur. */
@@ -287,9 +306,10 @@ constexpr uint8_t CLIPS_MAX  = 32;    // clips par liste
 /* Les listes d'une CUE — toutes, a la place des precedentes. Une liste dont
  * le bloc etait deja arme (une chaine de cellules : meme bloc d'une cue a la
  * suivante) garde le clip qui joue ; les autres se taisent. Vide : aucune. */
-/* `keepLeaving` (§211): the leaving cue has a Release — its lists the arriving cue does not
- * continue stay armed, playable, until the Release ends. */
-void poserListes(const String& params, bool keepLeaving = false);
+/* `slot` (§212): the cue slot of these lists (-1: the cue that plays). `garder`: the slot of
+ * the cue in its Release — its lists the arriving cue does not continue stay armed in their
+ * slot, playable, until it is drained (-1: none). */
+void poserListes(const String& params, int8_t slot = -1, int8_t garder = -1);
 /* "Preload": the heads of the streamed clips of the marked lists of the NEXT cue, read ahead. */
 void preloadLists(const String& params);
 /* An armed list's heads: streamed clips, ready heads, clips WITHOUT a head (they will not play). */

@@ -42,6 +42,12 @@ constexpr size_t BUDGET_PSRAM = 4 * 1024 * 1024;
 constexpr int SIMULTANES = 4;
 // A path (relative to /sfz) longer than this is refused, never cut.
 constexpr int CHEMIN_MAX = 96;
+/* TWO ENGINES (§212): during a cross-fade the leaving cue's kit and the arriving cue's both
+ * play — the cue slots take one each (a kit that goes on from a cue to the next is handed
+ * over with its ringing voices). The instruments themselves stay in the one pool: two
+ * engines playing the same kit share its PCM. Engine 0 lives in internal RAM, engine 1 in
+ * PSRAM, taken the first time a cue asks for it. */
+constexpr uint8_t MOTEURS = 2;
 
 // ── Any task: deposit, never wait ───────────────────────────────────────────
 /* Make `chemin` (relative to /sfz, e.g. "kit-test/kit.sfz") the playing
@@ -50,7 +56,7 @@ constexpr int CHEMIN_MAX = 96;
  * erreur() for a refusal), the audio task adopts it. Empty chemin: the SFZ
  * goes silent now (its notes stop). False with `raison` only for a request
  * that cannot even be tried (path too long or climbing out of /sfz). */
-bool proposer(const char* chemin, String& raison);
+bool proposer(uint8_t moteur, const char* chemin, String& raison);
 /* Housekeeping, called after each cue apply: `employesCsv` is the comma list
  * of the sfz= paths the WHOLE cue list still names. The sd-card task retires
  * the others (freed RETRAIT_MARGIN_MS later, once drained). */
@@ -60,25 +66,26 @@ void entretenir(const String& employesCsv);
 void servir();
 
 // ── Audio task only ─────────────────────────────────────────────────────────
-void adopter();                       // block start: swap the proposed instrument
-bool notesArmees();                   // the current cue routes notes here
-void noteOn(uint8_t note, uint8_t velo);
-void noteOff(uint8_t note);
+void adopter();                       // block start: swap the proposed instruments, both engines
+bool notesArmees(uint8_t moteur);     // a cue routes notes to that engine
+void noteOn(uint8_t moteur, uint8_t note, uint8_t velo);
+void noteOff(uint8_t moteur, uint8_t note);
+void toutEteindre(uint8_t moteur);    // its cue slot is emptied: its voices stop now (the output is silent)
 
 // ── The block's fader: the cue says which block asked for the kit, and its gain ──
 /* `sfzbloc=<id>;sfzgain=<g>` in the cue line: the app's id of the block that names this kit, and its
  * effective gain (track, group and main faders included). The living path is the sampler's own,
  * POST /api/audio/sampler/gain (bloc=…&gain=…): fixerGainBloc answers 1 when the block is the kit's.
  * Any task writes the target; the audio task glides to it (a block of 2.5 ms at a time: no zipper). */
-void     fixerBloc(uint32_t bloc, float gain);
-uint8_t  fixerGainBloc(uint32_t bloc, float gain);
-float    gainLisse();                 // audio task only: the gain to apply to THIS block of audio
-uint32_t blocId();                    // status: the block that asked for the kit
-float    gainCible();                 // status: its target gain
+void     fixerBloc(uint8_t moteur, uint32_t bloc, float gain);
+uint8_t  fixerGainBloc(uint32_t bloc, float gain);   // the engines of that block
+float    gainLisse(uint8_t moteur);   // audio task only: the gain to apply to THIS block of audio
+uint32_t blocId(uint8_t moteur);      // status: the block that asked for the kit
+float    gainCible(uint8_t moteur);   // status: its target gain
 
-/* Renders the block into g/d (cleared first, float — the caller converts at
+/* Renders the engine's block into g/d (cleared first, float — the caller converts at
  * its int16 bus). False when nothing plays; buffers untouched then. */
-bool rendreBloc(float* g, float* d, uint32_t trames);
+bool rendreBloc(uint8_t moteur, float* g, float* d, uint32_t trames);
 
 // ── Any task (the MIDI side) ────────────────────────────────────────────────
 /* A Control Change reached the board (MidiRouter::ccEntrant, after the script
@@ -103,20 +110,21 @@ String  lister(const char* dossier);
  * {"sd":"ok","folder":"/sfz","budget":4194304,"kits":[{"path","bytes","wav_bytes","wav_count"}],
  *  "truncated":false} — `budget`: the PSRAM the board allows its kits, all together. */
 String  listerKits();
-bool    charge();                     // an instrument plays (or is proposed)
-bool    actif();                      // the engine has something to render: an instrument, or voices still draining
+/* The status of ONE engine — the route passes the engine of the cue that plays. */
+bool    charge(uint8_t moteur);       // an instrument plays (or is proposed)
+bool    actif();                      // an engine has something to render: an instrument, or voices still draining
 bool    chargement();                 // a wish is not served yet (loading, or waiting for the card)
 int     enMemoire();                  // instruments held in PSRAM (loaded, retiring included)
-String  demande();                    // the path asked for last ("" = silence)
-String  chemin();                     // the playing instrument, "" when silent
-int     regions();
-int     samples();
+String  demande(uint8_t moteur);      // the path asked for last ("" = silence)
+String  chemin(uint8_t moteur);       // the playing instrument, "" when silent
+int     regions(uint8_t moteur);
+int     samples(uint8_t moteur);
 size_t  octets();                     // int16 PCM held, all instruments
-int     voixActives();
+int     voixActives(uint8_t moteur);
 uint32_t generation();                // bumps on every instrument change
-uint32_t notesRecues();               // diagnostic: notes that reached the engine (§208)
-bool    moteurInstValide();          // diagnostic: the engine's instrument pointer (§208)
-String  regionPremiere();            // diagnostic: the parsed first region, as the card sees it (§208)
+uint32_t notesRecues();               // diagnostic: notes that reached the engines (§208)
+bool    moteurInstValide(uint8_t moteur);   // diagnostic: the engine's instrument pointer (§208)
+String  regionPremiere(uint8_t moteur);     // diagnostic: the parsed first region, as the card sees it (§208)
 void blocRendu();  void evenementVu();     // the audio loop's heartbeat, and popped events (§208)
 uint32_t blocsRendus(); uint32_t evenementsVus();
 String  erreur();                     // the last refusal, "" if none

@@ -159,28 +159,33 @@ void setupAudioAPI(AsyncWebServer& server) {
            l'app le dise AVANT le concert. gen bouge a chaque changement. */
         /* THE SYNTH VOICE AND THE EFFECTS (§210): what plays, what the guard
            stopped, how late the core 0 task was. */
-        json += "\"synth\":" + SynthVoice::status() + ",";
-        json += "\"fx\":" + Effects::status() + ",";
-        json += "\"env\":" + AudioEngine::etatEnveloppes() + ",";   // the cue envelopes (§211)
+        /* THE CUE THAT PLAYS (§212): its synth voice, its effects, its kit — and the two
+           slots, with what each one plays (`slots`, `current`, `leaving`). */
+        const uint8_t ici = (AudioEngine::slotCourant() >= 0) ? (uint8_t)AudioEngine::slotCourant() : 0;
+        const int8_t voixIci = AudioEngine::synthDuSlot(ici);
+        const uint8_t kitIci = (AudioEngine::kitDuSlot(ici) >= 0) ? (uint8_t)AudioEngine::kitDuSlot(ici) : 0;
+        json += "\"synth\":" + SynthVoice::status(voixIci >= 0 ? (uint8_t)voixIci : 0) + ",";
+        json += "\"fx\":" + Effects::status(ici) + ",";
+        json += "\"slots\":" + AudioEngine::etatSlots() + ",";
         json += "\"sfz\":{";
-        json += "\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin()) + "\",";
-        json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande()) + "\",";
+        json += "\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin(kitIci)) + "\",";
+        json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande(kitIci)) + "\",";
         json += "\"chargement\":" + String(SfzStore::chargement() ? "true" : "false") + ",";
         json += "\"en_memoire\":" + String(SfzStore::enMemoire()) + ",";
-        json += "\"bloc\":" + String((unsigned)SfzStore::blocId()) + ",";
-        json += "\"gain\":" + String(SfzStore::gainCible(), 3) + ",";
-        json += "\"regions\":" + String(SfzStore::regions()) + ",";
-        json += "\"samples\":" + String(SfzStore::samples()) + ",";
+        json += "\"bloc\":" + String((unsigned)SfzStore::blocId(kitIci)) + ",";
+        json += "\"gain\":" + String(SfzStore::gainCible(kitIci), 3) + ",";
+        json += "\"regions\":" + String(SfzStore::regions(kitIci)) + ",";
+        json += "\"samples\":" + String(SfzStore::samples(kitIci)) + ",";
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
-        json += "\"voix\":" + String(SfzStore::voixActives()) + ",";
+        json += "\"voix\":" + String(SfzStore::voixActives(0) + SfzStore::voixActives(1)) + ",";
         json += "\"gen\":" + String((unsigned)SfzStore::generation()) + ",";
-        json += "\"arme\":" + String(SfzStore::notesArmees() ? "true" : "false") + ",";
+        json += "\"arme\":" + String(SfzStore::notesArmees(kitIci) ? "true" : "false") + ",";
         json += "\"notes\":" + String((unsigned)SfzStore::notesRecues()) + ",";
         json += "\"blocs\":" + String((unsigned)SfzStore::blocsRendus()) + ",";
         json += "\"evenements\":" + String((unsigned)SfzStore::evenementsVus()) + ",";
         json += "\"moteur\":" + String(AudioEngine::moteurActif()) + ",";
-        json += "\"inst\":" + String(SfzStore::moteurInstValide() ? "true" : "false") + ",";
-        json += "\"region0\":" + SfzStore::regionPremiere() + ",";
+        json += "\"inst\":" + String(SfzStore::moteurInstValide(kitIci) ? "true" : "false") + ",";
+        json += "\"region0\":" + SfzStore::regionPremiere(kitIci) + ",";
         json += "\"erreur\":\"" + SfzStore::echapper(SfzStore::erreur()) + "\"},";
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
@@ -346,8 +351,10 @@ void setupAudioAPI(AsyncWebServer& server) {
      * reverb — the cue's keys (lowpass, lpblocs, lpcutoff, lpq, reverb, rvwet,
      * rvdecay, rvdamp), only those sent change. A game gesture: allowed under
      * the concert lock. GET: their state. */
+    /* The cue that plays (§212): its effects. */
     server.on("/api/audio/fx", HTTP_GET, [](AsyncWebServerRequest *request){
-        request->send(200, "application/json", Effects::status());
+        const int8_t sc = AudioEngine::slotCourant();
+        request->send(200, "application/json", Effects::status(sc >= 0 ? (uint8_t)sc : 0));
     });
     server.on("/api/audio/fx", HTTP_POST, [](AsyncWebServerRequest *request){
         static const char* const KEYS[] = {"lowpass", "lpblocs", "lpcutoff", "lpq",
@@ -357,11 +364,13 @@ void setupAudioAPI(AsyncWebServer& server) {
             if (request->hasParam(k, true))
                 keys += String(k) + "=" + request->getParam(k, true)->value() + ";";
         String reason;
-        if (!Effects::applyKeys(keys, reason)) {
+        const int8_t sc = AudioEngine::slotCourant();
+        const uint8_t ici = (sc >= 0) ? (uint8_t)sc : 0;
+        if (!Effects::applyKeys(ici, keys, reason)) {
             request->send(507, "application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");
             return;
         }
-        request->send(200, "application/json", Effects::status());
+        request->send(200, "application/json", Effects::status(ici));
     });
 
     /* Réglages Plaits — la charge d'une CUE. Occasionnelle et courte, donc dans
@@ -412,8 +421,11 @@ void setupAudioAPI(AsyncWebServer& server) {
         /* THE SYNTH VOICE'S ENGINE (§210): a write, nothing allocated — unlike
          * `engine` above (the exclusive Plaits, refused on this card), it is a
          * game gesture, allowed under the concert lock. */
-        if (request->hasParam("synth_engine", true))
-            SynthVoice::setEngine(request->getParam("synth_engine", true)->value().toInt());
+        if (request->hasParam("synth_engine", true)) {
+            const int8_t sc = AudioEngine::slotCourant();
+            const int8_t sv = (sc >= 0) ? AudioEngine::synthDuSlot((uint8_t)sc) : -1;   // the cue that plays (§212)
+            if (sv >= 0) SynthVoice::setEngine((uint8_t)sv, request->getParam("synth_engine", true)->value().toInt());
+        }
         AudioEngine::Params p = AudioEngine::params();
         auto lire = [&](const char* nom, float& dest){
             if (request->hasParam(nom, true))
@@ -560,14 +572,20 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
         }
+        /* The engine of the cue that plays (§212): its own, or the one the other slot does not
+         * hold. */
+        const int8_t sc = AudioEngine::slotCourant();
+        const uint8_t ici = (sc >= 0) ? (uint8_t)sc : 0;
+        int8_t k = AudioEngine::kitDuSlot(ici);
+        if (k < 0) { k = (AudioEngine::kitDuSlot(ici ^ 1) == 0) ? 1 : 0; AudioEngine::fixerKitSlot(ici, k); }
         /* Le bloc de l'app qui demande le kit, et son gain (faders compris) : la route vivante
          * du fader le retrouvera par cet identifiant, comme pour un son. */
         if (request->hasParam("bloc", true))
-            SfzStore::fixerBloc((uint32_t)request->getParam("bloc", true)->value().toInt(),
+            SfzStore::fixerBloc((uint8_t)k, (uint32_t)request->getParam("bloc", true)->value().toInt(),
                                 request->hasParam("gain", true)
                                     ? request->getParam("gain", true)->value().toFloat() : 1.0f);
         String raison;
-        if (!SfzStore::proposer(chemin.c_str(), raison)) {
+        if (!SfzStore::proposer((uint8_t)k, chemin.c_str(), raison)) {
             request->send(422, "application/json",
                 "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(raison) + "\"}");
             return;
@@ -1114,6 +1132,9 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
                       + ",\"n\":" + String((unsigned)g_midiRouter.nEmplacements())
                       + ",\"plafond\":" + String((unsigned)MidiRouter::PLAFOND_SCRIPTS_MAP)
                       + ",\"permanents\":" + String((unsigned)g_midiRouter.nMaillonsPermanents())
+                      /* La branche de la cue qui part, pendant son Release (§212) : ses maillons
+                       * de cue, rang pour rang ceux qui suivent les permanents. */
+                      + ",\"sortants\":" + g_midiRouter.nomsSortantsJson()
                       + ",\"fichiers\":" + ScriptStore::listerJson(lieuDe(request, false)) + "}");
     });
 

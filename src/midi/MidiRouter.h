@@ -5,6 +5,7 @@
 #include <vector>
 #include "MidiSender.h"
 #include "../mapping/MappingEngine.h"   // Etat par pipeline de chaque emplacement
+#include "../audio/AudioEngine.h"      // AudioEngine::Pour : a quelle cue va une note (§212)
 
 class MidiRouter : public MidiSender {
 public:
@@ -98,6 +99,21 @@ public:
      * idee du transport. */
     void fixerTransport(bool enLecture) { _enLecture = enLecture; }
     bool enLecture() const { return _enLecture; }
+
+    /* ── LES SCRIPTS DE LA CUE QUI PART (MESURES §212) ──────────────────────
+     * Pendant son Release, la cue qui part se comporte normalement : ses
+     * maillons de cue tournent A COTE de ceux de la cue qui arrive — une
+     * branche chacune apres les maillons permanents de MAIN, chacune vers les
+     * instruments de SA cue (AudioEngine::Pour). Ouvrir : les maillons de cue
+     * qui jouaient deviennent la branche sortante, avec leur etat et leurs
+     * metro() ; des maillons vides prennent leur place, que la cue qui arrive
+     * remplit. Fermer : la branche part (ses reprises purgees). Le MIDI entrant
+     * et les horloges y passent ; les CC, la pression et l'OSC ne passent que
+     * par la cue qui joue. */
+    void ouvrirSortie();
+    void fermerSortie();
+    bool sortieOuverte() const { return !sortants.empty(); }
+    String nomsSortantsJson();   // ["a.nms",""] : les maillons de la branche sortante, sous le verrou
 
     MidiRouter();
     ~MidiRouter() override;
@@ -280,6 +296,20 @@ private:
     };
     /* Alloues un par un, jamais deplaces : voir PLAFOND_SCRIPTS_MAP. */
     std::vector<Emplacement*> emplacements;
+    /* La branche de la cue qui part (§212) : ses maillons de cue, rang pour
+     * rang ceux qui suivent les permanents. Vide : aucune. */
+    std::vector<Emplacement*> sortants;
+    /* A qui vont les notes qu'un maillon EMET (metro, makenote...) pendant que
+     * son horloge bat : la boucle le pose autour de chaque battement, et seule
+     * elle le lit (une note emise d'une autre tache va partout). */
+    TaskHandle_t        _tacheEmission = nullptr;
+    AudioEngine::Pour   _pourEmission  = AudioEngine::Pour::TOUS;
+    AudioEngine::Pour   _pourCourant() const;
+    /* Les maillons [de, a) de `v` appliques a une note ; faux si l'un l'a avalee. */
+    bool _passerNote(std::vector<Emplacement*>& v, size_t de, size_t a,
+                     uint8_t& c, uint8_t& n, uint8_t& vel, bool estNoteOff, const char* branche);
+    /* La note jouee — les LEDs appairees, puis les instruments de la cue `pour`. */
+    void _jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour);
     uint8_t _nPermanents = 0;     // les maillons de la zone MAIN, en tete
     bool    _enLecture   = false; // transport : l'horloge des scripts ne bat que sous PLAY
     /* Rend l'emplacement `e`, en allouant ce qui manque jusqu'a lui. nullptr si

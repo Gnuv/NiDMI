@@ -185,7 +185,11 @@ namespace {
       else if (!strcmp(n, "lpg_colour")) { p.lpgColour = v; toucheParams = true; }
       else if (!strcmp(n, "drone"))      { p.drone     = v; toucheParams = true; }
       else if (!strcmp(n, "volume"))     { AudioEngine::setVolume(v); }
-      else if (!strcmp(n, "synthgain"))  { SynthVoice::setBlockGain(SynthVoice::bloc(), v); }   // §210
+      else if (!strcmp(n, "synthgain")) {                                                       // §210
+        const int8_t sc = AudioEngine::slotCourant();
+        const int8_t sv = (sc >= 0) ? AudioEngine::synthDuSlot((uint8_t)sc) : -1;
+        if (sv >= 0) SynthVoice::setBlockGain(SynthVoice::bloc((uint8_t)sv), v);
+      }
     }
     if (toucheParams) AudioEngine::setParams(p);
   }
@@ -208,12 +212,93 @@ static String _sfzEmployes() {
   return toutes;
 }
 
+/* ── THE CUE SLOTS (MESURES §212) ─────────────────────────────────────────
+ * Gael: "the departure case and the arrival case must be active at the same time during the
+ * fade; only two; a jump while a release is not over cuts the sound with a very brief
+ * fade-out". The arriving cue takes the OTHER slot; the cue that played leaves in its Release
+ * (its instruments, its effects and its scripts keep playing) or is cut in 10 ms; a slot still
+ * busy when a cue needs it is cut and waited for (10 ms and a block). */
+int8_t _slotScriptsSortants = -1;      // the slot whose cue links are the leaving branch (MidiRouter)
+
+/* The audio task drained the slot: the loop disarms what it armed there, and frees it. */
+static void _nettoyerSlot(uint8_t s) {
+  if (_slotScriptsSortants == (int8_t)s) { g_midiRouter.fermerSortie(); _slotScriptsSortants = -1; }
+  const int8_t sv = AudioEngine::synthDuSlot(s);
+  if (sv >= 0) { String r; SynthVoice::configure((uint8_t)sv, -1, 0, 0, 1.0f, r); }
+  const int8_t k = AudioEngine::kitDuSlot(s);
+  if (k >= 0) { String r; SfzStore::proposer((uint8_t)k, "", r); }   // the engine lets go of its kit
+  Effects::off(s);
+  AudioEngine::libererSlot(s);
+  if (k >= 0 && SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
+}
+
+/* The slot a cue is about to take: whatever still plays in it is cut, and waited for. */
+static void _viderSlot(uint8_t s) {
+  const uint8_t e = AudioEngine::etatSlot(s);
+  if (e == AudioEngine::SLOT_LIBRE) return;
+  if (e != AudioEngine::SLOT_VIDE) {
+    AudioEngine::couperSlot(s);
+    for (int i = 0; i < 60 && AudioEngine::etatSlot(s) != AudioEngine::SLOT_VIDE; i++) vTaskDelay(1);
+    if (AudioEngine::etatSlot(s) != AudioEngine::SLOT_VIDE)
+      Serial.printf("[cues] slot %u not drained in 60 ms: freed all the same\n", (unsigned)s);
+  }
+  _nettoyerSlot(s);
+}
+
+/* THE CUE ARRIVES (§211-212): in the other slot, emptied first; the one that played leaves in
+ * `releaseSortant` (its scripts become the leaving branch) or is cut. Its Delay, Attack and
+ * Sustain shape the new slot's output. Returns the new slot. */
+static uint8_t _changerDeSlot(float releaseSortant, float delai, float attaque, float sustain) {
+  const int8_t avant = AudioEngine::slotCourant();
+  const uint8_t nouveau = (avant == 0) ? 1 : 0;
+  _viderSlot(nouveau);
+  if (avant >= 0 && AudioEngine::etatSlot((uint8_t)avant) == AudioEngine::SLOT_COURANT) {
+    if (releaseSortant > 0.0f) {
+      AudioEngine::quitterSlot((uint8_t)avant, releaseSortant);
+      g_midiRouter.ouvrirSortie();
+      _slotScriptsSortants = avant;
+    } else {
+      AudioEngine::couperSlot((uint8_t)avant);
+      g_midiRouter.fermerSortie();
+      _slotScriptsSortants = -1;
+    }
+  } else {
+    g_midiRouter.fermerSortie();
+    _slotScriptsSortants = -1;
+  }
+  AudioEngine::arriverSlot(nouveau, delai, attaque, sustain);
+  return nouveau;
+}
+
+/* The other slot's voice or engine, when it is that of the same block: a synth voice, a kit
+ * that goes on from the cue that leaves is handed over, not restarted (§212). Otherwise the one
+ * the other slot does not hold. */
+static int8_t _prendre(int8_t chezLAutre, bool memeBloc, uint8_t autre, bool kit) {
+  if (chezLAutre >= 0 && memeBloc) {
+    if (kit) AudioEngine::fixerKitSlot(autre, -1); else AudioEngine::fixerSynthSlot(autre, -1);
+    return chezLAutre;
+  }
+  return (chezLAutre == 0) ? 1 : 0;
+}
+
 void _appliquer(const Cue& c) {
   /* Les courbes d'abord : analysees ICI, a l'activation, jamais dans la boucle.
    * Une cue sans automation en vide la table — sinon la courbe de la cue
    * precedente continuerait de tirer les parametres, exactement le comportement
    * fantome corrige ailleurs (§89.1). */
   _analyserCourbes(c.env);
+  /* 0. THE SLOT (§212) — before the scripts: the links that played become the leaving branch.
+   * The Release that applies is the LEAVING cue's, kept when it arrived, capped by this cue's
+   * duration as in the browser (D17): releases never pile up across cues. */
+  const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
+  _releaseSortant = _valeurDe(c.params, "crelease").toFloat() / 1000.0f;
+  const uint8_t ns = _changerDeSlot(releaseSortant,
+                                    _valeurDe(c.params, "cdelay").toFloat() / 1000.0f,
+                                    _valeurDe(c.params, "cattack").toFloat() / 1000.0f,
+                                    _valeurDe(c.params, "csustain").length() ? _valeurDe(c.params, "csustain").toFloat() : 1.0f);
+  const uint8_t autre = ns ^ 1;
+  const uint8_t etatAutre = AudioEngine::etatSlot(autre);
+  const bool autreJoue = etatAutre == AudioEngine::SLOT_SORTANT || etatAutre == AudioEngine::SLOT_COUPE;
   /* 1. LES SCRIPTS .nms d'abord : ils transforment le MIDI, donc ils doivent
    *    etre en place avant que la moindre note n'arrive.
    *
@@ -275,8 +360,6 @@ void _appliquer(const Cue& c) {
     String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
     /* §210: the channels of the keyboard and of the kit, and the synth voice. */
     String canalClavier, canalSfz, synth, synthBloc, synthCanal, synthGain;
-    /* THE CUE'S ENVELOPE (§211): the app's DASDR of the case, in ms (sustain 0..1). */
-    float envDelai = 0.0f, envAttaque = 0.0f, envSustain = 1.0f, envRelease = 0.0f;
     AudioEngine::Params synthParams = AudioEngine::params();
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
@@ -301,10 +384,6 @@ void _appliquer(const Cue& c) {
         else if (cle == "synthbloc") { synthBloc = kv.substring(eq + 1); synthBloc.trim(); }
         else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
         else if (cle == "synthgain") { synthGain = kv.substring(eq + 1); synthGain.trim(); }
-        else if (cle == "cdelay")    envDelai   = kv.substring(eq + 1).toFloat() / 1000.0f;
-        else if (cle == "cattack")   envAttaque = kv.substring(eq + 1).toFloat() / 1000.0f;
-        else if (cle == "csustain")  envSustain = kv.substring(eq + 1).toFloat();
-        else if (cle == "crelease")  envRelease = kv.substring(eq + 1).toFloat() / 1000.0f;
         else if (cle == "harmonics" || cle == "timbre" || cle == "morph" || cle == "decay"
                  || cle == "lpg_colour" || cle == "drone") {
           const float v = kv.substring(eq + 1).toFloat();
@@ -322,28 +401,13 @@ void _appliquer(const Cue& c) {
       debut = fin + 1;
     }
 
-    /* ON COUPE D'ABORD ce que la cue precedente tenait. Sans cela une boucle
-     * survivrait a la cue qui l'a lancee — le comportement fantome corrige
-     * partout ailleurs. Les sons de CETTE cue repartent juste apres.
-     * SAUF les clips des play list (§196) : poserListes, plus bas, fait taire
-     * ceux d'une liste qui part, et laisse jouer celle qui CONTINUE — une
-     * chaine de cellules porte le meme bloc d'une cue a la suivante. */
-    /* THE ENVELOPE FIRST (§211): the sounds of the cue that leaves fall in ITS release —
-     * then they are not cut here; this cue's sounds wait its Delay, rise in its Attack. */
-    /* Capped by this cue's duration, as in the browser (D17): no release outlives the
-     * cue it overlaps, so they never pile up across cues. */
-    const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
-    AudioEngine::arriveeDeCue(envDelai, envAttaque, envSustain, releaseSortant,
-                              cheminSfz.length() > 0, synth.length() > 0);
-    _releaseSortant = envRelease;
-    if (releaseSortant <= 0.0f) AudioEngine::arreterEchantillon(/*listesComprises=*/false);
+    /* CE QUE LA CUE PRECEDENTE TENAIT n'est plus coupe ici (§211-212) : elle joue dans SON
+     * emplacement, dans son Release, ou se tait en 10 ms (_changerDeSlot). Cette cue arme le
+     * sien — ns —, ou les reglages ci-dessous (clavier, canaux) s'appliquent. */
     AudioEngine::fixerDeclenchementSurCue(surCue);
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
-    /* A kit that leaves in the last cue's Release keeps its channel until then (§211). */
-    const bool kitSortant = !cheminSfz.length() && releaseSortant > 0.0f;
-    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(),
-                             kitSortant ? AudioEngine::canalDuKit() : (uint8_t)canalSfz.toInt());
+    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
 
     /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
      * longer instead of it. A cue without `synth=` silences the voice (its state
@@ -351,15 +415,21 @@ void _appliquer(const Cue& c) {
      * the sampler: a cue with only a synth arms the reader too (lecteurPret). */
     {
       String raison;
-      if (synthParamsVus) AudioEngine::setParams(synthParams);
-      /* A voice that leaves in the last cue's release is stopped at its end (§211). */
-      if ((synth.length() || releaseSortant <= 0.0f)
-          && !SynthVoice::configure(synth.length() ? synth.toInt() : -1, (uint32_t)synthBloc.toInt(),
-                                    (uint8_t)synthCanal.toInt(), synthGain.length() ? synthGain.toFloat() : 1.0f,
-                                    raison))
-        Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
+      if (synth.length()) {
+        /* The slot's voice: the leaving cue's if it is the same block (handed over, it goes on),
+         * else the one the other slot does not hold (§212). */
+        const uint32_t bs = (uint32_t)synthBloc.toInt();
+        const int8_t chezLAutre = AudioEngine::synthDuSlot(autre);
+        const int8_t sv = _prendre(chezLAutre, autreJoue && bs && chezLAutre >= 0 && SynthVoice::bloc((uint8_t)chezLAutre) == bs,
+                                   autre, false);
+        AudioEngine::fixerSynthSlot(ns, sv);
+        if (synthParamsVus) AudioEngine::setParams(synthParams);   // the slot's voice, now its own
+        if (!SynthVoice::configure((uint8_t)sv, synth.toInt(), bs, (uint8_t)synthCanal.toInt(),
+                                   synthGain.length() ? synthGain.toFloat() : 1.0f, raison))
+          Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
+      }
       raison = "";
-      if (!Effects::configureFromCue(c.params, raison))
+      if (!Effects::configureFromCue(ns, c.params, raison))
         Serial.printf("[cues] effects refused: %s\n", raison.c_str());
     }
 
@@ -416,7 +486,7 @@ void _appliquer(const Cue& c) {
          * attend la premiere touche — sinon le bloc partirait tout seul. */
         if (nom.length() && surCue) {
           if (!AudioEngine::declencherEchantillon(nom.c_str(), derniereBoucle, dernierGain,
-                                                  0.0f, bloc))
+                                                  0.0f, bloc, 1.0f, (int8_t)ns))
             Serial.printf("[cues] echantillon « %s » absent de storage\n", nom.c_str());
         }
         dn = fn + 1; rang++;
@@ -426,7 +496,9 @@ void _appliquer(const Cue& c) {
     }
     /* Apres le lecteur : ses clips se cherchent dans le magasin qu'il a
        charge. Une cue sans liste les retire (une banque vide). */
-    AudioEngine::poserListes(c.params, /*keepLeaving=*/releaseSortant > 0.0f);   // §211
+    /* Its lists in its slot; those of the cue in its Release stay in theirs (§212). */
+    AudioEngine::poserListes(c.params, (int8_t)ns,
+                             etatAutre == AudioEngine::SLOT_SORTANT ? (int8_t)autre : (int8_t)-1);
     /* L'INSTRUMENT SFZ DE LA CUE (§207-208) : la cue DEPOSE son voeu et passe
        son chemin. La lecture du kit est le travail de la tache sd-card (environ
        une seconde par Mo : ni la boucle ni async_tcp n'attendent la SD), puis la
@@ -435,12 +507,18 @@ void _appliquer(const Cue& c) {
        qu'AUCUNE cue ne nomme plus se decharge (decision du 6 octobre). */
     {
       String raisonSfz;
-      /* Which block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
-      /* A kit that leaves in the last cue's release is silenced at its end (§211): its
-       * bloc and gain stay until then. */
-      if (!kitSortant) {
-        SfzStore::fixerBloc((uint32_t)blocSfz.toInt(), gainSfz.length() ? gainSfz.toFloat() : 1.0f);
-        if (!SfzStore::proposer(cheminSfz.c_str(), raisonSfz))
+      if (cheminSfz.length()) {
+        /* The slot's engine: the leaving cue's if it plays the same kit for the same block (handed
+         * over with its ringing voices), else the one the other slot does not hold (§212). Which
+         * block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
+        const uint32_t bk = (uint32_t)blocSfz.toInt();
+        const int8_t chezLAutre = AudioEngine::kitDuSlot(autre);
+        const bool memeKit = autreJoue && bk && chezLAutre >= 0 && SfzStore::blocId((uint8_t)chezLAutre) == bk
+                             && SfzStore::demande((uint8_t)chezLAutre) == cheminSfz;
+        const int8_t k = _prendre(chezLAutre, memeKit, autre, true);
+        AudioEngine::fixerKitSlot(ns, k);
+        SfzStore::fixerBloc((uint8_t)k, bk, gainSfz.length() ? gainSfz.toFloat() : 1.0f);
+        if (!SfzStore::proposer((uint8_t)k, cheminSfz.c_str(), raisonSfz))
           Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
       }
       /* The walk over the whole list costs: only when a kit is held or asked for. */
@@ -455,21 +533,10 @@ void _appliquer(const Cue& c) {
    * celui qui tournait : quitter la cue coupe le son, comme le `dispose()` du
    * BufferSource cote navigateur. */
   if (c.engine != -2) {
-    /* A cue without sound: what played falls in its release (§211) — the kit and the synth
-     * voice are silenced at its end (servirReleases) — or is cut, as before. */
-    const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
-    AudioEngine::arriveeDeCue(0.0f, 0.0f, 1.0f, releaseSortant, false, false);
-    _releaseSortant = 0.0f;
-    if (releaseSortant <= 0.0f) {
-      AudioEngine::arreterEchantillon();
-      String rs; SynthVoice::configure(-1, 0, 0, 1.0f, rs);
-      String r; SfzStore::proposer("", r);
-      if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
-      Effects::off();
-    }
-    /* In a release, the effects stay as they were until the next cue sets its own: a
-     * filtered sound that fades does not lose its filter halfway. Its lists stay playable. */
-    AudioEngine::poserListes(String(), /*keepLeaving=*/releaseSortant > 0.0f);
+    /* A cue without sound: its slot stays empty — what played falls in its Release in its own,
+     * or was cut (_changerDeSlot, §211-212). Its lists, there, stay playable. */
+    AudioEngine::poserListes(String(), (int8_t)ns,
+                             etatAutre == AudioEngine::SLOT_SORTANT ? (int8_t)autre : (int8_t)-1);
   }
 
   /* "PRELOAD" (a playlist block's option), on EVERY cue — a silent cue prepares the next
@@ -866,7 +933,7 @@ void arreter() {
   VerrouSeq verrou;
   _enPause = false;          // un arret franc oublie la position gelee
   _lecture = false;
-  _releaseSortant = 0.0f;    // STOP cuts: the next PLAY releases nothing (§211)
+  _releaseSortant = 0.0f;    // STOP fades out in 10 ms: the next PLAY releases nothing (§211)
   AudioEngine::couperSon();
   g_midiRouter.fixerTransport(false);   // idem : l'horloge des scripts s'arrete
   _annoncer();
@@ -915,15 +982,11 @@ void precedent() {
   if (_lecture) AudioEngine::ouvrirSon();
 }
 
-/* WHAT LEFT IN A RELEASE, SILENCED AT ITS END (§211): the audio task says when a leaving
- * kit or synth voice reached silence; the loop — never the audio task — unloads them. */
+/* A SLOT DRAINED (§212) — its Release over, a cut, STOP: the loop disarms what it armed there
+ * (its synth voice, its kit, its effects, its scripts) and frees it. Never the audio task. */
 static void _servirReleases() {
-  if (AudioEngine::kitRelache()) {
-    String r;
-    SfzStore::proposer("", r);
-    if (SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
-  }
-  if (AudioEngine::synthRelachee()) { String r; SynthVoice::configure(-1, 0, 0, 1.0f, r); }
+  for (uint8_t s = 0; s < AudioEngine::CUE_SLOTS; s++)
+    if (AudioEngine::etatSlot(s) == AudioEngine::SLOT_VIDE) _nettoyerSlot(s);
 }
 
 void boucle() {

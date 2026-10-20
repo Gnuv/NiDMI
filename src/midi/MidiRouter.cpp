@@ -123,7 +123,8 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     // Écho AUDIO : le boîtier s'entend lui-même. Le moteur démarre à la
     // première note (init paresseuse) — rien au boot, l'OTA reste sauf.
-    AudioEngine::noteOn(ch, note, velocity);
+    // Vers les instruments de la cue du maillon qui l'emet (§212).
+    AudioEngine::noteOn(ch, note, velocity, _pourCourant());
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -147,7 +148,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     // Écho local (cf. sendNoteOn) : éteint les LEDs appairées à cette note.
     g_componentManager.handleMidiNoteOff(ch, note, velocity);
 
-    AudioEngine::noteOff(ch, note);
+    AudioEngine::noteOff(ch, note, _pourCourant());
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -413,6 +414,11 @@ void MidiRouter::setParamsScript(const String& params) {
     }
 }
 
+AudioEngine::Pour MidiRouter::_pourCourant() const {
+    return (_tacheEmission && xTaskGetCurrentTaskHandle() == _tacheEmission) ? _pourEmission
+                                                                            : AudioEngine::Pour::TOUS;
+}
+
 void MidiRouter::battreHorloge(uint32_t maintenant) {
     /* ARRET = L'HORLOGE S'ARRETE. Sans cette garde, un metro() continuait de
      * battre apres un STOP et le script de la cue emettait tout seul. Le MIDI
@@ -421,32 +427,43 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
     MappingEngine::Verrou verrou;   // voir MappingEngine.h (§170)
     const uint16_t init = MappingEngine::masqueDe(MappingEngine::Evenement::Init);
     const uint16_t tick = MappingEngine::masqueDe(MappingEngine::Evenement::Tick);
-    for (uint8_t e = 0; e < emplacements.size(); e++) {
-        Emplacement& em = *emplacements[e];
-        if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
-        /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
-         * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
-         * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
-         * en tache bloquee. */
-        /* QUI execute : « map:0 »..« map:3 ». Sans cela un print() d'emplacement
-         * arrivait a l'app sans origine, indistinguable de celui d'une broche. */
-        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);
-        if (em.initEnAttente) {
-            em.initEnAttente = false;
-            if (em.repond & init)
-                MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
-                                      maintenant, this, em.etats,
-                                      MappingEngine::MAX_PIPELINES_SCRIPT, org);
+    /* Les maillons de la cue qui joue, puis la branche de la cue qui part (§212) : ce
+     * qu'un maillon emet va aux instruments de SA cue ; MAIN, a toutes. */
+    _tacheEmission = xTaskGetCurrentTaskHandle();
+    for (uint8_t branche = 0; branche < 2; branche++) {
+        std::vector<Emplacement*>& v = branche ? sortants : emplacements;
+        for (uint8_t e = 0; e < v.size(); e++) {
+            Emplacement& em = *v[e];
+            if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
+            _pourEmission = branche ? AudioEngine::Pour::SORTANTE
+                          : (e < _nPermanents ? AudioEngine::Pour::TOUS : AudioEngine::Pour::COURANTE);
+            /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
+             * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
+             * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
+             * en tache bloquee. */
+            /* QUI execute : « map:0 »..« map:3 » (« out:1 » : la cue qui part). Sans
+             * cela un print() d'emplacement arrivait a l'app sans origine. */
+            char org[12];
+            snprintf(org, sizeof org, branche ? "out:%u" : "map:%u", (unsigned)(branche ? _nPermanents + e : e));
+            if (em.initEnAttente) {
+                em.initEnAttente = false;
+                if (em.repond & init)
+                    MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
+                                          maintenant, this, em.etats,
+                                          MappingEngine::MAX_PIPELINES_SCRIPT, org);
+            }
+            /* Le battement seulement quand un metro() est du : avant, il ne ferait
+             * rien — l'interpreteur le dit lui-meme (prochainUtile, §170). */
+            if (!(em.repond & tick)) continue;
+            if (em.tickConnu && (int32_t)(maintenant - em.prochainTick) < 0) continue;
+            MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
+                                  maintenant, this, em.etats,
+                                  MappingEngine::MAX_PIPELINES_SCRIPT, org, &em.prochainTick);
+            em.tickConnu = true;
         }
-        /* Le battement seulement quand un metro() est du : avant, il ne ferait
-         * rien — l'interpreteur le dit lui-meme (prochainUtile, §170). */
-        if (!(em.repond & tick)) continue;
-        if (em.tickConnu && (int32_t)(maintenant - em.prochainTick) < 0) continue;
-        MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
-                              maintenant, this, em.etats,
-                              MappingEngine::MAX_PIPELINES_SCRIPT, org, &em.prochainTick);
-        em.tickConnu = true;
     }
+    _tacheEmission = nullptr;
+    _pourEmission = AudioEngine::Pour::TOUS;
 }
 
 void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
@@ -625,21 +642,103 @@ bool MidiRouter::chaineScriptsNote(uint8_t& c, uint8_t& n, uint8_t& v, bool estN
 // donc identiquement pour l'USB, le clavier de l'app et le reste : c'est ce qui
 // garantit qu'un bloc mapping vaut pour toutes les sources, et pas seulement
 // pour celles qu'on aurait pense cabler une a une.
+bool MidiRouter::_passerNote(std::vector<Emplacement*>& liste, size_t de, size_t a,
+                             uint8_t& c, uint8_t& n, uint8_t& v, bool estNoteOff, const char* branche) {
+    const uint16_t genre = MappingEngine::masqueDe(estNoteOff ? MappingEngine::Evenement::NoteOff
+                                                              : MappingEngine::Evenement::NoteOn);
+    for (size_t e = de; e < a && e < liste.size(); e++) {
+        Emplacement& em = *liste[e];
+        if (!(em.repond & genre)) continue;   // rien dans ce maillon ne repond a cette note (§170)
+        MappingEngine::SortieNote sortie;
+        char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
+        if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c, estNoteOff, sortie,
+                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
+            n = sortie.note; v = sortie.velo; c = sortie.canal;
+        }
+        else if (sortie.traite) return false;   // il en parle, et n'a rien emis : il l'avale
+    }
+    return true;
+}
+
+void MidiRouter::_jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour) {
+    // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
+    if (estNoteOff) {
+        g_componentManager.handleMidiNoteOff(c, n, v);
+        AudioEngine::noteOff(c, n, pour);
+    } else {
+        g_componentManager.handleMidiNoteOn(c, n, v);
+        AudioEngine::noteOn(c, n, v, pour);
+    }
+}
+
 void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
     uint8_t n = note, v = velocity, c = channel;
     noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
 
-    if (!chaineScriptsNote(c, n, v, estNoteOff)) return;   // un maillon l'a avalee
-
-    // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
-    // Hors du verrou : elles ne lisent plus rien d'un maillon.
-    if (estNoteOff) {
-        g_componentManager.handleMidiNoteOff(c, n, v);
-        AudioEngine::noteOff(c, n);
-    } else {
-        g_componentManager.handleMidiNoteOn(c, n, v);
-        AudioEngine::noteOn(c, n, v);
+    /* LES DEUX CUES (§212) : MAIN d'abord, puis une branche par cue — celle qui joue et,
+     * pendant son Release, celle qui part — chacune vers SES instruments. Une seule cue :
+     * comme avant, la chaine entiere, et la note a tous. */
+    bool courante, sortante = false, deux;
+    uint8_t c2 = 0, n2 = 0, v2 = 0;
+    {
+        MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous une note (§170)
+        if (!_passerNote(emplacements, 0, _nPermanents, c, n, v, estNoteOff, "map")) return;   // MAIN l'a avalee
+        deux = !sortants.empty();
+        c2 = c; n2 = n; v2 = v;
+        courante = _passerNote(emplacements, _nPermanents, emplacements.size(), c, n, v, estNoteOff, "map");
+        if (deux) sortante = _passerNote(sortants, 0, sortants.size(), c2, n2, v2, estNoteOff, "out");
     }
+    if (!deux) { if (courante) _jouerNote(c, n, v, estNoteOff, AudioEngine::Pour::TOUS); return; }
+    if (courante) _jouerNote(c, n, v, estNoteOff, AudioEngine::Pour::COURANTE);
+    if (sortante) _jouerNote(c2, n2, v2, estNoteOff, AudioEngine::Pour::SORTANTE);
+}
+
+void MidiRouter::ouvrirSortie() {
+    /* Les maillons vides qui prendront la place de ceux de la cue qui part, ALLOUES AVANT le
+     * verrou et l'echange : faute de memoire, pas de branche — la cue qui part se tait par ses
+     * scripts, ses instruments jouent encore ce que MAIN leur donne. */
+    std::vector<Emplacement*> neufs;
+    for (size_t e = _nPermanents; e < emplacements.size(); e++) {
+        const size_t bloc = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+        Emplacement* em = (bloc >= PLANCHER_BLOC_CONTIGU + sizeof(Emplacement)) ? new (std::nothrow) Emplacement() : nullptr;
+        if (!em) {
+            for (Emplacement* x : neufs) delete x;
+            Serial.println("[MidiRouter] branche de la cue qui part : memoire insuffisante, ses scripts se taisent");
+            fermerSortie();
+            return;
+        }
+        neufs.push_back(em);
+    }
+    std::vector<Emplacement*> anciens;
+    {
+        MappingEngine::Verrou verrou;
+        anciens.swap(sortants);
+        for (size_t i = 0; i < neufs.size(); i++) {
+            const size_t e = _nPermanents + i;
+            neufs[i]->nomMemorise = emplacements[e]->nomMemorise;   // la memoire du RANG, pas de la cue
+            sortants.push_back(emplacements[e]);
+            emplacements[e] = neufs[i];
+        }
+        for (Emplacement* x : anciens) MappingEngine::viderDifferes(x->contenu.c_str());   // §101
+    }
+    for (Emplacement* x : anciens) delete x;
+}
+
+String MidiRouter::nomsSortantsJson() {
+    MappingEngine::Verrou verrou;
+    String j = "[";
+    for (size_t i = 0; i < sortants.size(); i++) j += String(i ? "," : "") + "\"" + sortants[i]->nom + "\"";
+    return j + "]";
+}
+
+void MidiRouter::fermerSortie() {
+    std::vector<Emplacement*> anciens;
+    {
+        MappingEngine::Verrou verrou;
+        anciens.swap(sortants);
+        for (Emplacement* x : anciens) MappingEngine::viderDifferes(x->contenu.c_str());   // §101
+    }
+    for (Emplacement* x : anciens) delete x;
 }
 
 
@@ -771,6 +870,7 @@ bool MidiRouter::chargerScriptNomme(const char* nom, bool persister, uint8_t emp
 }
 
 void MidiRouter::rechargerChaine() {
+    fermerSortie();                       // la branche de la cue qui part n'a plus de sens (§212)
     {
         MappingEngine::Verrou verrou;
         _reduireChaine(0);                // chaque maillon purge ses reprises (§101)

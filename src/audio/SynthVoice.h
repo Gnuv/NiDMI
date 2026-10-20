@@ -7,7 +7,7 @@
  * internal RAM at all; and core 1 cannot hold it with the SFZ kit and the
  * effects, while core 0 is 92 % idle by the cable. So:
  *
- *   - one voice, its state (Voice + scratch pool) in PSRAM, kept once allocated;
+ *   - two voices (§212), their state (Voice + scratch pool) in PSRAM, kept once allocated;
  *   - rendered by a task of its own on CORE 0, under MIDI and TCP/IP, LEAD blocks
  *     ahead of the audio task: what TCP/IP or MIDI take from it is absorbed, not
  *     heard (one block ahead, a reloaded page made it miss 11-14 blocks in 8 s);
@@ -30,26 +30,30 @@
 namespace SynthVoice {
 
 constexpr uint8_t LEAD = 3;          // blocks rendered ahead: +7.5 ms for a note
+/* TWO VOICES (§212): during a cross-fade the leaving cue's Plaits and the arriving cue's both
+ * play — the cue slots take one each (a voice that goes on from a cue to the next is handed
+ * over, not restarted). The same core 0 task renders both; their cost adds up: Gael watches
+ * the CPU meter. The second one's state is taken from PSRAM the first time it is used. */
+constexpr uint8_t VOICES = 2;
 
 // ── Any task: the cue, the routes, the CC table ──────────────────────────────
-/* The cue's voice: `engine` 0..23, or -1 (none: silent, its state kept). The
- * first engine >= 0 allocates the voice in PSRAM and starts the core 0 task;
- * false + reason if that fails. */
-bool configure(int engine, uint32_t bloc, uint8_t channel, float gain, String& reason);
-void setParams(const AudioEngine::Params& p);
+/* The voice `v`'s engine 0..23, or -1 (none: silent, its state kept). The first engine >= 0
+ * allocates the voice in PSRAM and starts the core 0 task; false + reason if that fails. */
+bool configure(uint8_t v, int engine, uint32_t bloc, uint8_t channel, float gain, String& reason);
+void setParams(uint8_t v, const AudioEngine::Params& p);
 /* The engine, live (POST /api/audio/params synth_engine=…): a write, nothing
  * allocated — a game gesture. The next cue's `synth=` says it again. */
-void setEngine(int engine);
-AudioEngine::Params params();
-uint8_t setBlockGain(uint32_t bloc, float gain);   // 1 if the block is the voice's
-bool active();                       // a cue names it, and the guard has not stopped it
-String status();                     // JSON
+void setEngine(uint8_t v, int engine);
+AudioEngine::Params params(uint8_t v);
+uint8_t setBlockGain(uint32_t bloc, float gain);   // the voices of that block
+bool active(uint8_t v);              // a cue names it, and the guard has not stopped it
+uint32_t bloc(uint8_t v);
+String status(uint8_t v);            // JSON
 
 // ── Audio task only ──────────────────────────────────────────────────────────
-void noteOn(uint8_t channel, uint8_t note, uint8_t velocity);
-uint32_t bloc();
-/* The next block the core 0 task rendered, mono, ADDED into `out` at the voice's
- * gain. False when it is not active, or late (nothing ready: silence, counted). */
-bool take(float* out, size_t frames);
+void noteOn(uint8_t v, uint8_t channel, uint8_t note, uint8_t velocity);
+/* The next block the core 0 task rendered for voice `v`, mono, ADDED into `out` at the
+ * voice's gain. False when it is not active, or late (nothing ready: silence, counted). */
+bool take(uint8_t v, float* out, size_t frames);
 
 }  // namespace SynthVoice

@@ -5,12 +5,12 @@
 //   - the POOL (_sons, _instrs, _octets, _nbPris) belongs to the sd-card task:
 //     servir() is its only writer. Other tasks read single words of it for
 //     the status, never a structure they would follow for long;
-//   - the WISH (_veut, _veutTicket, _servi, _erreur) is written by whoever
-//     deposits (any task) and by the sd-card task when it concludes, always
-//     under _mux (a spinlock held for a few instructions, never around I/O);
-//   - the HANDOFF to the audio task is _proposition (-1 none, -2 silence, else
-//     an _instrs index), written under _mux and taken with an atomic exchange;
-//   - the ENGINE (_eng) belongs to the audio task.
+//   - the WISH of each engine (_voeux, _erreur) is written by whoever deposits
+//     (any task) and by the sd-card task when it concludes, always under _mux (a
+//     spinlock held for a few instructions, never around I/O);
+//   - the HANDOFF to the audio task is _proposition[engine] (-1 none, -2 silence,
+//     else an _instrs index), written under _mux and taken with an atomic exchange;
+//   - the ENGINES (_engs, two since §212) belong to the audio task.
 #include "SfzStore.h"
 #include "sfz16.h"
 #include <strings.h>                    // strcasecmp
@@ -42,28 +42,32 @@ static volatile uint32_t _octets = 0;
 static volatile int      _nbPris = 0;       // instruments held (retiring included)
 static volatile uint32_t _dernierMs = 0;    // the last load, from the wish taken to the instrument ready
 
-// ── the wish, and the handoff to the audio task ─────────────────────────────
+// ── the wishes, and the handoff to the audio task — one per engine (§212) ────
 static portMUX_TYPE     _mux = portMUX_INITIALIZER_UNLOCKED;
-static char             _veut[CHEMIN_MAX] = "";   // what the cue asked ("" = silence)
-static uint32_t         _veutTicket = 0;     // bumps on every deposit
-static uint32_t         _servi = 0;          // the last ticket the task concluded
-static bool             _veutOk = false;     // ... and it succeeded
+struct Voeu {
+  char     veut[CHEMIN_MAX];                 // what the cue asked ("" = silence)
+  uint32_t ticket;                           // bumps on every deposit
+  uint32_t servi;                            // the last ticket the task concluded
+  bool     ok;                               // ... and it succeeded
+};
+static Voeu             _voeux[MOTEURS] = {};
 static char             _erreur[160] = "";   // the last refusal
 static char* volatile   _employes = nullptr; // the cue list's sfz= paths, malloc'd, taken by the task
-static volatile int32_t _proposition = -1;   // -1 none, -2 silence, else an _instrs index
+static volatile int32_t _proposition[MOTEURS] = {-1, -1};   // -1 none, -2 silence, else an _instrs index
 static char*            _csvMemo = nullptr;  // the last employed list (sd-card task's own copy)
 
-// ── the engine: static, INTERNAL RAM, the audio task's alone ───────────────
-static sfz16_engine    _eng;                // ~3 ko, voices inside
-static volatile bool    _notesArmees = false; // the current cue routes notes here
-static volatile int8_t  _actif = -1;        // _instrs index the engine plays
+// ── the engines, the audio task's alone ─────────────────────────────────────
+static sfz16_engine     _eng0;               // ~3 ko, voices inside: INTERNAL RAM
+static sfz16_engine* volatile _engs[MOTEURS] = {&_eng0, nullptr};   // [1] in PSRAM, the first time a cue asks
+static volatile bool    _notesArmees[MOTEURS] = {false, false};    // a cue routes notes to it
+static volatile int8_t  _actif[MOTEURS] = {-1, -1};                // _instrs index the engine plays
 static uint32_t         _gen = 0;
 static volatile uint32_t _notesRecues = 0;   // diagnostic: how far the notes travel (§208)
 static volatile uint32_t _blocsRendus = 0;    // the audio loop's heartbeat (§208)
 static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§208)
-static volatile uint32_t _blocId = 0;        // the app's block that asked for the kit (0: none)
-static volatile float    _gain = 1.0f;       // the target gain, any task writes it
-static float             _gainLisse = 1.0f;  // the audio task's smoothed copy
+static volatile uint32_t _blocId[MOTEURS] = {0, 0};      // the app's block that asked for the kit (0: none)
+static volatile float    _gain[MOTEURS] = {1.0f, 1.0f};  // the target gain, any task writes it
+static float             _gainLisse[MOTEURS] = {1.0f, 1.0f};   // the audio task's smoothed copy
 static volatile uint8_t  _ccEntrant[128];    // the Control Change table, written by the MIDI side
 static volatile uint32_t _ccRecus = 0;       // diagnostic: CC that reached the table
 
@@ -291,14 +295,23 @@ static bool     _echu(uint32_t t) { return (int32_t)(millis() - t) > 0; }
 
 /* Marks the instruments NO cue names (and that are neither playing, nor asked
  * for, nor about to be adopted): they are freed RETRAIT_MARGIN_MS later. */
+/* An instrument an engine plays, or is about to adopt (§212: either engine). */
+static bool _tenu(int j) {
+  for (uint8_t m = 0; m < MOTEURS; m++) if (_actif[m] == j || _proposition[m] == j) return true;
+  return false;
+}
+
 static void _marquer(const char* csv) {
-  char voeu[CHEMIN_MAX];
-  portENTER_CRITICAL(&_mux); strlcpy(voeu, _veut, sizeof voeu); portEXIT_CRITICAL(&_mux);
-  const int32_t prop = _proposition;
+  char voeux[MOTEURS][CHEMIN_MAX];
+  portENTER_CRITICAL(&_mux);
+  for (uint8_t m = 0; m < MOTEURS; m++) strlcpy(voeux[m], _voeux[m].veut, CHEMIN_MAX);
+  portEXIT_CRITICAL(&_mux);
   for (int j = 0; j < SIMULTANES; j++) {
     if (!_instrs[j].pris || _instrs[j].libererApres) continue;
-    if (_nomme(csv, _instrs[j].chemin) || !strcmp(voeu, _instrs[j].chemin)) continue;
-    if (_actif == j || prop == j) continue;
+    if (_nomme(csv, _instrs[j].chemin)) continue;
+    bool voulu = false;
+    for (uint8_t m = 0; m < MOTEURS; m++) voulu = voulu || !strcmp(voeux[m], _instrs[j].chemin);
+    if (voulu || _tenu(j)) continue;
     _instrs[j].libererApres = _echeance();
   }
 }
@@ -308,7 +321,7 @@ static bool _liberer() {
   bool libere = false;
   for (int j = 0; j < SIMULTANES; j++) {
     if (!_instrs[j].pris || !_instrs[j].libererApres || !_echu(_instrs[j].libererApres)) continue;
-    if (_actif == j || _proposition == j) { _instrs[j].libererApres = 0; continue; }
+    if (_tenu(j)) { _instrs[j].libererApres = 0; continue; }
     NIDMI_WEB_LOG("[sfz] decharge %s", _instrs[j].chemin);
     heap_caps_free(_instrs[j].inst);
     _instrs[j].inst = nullptr;
@@ -364,15 +377,31 @@ static void _annoncer(const char* etat, const char* chemin) {
   nidmi_ws_pousser(trame);
 }
 
-bool proposer(const char* chemin, String& raison) {
+/* Engine 1 in PSRAM, the first time a cue asks for it (§212): ~3 ko the internal RAM
+ * does not carry for a second cue it may never play. Inited here, published last. */
+static bool _assurerMoteur(uint8_t m, String& raison) {
+  if (m >= MOTEURS) { raison = "moteur SFZ inconnu"; return false; }
+  if (_engs[m]) return true;
+  sfz16_engine* e = (sfz16_engine*)heap_caps_calloc(1, sizeof(sfz16_engine), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!e) { raison = String("moteur SFZ ") + m + " : " + sizeof(sfz16_engine) + " o de PSRAM indisponibles"; return false; }
+  sfz16_engine_init(e, 48000.0f);
+  __sync_synchronize();
+  _engs[m] = e;
+  return true;
+}
+
+bool proposer(uint8_t m, const char* chemin, String& raison) {
   if (!chemin) chemin = "";
+  if (m >= MOTEURS) { raison = "moteur SFZ inconnu"; return false; }
   if (!chemin[0]) {                              // silence: nothing to read, no task needed
     portENTER_CRITICAL(&_mux);
-    _veut[0] = 0; _veutTicket++; _servi = _veutTicket; _veutOk = true; _erreur[0] = 0;
-    _proposition = -2;
+    Voeu& v = _voeux[m];
+    v.veut[0] = 0; v.ticket++; v.servi = v.ticket; v.ok = true; _erreur[0] = 0;
+    _proposition[m] = -2;
     portEXIT_CRITICAL(&_mux);
     return true;
   }
+  if (!_assurerMoteur(m, raison)) { _poserErreur(raison); return false; }
   if (strlen(chemin) >= (size_t)CHEMIN_MAX) {
     raison = "chemin SFZ trop long (" + String(CHEMIN_MAX - 1) + " caracteres au plus)";
     _poserErreur(raison);
@@ -388,8 +417,9 @@ bool proposer(const char* chemin, String& raison) {
   /* The same instrument asked again after it was served (consecutive cues of
    * one kit): nothing to deposit, and the engine is left alone. A refused one
    * IS asked again — the card may have come back. */
-  dejaSert = (_servi == _veutTicket && _veutOk && !strcmp(_veut, chemin));
-  if (!dejaSert) { strlcpy(_veut, chemin, sizeof _veut); _veutTicket++; }
+  Voeu& v = _voeux[m];
+  dejaSert = (v.servi == v.ticket && v.ok && !strcmp(v.veut, chemin));
+  if (!dejaSert) { strlcpy(v.veut, chemin, sizeof v.veut); v.ticket++; }
   portEXIT_CRITICAL(&_mux);
   if (!dejaSert) SdCard::requestSfz();
   return true;
@@ -406,12 +436,16 @@ void entretenir(const String& employesCsv) {
 
 // ── the sd-card task ────────────────────────────────────────────────────────
 
-/* Takes the wish if one is waiting. */
-static bool _prendreVoeu(char* sortie, uint32_t& ticket) {
-  bool attend;
+/* Takes a wish if one is waiting — the first engine that has one. */
+static bool _prendreVoeu(uint8_t& m, char* sortie, uint32_t& ticket) {
+  bool attend = false;
   portENTER_CRITICAL(&_mux);
-  attend = (_servi != _veutTicket);
-  if (attend) { strlcpy(sortie, _veut, CHEMIN_MAX); ticket = _veutTicket; }
+  for (uint8_t k = 0; k < MOTEURS && !attend; k++) {
+    const Voeu& v = _voeux[k];
+    if (v.servi == v.ticket) continue;
+    attend = true; m = k;
+    strlcpy(sortie, v.veut, CHEMIN_MAX); ticket = v.ticket;
+  }
   portEXIT_CRITICAL(&_mux);
   return attend;
 }
@@ -419,15 +453,16 @@ static bool _prendreVoeu(char* sortie, uint32_t& ticket) {
 /* Concludes ticket `ticket`: an instrument (j >= 0) goes to the audio task, or
  * a refusal is kept. Only if the wish did not change meanwhile — a newer one
  * is served next. `definitif` false: the wish stays pending (no card yet). */
-static bool _conclure(uint32_t ticket, int j, const String& raison, bool definitif) {
+static bool _conclure(uint8_t m, uint32_t ticket, int j, const String& raison, bool definitif) {
   bool courant;
   portENTER_CRITICAL(&_mux);
-  courant = (ticket == _veutTicket);
+  Voeu& v = _voeux[m];
+  courant = (ticket == v.ticket);
   if (courant) {
-    if (j >= 0) { _proposition = j; _erreur[0] = 0; _servi = ticket; _veutOk = true; }
+    if (j >= 0) { _proposition[m] = j; _erreur[0] = 0; v.servi = ticket; v.ok = true; }
     else {
       strlcpy(_erreur, raison.c_str(), sizeof _erreur);
-      if (definitif) { _servi = ticket; _veutOk = false; }
+      if (definitif) { v.servi = ticket; v.ok = false; }
     }
   }
   portEXIT_CRITICAL(&_mux);
@@ -442,10 +477,10 @@ void servir() {
     _marquer(_csvMemo);
   }
 
-  char voeu[CHEMIN_MAX]; uint32_t ticket;
-  while (_prendreVoeu(voeu, ticket)) {
+  char voeu[CHEMIN_MAX]; uint32_t ticket; uint8_t m = 0;
+  while (_prendreVoeu(m, voeu, ticket)) {
     if (!SdCard::mounted()) {                    // wait for the card: SdCard calls us again when it is back
-      _conclure(ticket, -1, "carte SD absente ou perdue : le chargement reprendra a son retour", false);
+      _conclure(m, ticket, -1, "carte SD absente ou perdue : le chargement reprendra a son retour", false);
       break;
     }
     if (_instrDe(voeu) < 0) _annoncer("charge", voeu);
@@ -453,7 +488,7 @@ void servir() {
     const uint32_t t0 = millis();
     const int j = _obtenir(voeu, raison, manque);
     if (j >= 0) _dernierMs = millis() - t0;
-    const bool courant = _conclure(ticket, j, raison, true);
+    const bool courant = _conclure(m, ticket, j, raison, true);
     if (j >= 0) {
       NIDMI_WEB_LOG("[sfz] %s pret en %lu ms%s", voeu, (unsigned long)(millis() - t0),
                     courant ? "" : " (remplace entre-temps : garde en reserve)");
@@ -467,7 +502,7 @@ void servir() {
    * proposition (a new kit, or silence) within a block (2.5 ms): once it did,
    * the kit it replaced is retirable. Wait for the adoption, then sort again
    * with the last cue list — otherwise it would stay until the next cue. */
-  for (int t = 0; t < 20 && _proposition != -1; t++) vTaskDelay(pdMS_TO_TICKS(5));
+  for (int t = 0; t < 20 && (_proposition[0] != -1 || _proposition[1] != -1); t++) vTaskDelay(pdMS_TO_TICKS(5));
   vTaskDelay(pdMS_TO_TICKS(5));                  // the audio task sets _actif right after taking it
   if (_csvMemo) _marquer(_csvMemo);
   _attendreLesRetraits();                        // frees what the housekeeping marked (a few ms)
@@ -475,54 +510,63 @@ void servir() {
 
 // ── audio task ──────────────────────────────────────────────────────────────
 
-void adopter() {
+static void _adopter(uint8_t m) {
+  sfz16_engine* eng = _engs[m];
+  if (!eng) return;
   /* THE FORGOTTEN INIT (§208, found by the voice photograph: inc_int was the
    * 1e9 clamp catching 44100/0 — a static engine starts zeroed, and nothing
    * had ever set its rate). The host tests all called sfz16_engine_init;
-   * the card's loader never did. */
-  static bool engInit = false;
-  if (!engInit) { sfz16_engine_init(&_eng, 48000.0f); engInit = true; }
+   * the card's loader never did. (Engine 1 is inited where it is allocated.) */
+  static bool eng0Init = false;
+  if (m == 0 && !eng0Init) { sfz16_engine_init(eng, 48000.0f); eng0Init = true; }
   /* Taken AND cleared in one step: a proposition deposited between a read and
    * a clear would be lost. */
-  const int32_t p = __atomic_exchange_n(&_proposition, (int32_t)-1, __ATOMIC_ACQ_REL);
+  const int32_t p = __atomic_exchange_n(&_proposition[m], (int32_t)-1, __ATOMIC_ACQ_REL);
   if (p == -1) return;
   if (p == -2) {
-    if (_eng.inst) sfz16_set_instrument(&_eng, nullptr);
-    _actif = -1;
-    if (_notesArmees) _gen++;
-    _notesArmees = false;
+    if (eng->inst) sfz16_set_instrument(eng, nullptr);
+    _actif[m] = -1;
+    if (_notesArmees[m]) _gen++;
+    _notesArmees[m] = false;
     return;
   }
-  if (p == _actif && _eng.inst == _instrs[p].inst) {   // the same kit again: its voices are not touched
-    _notesArmees = true;
+  if (p == _actif[m] && eng->inst == _instrs[p].inst) {   // the same kit again: its voices are not touched
+    _notesArmees[m] = true;
     return;
   }
-  sfz16_set_instrument(&_eng, _instrs[p].inst);   // fast-releases against the old one
-  _actif = (int8_t)p;
-  _notesArmees = true;
+  sfz16_set_instrument(eng, _instrs[p].inst);   // fast-releases against the old one
+  _actif[m] = (int8_t)p;
+  _notesArmees[m] = true;
   _gen++;
 }
 
-bool notesArmees() { return _notesArmees; }
+void adopter() { for (uint8_t m = 0; m < MOTEURS; m++) _adopter(m); }
 
-void fixerBloc(uint32_t bloc, float gain) {
-  _blocId = bloc;
-  _gain = (gain < 0.0f) ? 0.0f : (gain > 4.0f ? 4.0f : gain);
+bool notesArmees(uint8_t m) { return m < MOTEURS && _notesArmees[m]; }
+
+static inline float _borne(float gain) { return (gain < 0.0f) ? 0.0f : (gain > 4.0f ? 4.0f : gain); }
+
+void fixerBloc(uint8_t m, uint32_t bloc, float gain) {
+  if (m >= MOTEURS) return;
+  _blocId[m] = bloc;
+  _gain[m] = _borne(gain);
 }
 
 uint8_t fixerGainBloc(uint32_t bloc, float gain) {
-  if (!bloc || bloc != _blocId) return 0;
-  _gain = (gain < 0.0f) ? 0.0f : (gain > 4.0f ? 4.0f : gain);
-  return 1;
+  if (!bloc) return 0;
+  uint8_t n = 0;
+  for (uint8_t m = 0; m < MOTEURS; m++) if (_blocId[m] == bloc) { _gain[m] = _borne(gain); n++; }
+  return n ? 1 : 0;
 }
 
-uint32_t blocId()   { return _blocId; }
-float    gainCible() { return _gain; }
+uint32_t blocId(uint8_t m)    { return m < MOTEURS ? _blocId[m] : 0; }
+float    gainCible(uint8_t m) { return m < MOTEURS ? _gain[m] : 0.0f; }
 
-float gainLisse() {
-  _gainLisse += (_gain - _gainLisse) * 0.25f;     // ~10 ms to get there at 2.5 ms a block
-  if (fabsf(_gain - _gainLisse) < 0.0005f) _gainLisse = _gain;
-  return _gainLisse;
+float gainLisse(uint8_t m) {
+  if (m >= MOTEURS) return 0.0f;
+  _gainLisse[m] += (_gain[m] - _gainLisse[m]) * 0.25f;     // ~10 ms to get there at 2.5 ms a block
+  if (fabsf(_gain[m] - _gainLisse[m]) < 0.0005f) _gainLisse[m] = _gain[m];
+  return _gainLisse[m];
 }
 
 void controle(uint8_t cc, uint8_t valeur) {
@@ -530,22 +574,32 @@ void controle(uint8_t cc, uint8_t valeur) {
   _ccRecus++;
 }
 
-void noteOn(uint8_t note, uint8_t velo) {
-  if (!velo) return;
+void noteOn(uint8_t m, uint8_t note, uint8_t velo) {
+  sfz16_engine* eng = (m < MOTEURS) ? _engs[m] : nullptr;
+  if (!velo || !eng) return;
   _notesRecues++;
   /* The CC state the regions' locc/hicc gates read: copied now, the one moment
    * they do (a CC that came before this note, in the order the MIDI arrived —
    * it was stored before the note was queued). */
-  for (int i = 0; i < 128; i++) _eng.cc[i] = _ccEntrant[i];
+  for (int i = 0; i < 128; i++) eng->cc[i] = _ccEntrant[i];
   const uint32_t c0 = ESP.getCycleCount();
-  sfz16_note_on(&_eng, note, velo);
+  sfz16_note_on(eng, note, velo);
   const uint32_t dc = ESP.getCycleCount() - c0;
   _costOnN++; _costOnKcyc += dc >> 10; if (dc > _costOnMax) _costOnMax = dc;
   _costBlockOn += dc; if (_costBlockNotes < 255) _costBlockNotes++;
 }
-void noteOff(uint8_t note)             { sfz16_note_off(&_eng, note); }
+void noteOff(uint8_t m, uint8_t note) { sfz16_engine* e = (m < MOTEURS) ? _engs[m] : nullptr; if (e) sfz16_note_off(e, note); }
+/* Its cue slot is emptied, its output already silent (§212): the voices stop NOW — a release
+ * tail left in the engine would ring in the next cue that takes it. */
+void toutEteindre(uint8_t m) {
+  sfz16_engine* e = (m < MOTEURS) ? _engs[m] : nullptr;
+  if (!e) return;
+  for (int i = 0; i < SFZ16_MAX_VOICES; i++) e->voices[i].active = 0;
+}
 
-bool rendreBloc(float* g, float* d, uint32_t trames) {
+bool rendreBloc(uint8_t m, float* g, float* d, uint32_t trames) {
+  sfz16_engine* eng = (m < MOTEURS) ? _engs[m] : nullptr;
+  if (!eng) return false;
   /* A NULL instrument still has voices to drain (sfz16_needs_render): skipping
    * the render left them active for good, holding pointers into an instrument
    * freed 150 ms later — reproduced on the card: a ringing crash, the
@@ -556,11 +610,11 @@ bool rendreBloc(float* g, float* d, uint32_t trames) {
   if (_costBlockOn > _costBurstMax) { _costBurstMax = _costBlockOn; _costBurstNotes = fresh; }
   _costNotesCyc = _costBlockOn;
   _costBlockOn = 0; _costBlockNotes = 0;
-  if (!sfz16_needs_render(&_eng)) { _costKernel = 0; return false; }
+  if (!sfz16_needs_render(eng)) { _costKernel = 0; return false; }
   const uint32_t c0 = ESP.getCycleCount();
   memset(g, 0, trames * sizeof(float));
   memset(d, 0, trames * sizeof(float));
-  sfz16_render(&_eng, g, d, trames);
+  sfz16_render(eng, g, d, trames);
   const uint32_t dc = ESP.getCycleCount() - c0;
   const uint32_t budget = trames * 5000u;
   CostClass& c = _costClass[recents == 0 ? 0 : recents < 5 ? 1 : recents < 16 ? 2 : 3];
@@ -577,7 +631,7 @@ void costBlock(uint32_t cyclesTotal) {
     _costTotalOver++;
     CostSlow& l = _costSlow[_costNSlow++ & 7];
     l.total = cyclesTotal; l.kernel = _costKernel; l.notes = _costNotesCyc;
-    l.fresh = _costFresh; l.recent = _costRecent; l.voices = (uint8_t)sfz16_active_voices(&_eng);
+    l.fresh = _costFresh; l.recent = _costRecent; l.voices = (uint8_t)(voixActives(0) + voixActives(1));
   }
 }
 
@@ -641,7 +695,7 @@ String diagnostic() {
     if (!premier) j += ",";
     premier = false;
     j += String("{\"chemin\":\"") + echapper(_instrs[i].chemin) + "\",\"actif\":"
-       + (_actif == i ? "true" : "false") + ",\"retire\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
+       + (_tenu(i) ? "true" : "false") + ",\"retire\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
   }
   /* The Control Changes held (the ones that are not 0): what a locc/hicc gate sees. */
   j += "],\"cc\":{";
@@ -726,31 +780,44 @@ String echapper(const String& s) {
 /* The status reads single words of the pool. A slot being read is the playing
  * one: it is freed only after it stopped being (and RETRAIT_MARGIN_MS more),
  * which is long next to a status call. */
-static const InstrSfz* _jouant() {
-  const int a = _actif;
+static const InstrSfz* _jouant(uint8_t m) {
+  const int a = (m < MOTEURS) ? _actif[m] : -1;
   return (a >= 0 && _instrs[a].pris && _instrs[a].inst) ? &_instrs[a] : nullptr;
 }
 
-bool    charge()        { return _actif >= 0 || _proposition >= 0; }
-bool    actif()         { return sfz16_needs_render(&_eng) != 0; }
-bool    chargement()    { bool b; portENTER_CRITICAL(&_mux); b = (_servi != _veutTicket); portEXIT_CRITICAL(&_mux); return b; }
-int     enMemoire()     { return _nbPris; }
-String  demande()       { char s[CHEMIN_MAX]; portENTER_CRITICAL(&_mux); strlcpy(s, _veut, sizeof s); portEXIT_CRITICAL(&_mux); return String(s); }
-String  chemin()        { const InstrSfz* i = _jouant(); return i ? String(i->chemin) : String(""); }
-int     regions()       { const InstrSfz* i = _jouant(); return i ? i->inst->region_count : 0; }
-int     samples()       { const InstrSfz* i = _jouant(); return i ? i->inst->sample_count : 0; }
-size_t  octets()        { return _octets; }
-int     voixActives()   { return sfz16_active_voices(&_eng); }
+bool    charge(uint8_t m)  { return m < MOTEURS && (_actif[m] >= 0 || _proposition[m] >= 0); }
+bool    actif() {
+  for (uint8_t m = 0; m < MOTEURS; m++) if (_engs[m] && sfz16_needs_render(_engs[m])) return true;
+  return false;
+}
+bool    chargement() {
+  bool b = false;
+  portENTER_CRITICAL(&_mux);
+  for (uint8_t m = 0; m < MOTEURS; m++) b = b || (_voeux[m].servi != _voeux[m].ticket);
+  portEXIT_CRITICAL(&_mux);
+  return b;
+}
+int     enMemoire()        { return _nbPris; }
+String  demande(uint8_t m) {
+  if (m >= MOTEURS) return String();
+  char s[CHEMIN_MAX]; portENTER_CRITICAL(&_mux); strlcpy(s, _voeux[m].veut, sizeof s); portEXIT_CRITICAL(&_mux);
+  return String(s);
+}
+String  chemin(uint8_t m)  { const InstrSfz* i = _jouant(m); return i ? String(i->chemin) : String(""); }
+int     regions(uint8_t m) { const InstrSfz* i = _jouant(m); return i ? i->inst->region_count : 0; }
+int     samples(uint8_t m) { const InstrSfz* i = _jouant(m); return i ? i->inst->sample_count : 0; }
+size_t  octets()           { return _octets; }
+int     voixActives(uint8_t m) { return (m < MOTEURS && _engs[m]) ? sfz16_active_voices(_engs[m]) : 0; }
 uint32_t generation()   { return _gen; }
 uint32_t notesRecues()  { return _notesRecues; }
 /* DIAGNOSTIC (§208) : le moteur tient-il un instrument, et que vaut sa
  * premiere region ? Dit par la carte, pas devine. */
-bool moteurInstValide() {
-  const sfz16_instrument* in = _eng.inst;
-  return in && _actif >= 0 && in->region_count >= 1;
+bool moteurInstValide(uint8_t m) {
+  const sfz16_instrument* in = (m < MOTEURS && _engs[m]) ? _engs[m]->inst : nullptr;
+  return in && _actif[m] >= 0 && in->region_count >= 1;
 }
-String regionPremiere() {
-  const InstrSfz* i = _jouant();
+String regionPremiere(uint8_t m) {
+  const InstrSfz* i = _jouant(m);
   if (!i || i->inst->region_count < 1) return String("{}");
   const sfz16_region* r = &i->inst->regions[0];
   return String("{\"lo\":") + r->lokey + ",\"hi\":" + r->hikey
