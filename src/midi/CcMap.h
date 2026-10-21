@@ -27,6 +27,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include "../audio/AudioEngine.h"   // AudioEngine::Pour : the cue a CC is for (§212)
 
 namespace CcMap {
 
@@ -51,7 +52,10 @@ void recharger();
 
 // Un CC vient d'arriver. Applique toutes les affectations qui le visent
 // (plusieurs cibles peuvent partager un CC) et renvoie leur nombre.
-int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur);
+/* `pour` (§212): the branch of the chain it came out of — the synth parameters go to that
+ * cue's voice; the script parameters to the registry, which both cues read. */
+int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur,
+              AudioEngine::Pour pour = AudioEngine::Pour::TOUS);
 
 // ── Apprentissage ────────────────────────────────────────────────────────────
 // L'app arme une cible, puis l'utilisateur tourne un potentiometre : c'est la

@@ -81,7 +81,7 @@ bool estParamAudio(const char* nom) {
 // Applique UNE cible. Separe d'appliquer() pour que l'apprentissage puisse
 // s'en servir : la cible bouge des le CC qui l'a apprise, sans qu'il faille
 // toucher le potentiometre une seconde fois.
-static void poser(const Entree& e, uint8_t valeur) {
+static void poser(const Entree& e, uint8_t valeur, AudioEngine::Pour pour = AudioEngine::Pour::TOUS) {
     const float v = etaler(valeur, e.min, e.max);
     if (!estParamAudio(e.cible)) {
         // Parametre de script : meme chemin que /api/midi/script?params=.
@@ -94,16 +94,11 @@ static void poser(const Entree& e, uint8_t valeur) {
         AudioEngine::setEngine((int)lroundf(v));
         return;
     }
-    AudioEngine::Params p = AudioEngine::params();
-    if      (!strcmp(e.cible, "harmonics"))  p.harmonics = v;
-    else if (!strcmp(e.cible, "timbre"))     p.timbre    = v;
-    else if (!strcmp(e.cible, "morph"))      p.morph     = v;
-    else if (!strcmp(e.cible, "decay"))      p.decay     = v;
-    else if (!strcmp(e.cible, "lpg_colour")) p.lpgColour = v;
-    AudioEngine::setParams(p);
+    /* The synth voice of the cue the CC is for (§212). */
+    AudioEngine::fixerParamSynth(e.cible, v, pour);
 }
 
-int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur) {
+int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur, AudioEngine::Pour pour) {
     // Copier sous le verrou, poser hors du verrou : poser() peut changer de moteur.
     Entree vises[MAX];
     int touches = 0;
@@ -116,7 +111,7 @@ int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur) {
             vises[touches++] = e;
         }
     }
-    for (int i = 0; i < touches; i++) poser(vises[i], valeur);
+    for (int i = 0; i < touches; i++) poser(vises[i], valeur, pour);
     return touches;
 }
 

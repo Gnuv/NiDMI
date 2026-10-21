@@ -1677,6 +1677,39 @@ static uint8_t _masque(Pour pour) {
   return m;
 }
 
+uint8_t masqueSlots(Pour pour) { return _masque(pour); }
+
+void controleKits(uint8_t cc, uint8_t valeur, Pour pour) {
+  const int8_t sl = slotLeaving;
+  const int8_t kl = (sl >= 0) ? slots[sl].kit : -1;
+  for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) {
+    const bool sien = (kl >= 0 && m == (uint8_t)kl);
+    if (pour == Pour::SORTANTE ? sien : (pour == Pour::COURANTE ? !sien : true)) SfzStore::controle(m, cc, valeur);
+  }
+}
+
+void fixerParamSynth(const char* nom, float v, Pour pour) {
+  auto poser = [&](Params& p) {
+    if      (!strcmp(nom, "harmonics"))  p.harmonics = v;
+    else if (!strcmp(nom, "timbre"))     p.timbre    = v;
+    else if (!strcmp(nom, "morph"))      p.morph     = v;
+    else if (!strcmp(nom, "decay"))      p.decay     = v;
+    else if (!strcmp(nom, "lpg_colour")) p.lpgColour = v;
+    else if (!strcmp(nom, "drone"))      p.drone     = v;
+  };
+  const uint8_t m = _masque(pour);
+  const int8_t sc = slotCurrent;
+  /* The cue that plays, through setParams: its voice and the engine's own copy (what
+   * /api/audio/params reads) — also before any cue. */
+  if (pour != Pour::SORTANTE && (sc < 0 || (m & (1u << sc)))) { Params p = params(); poser(p); setParams(p); }
+  for (uint8_t s = 0; s < CUE_SLOTS; s++) {
+    if (!(m & (1u << s)) || (int8_t)s == sc) continue;
+    const int8_t sv = slots[s].synth;
+    if (sv < 0) continue;
+    Params p = SynthVoice::params((uint8_t)sv); poser(p); SynthVoice::setParams((uint8_t)sv, p);
+  }
+}
+
 void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour) {
   if (!demarre) return;
   deposerEvenement(Evenement{note, velocity, SORTE_NOTE, 0, 0, canal, _masque(pour)});

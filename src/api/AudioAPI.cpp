@@ -351,10 +351,12 @@ void setupAudioAPI(AsyncWebServer& server) {
      * reverb — the cue's keys (lowpass, lpblocs, lpcutoff, lpq, reverb, rvwet,
      * rvdecay, rvdamp), only those sent change. A game gesture: allowed under
      * the concert lock. GET: their state. */
-    /* The cue that plays (§212): its effects. */
+    /* The cue that plays (§212): its effects — or those of the slot `?slot=N`. */
     server.on("/api/audio/fx", HTTP_GET, [](AsyncWebServerRequest *request){
         const int8_t sc = AudioEngine::slotCourant();
-        request->send(200, "application/json", Effects::status(sc >= 0 ? (uint8_t)sc : 0));
+        uint8_t ici = (sc >= 0) ? (uint8_t)sc : 0;
+        if (request->hasParam("slot")) ici = (uint8_t)constrain(request->getParam("slot")->value().toInt(), 0, AudioEngine::CUE_SLOTS - 1);
+        request->send(200, "application/json", Effects::status(ici));
     });
     server.on("/api/audio/fx", HTTP_POST, [](AsyncWebServerRequest *request){
         static const char* const KEYS[] = {"lowpass", "lpblocs", "lpcutoff", "lpq",

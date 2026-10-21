@@ -106,6 +106,14 @@ void validerConfigBoot();
 enum class Pour : uint8_t { TOUS = 0, COURANTE, SORTANTE };
 void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour = Pour::TOUS);
 void noteOff(uint8_t canal, uint8_t note, Pour pour = Pour::TOUS);
+/* The slots `pour` reaches, a bit each (TOUS: every slot not being cut). */
+uint8_t masqueSlots(Pour pour);
+/* A CC for the SFZ kits' locc/hicc gates (§208), from the branch `pour` (§212): TOUS every
+ * engine, COURANTE every engine but the leaving cue's, SORTANTE the leaving cue's alone. */
+void controleKits(uint8_t cc, uint8_t valeur, Pour pour);
+/* One synth parameter (harmonics, timbre, morph, decay, lpg_colour, drone), for the voices of
+ * the cue `pour` — the CC table (CcMap), §212. */
+void fixerParamSynth(const char* nom, float valeur, Pour pour);
 /* The channels of the play-sf keyboard and of the SFZ kit of the cue that plays (0 = all). */
 void fixerCanaux(uint8_t clavier, uint8_t sfz);
 

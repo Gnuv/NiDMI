@@ -94,7 +94,7 @@ bool rendreBloc(uint8_t moteur, float* g, float* d, uint32_t trames);
  * only moment an SFZ region reads it (locc/hicc gate the TRIGGER: a hi-hat
  * pedal at CC4 picks the open or the closed sample). A byte store is atomic:
  * nothing waits, nothing is queued, nothing can be lost. */
-void controle(uint8_t cc, uint8_t valeur);
+void controle(uint8_t moteur, uint8_t cc, uint8_t valeur);   // one table per engine (§212)
 
 // ── Status (/api/audio/status, refusals for the app) — any task ─────────────
 /* What the card's own FatFs sees in a folder of the SD (the Fichiers panel

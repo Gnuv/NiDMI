@@ -107,9 +107,9 @@ public:
      * instruments de SA cue (AudioEngine::Pour). Ouvrir : les maillons de cue
      * qui jouaient deviennent la branche sortante, avec leur etat et leurs
      * metro() ; des maillons vides prennent leur place, que la cue qui arrive
-     * remplit. Fermer : la branche part (ses reprises purgees). Le MIDI entrant
-     * et les horloges y passent ; les CC, la pression et l'OSC ne passent que
-     * par la cue qui joue. */
+     * remplit. Fermer : la branche part (ses reprises purgees). Tout y passe :
+     * les notes, les CC, la pression des pads, l'OSC et les horloges — et ce
+     * qu'un maillon en fait va aux instruments et aux effets de SA cue. */
     void ouvrirSortie();
     void fermerSortie();
     bool sortieOuverte() const { return !sortants.empty(); }
@@ -251,8 +251,14 @@ public:
     /* Son pendant pour les notes, sous le meme verrou. Rend false si un
      * maillon a avale la note. */
     bool chaineScriptsNote(uint8_t& canal, uint8_t& note, uint8_t& velocite, bool estNoteOff);
-    /* What an incoming CC does after the scripts (learn, CcMap, SFZ, components). */
-    void appliquerCc(uint8_t canal, uint8_t cc, uint8_t valeur);
+    /* What an incoming CC does after the scripts (learn, CcMap, SFZ, components) — for the
+     * instruments of the cue `pour` (§212): the branch it came out of. The learning and the
+     * components follow the cue that plays only. */
+    void appliquerCc(uint8_t canal, uint8_t cc, uint8_t valeur,
+                     AudioEngine::Pour pour = AudioEngine::Pour::TOUS);
+    /* WHOSE SCRIPTS RUN on THIS task now (§212): the branch a link belongs to — what it
+     * emits (a note, s("sys.lp_cutoff")) goes to its own cue. Any other task: TOUS. */
+    AudioEngine::Pour pourCourant() const;
 
     // Réception MIDI pour piloter les LEDs
     void handleMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
@@ -299,15 +305,25 @@ private:
     /* La branche de la cue qui part (§212) : ses maillons de cue, rang pour
      * rang ceux qui suivent les permanents. Vide : aucune. */
     std::vector<Emplacement*> sortants;
-    /* A qui vont les notes qu'un maillon EMET (metro, makenote...) pendant que
-     * son horloge bat : la boucle le pose autour de chaque battement, et seule
-     * elle le lit (une note emise d'une autre tache va partout). */
+    /* A qui va ce qu'un maillon EMET (une note, un effet par s("sys.…")) pendant qu'il
+     * s'execute : pose autour de chaque branche, SOUS le verrou des scripts — une
+     * execution a la fois —, et lu seulement par la tache qui l'a pose (une emission
+     * d'une autre tache, un capteur, va partout). */
     TaskHandle_t        _tacheEmission = nullptr;
     AudioEngine::Pour   _pourEmission  = AudioEngine::Pour::TOUS;
-    AudioEngine::Pour   _pourCourant() const;
-    /* Les maillons [de, a) de `v` appliques a une note ; faux si l'un l'a avalee. */
+    struct Contexte;
+    /* Les maillons [de, a) de `v`, pour la cue `pour`. Note, CC : faux si l'un l'a avale.
+     * Pression : vrai si l'un en a fait un CC (le premier). OSC : chacun l'entend. */
     bool _passerNote(std::vector<Emplacement*>& v, size_t de, size_t a,
-                     uint8_t& c, uint8_t& n, uint8_t& vel, bool estNoteOff, const char* branche);
+                     uint8_t& c, uint8_t& n, uint8_t& vel, bool estNoteOff, const char* branche,
+                     AudioEngine::Pour pour);
+    bool _passerCc(std::vector<Emplacement*>& v, size_t de, size_t a,
+                   uint8_t& c, uint8_t& n, uint8_t& vel, const char* branche, AudioEngine::Pour pour);
+    bool _passerTouch(std::vector<Emplacement*>& v, size_t de, size_t a, uint8_t canal, uint8_t note,
+                      uint8_t pression, uint8_t& c, uint8_t& n, uint8_t& vel, const char* branche,
+                      AudioEngine::Pour pour);
+    void _passerOsc(std::vector<Emplacement*>& v, size_t de, size_t a, const char* adresse, float valeur,
+                    const char* branche, AudioEngine::Pour pour);
     /* La note jouee — les LEDs appairees, puis les instruments de la cue `pour`. */
     void _jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour);
     uint8_t _nPermanents = 0;     // les maillons de la zone MAIN, en tete

@@ -768,11 +768,21 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
      * (a float the audio task reads at its next block), never by the loop.
      * `polytouch.in(10,38) : lag(10,5000) : curve(4) : scale(0,127,200,8000) :
      * s("sys.lp_cutoff")` — the pressure of a pad opens the filter. */
-    else if (!strcmp(nom, "sys.lp_cutoff"))    Effects::setParam("lp_cutoff", valeur);
-    else if (!strcmp(nom, "sys.lp_q"))         Effects::setParam("lp_q", valeur);
-    else if (!strcmp(nom, "sys.rv_wet"))       Effects::setParam("rv_wet", valeur);
-    else if (!strcmp(nom, "sys.rv_decay"))     Effects::setParam("rv_decay", valeur);
-    else if (!strcmp(nom, "sys.rv_damp"))      Effects::setParam("rv_damp", valeur);
+    /* The effects of the CUE whose script runs (§212): its branch of the chain says which —
+     * MAIN, a sensor, the API: both. */
+    else if (!strncmp(nom, "sys.lp_", 7) || !strncmp(nom, "sys.rv_", 7)) {
+        const uint8_t slots = AudioEngine::masqueSlots(g_midiRouter.pourCourant());
+        if      (!strcmp(nom, "sys.lp_cutoff")) Effects::setParam("lp_cutoff", valeur, slots);
+        else if (!strcmp(nom, "sys.lp_q"))      Effects::setParam("lp_q", valeur, slots);
+        else if (!strcmp(nom, "sys.rv_wet"))    Effects::setParam("rv_wet", valeur, slots);
+        else if (!strcmp(nom, "sys.rv_decay"))  Effects::setParam("rv_decay", valeur, slots);
+        else if (!strcmp(nom, "sys.rv_damp"))   Effects::setParam("rv_damp", valeur, slots);
+        else if (!g_sysInconnu) {
+            strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
+            __sync_synchronize();
+            g_sysInconnu = true;
+        }
+    }
     else if (!g_sysInconnu) {
         strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
         __sync_synchronize();                  // le nom avant le drapeau

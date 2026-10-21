@@ -34,10 +34,10 @@ constexpr uint8_t SLOTS = 2;
  * slot's reverb in PSRAM the first time; false + reason if it cannot. */
 bool configureFromCue(uint8_t slot, const String& params, String& reason);
 void off(uint8_t slot);                      // no effect in that slot
-/* One parameter, live, in every slot: "lp_cutoff" (Hz), "lp_q", "rv_wet" (0..1), "rv_decay"
- * (s), "rv_damp" (0..1) — a pad's pressure moves the leaving cue's filter too. False:
- * unknown name. */
-bool setParam(const char* name, float value);
+/* One parameter, live, in the slots of `slots` (a bit each): "lp_cutoff" (Hz), "lp_q", "rv_wet"
+ * (0..1), "rv_decay" (s), "rv_damp" (0..1) — a script's s("sys.lp_cutoff") moves the effects
+ * of ITS cue (§212). False: unknown name. */
+bool setParam(const char* name, float value, uint8_t slots = 0xFF);
 /* The cue keys, live (POST /api/audio/fx), in `slot`: only those present change. */
 bool applyKeys(uint8_t slot, const String& params, String& reason);
 String status(uint8_t slot);                 // JSON for /api/audio/status and the route

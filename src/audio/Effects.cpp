@@ -143,8 +143,10 @@ bool applyKeys(uint8_t slot, const String& params, String& reason) {
   return e && apply(*e, params, false, reason);
 }
 
-bool setParam(const char* name, float value) {
-  for (Slot& e : slots) {
+bool setParam(const char* name, float value, uint8_t mask) {
+  for (uint8_t s = 0; s < SLOTS; s++) {
+    if (!(mask & (1u << s))) continue;
+    Slot& e = slots[s];
     ensureLowpass(e);
     if      (!strcmp(name, "lp_cutoff")) put(e.lpCutoff, value, 20.0f, 20000.0f);
     else if (!strcmp(name, "lp_q"))      put(e.lpQ, value, 0.5f, 20.0f);

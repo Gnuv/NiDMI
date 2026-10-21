@@ -68,7 +68,7 @@ static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§
 static volatile uint32_t _blocId[MOTEURS] = {0, 0};      // the app's block that asked for the kit (0: none)
 static volatile float    _gain[MOTEURS] = {1.0f, 1.0f};  // the target gain, any task writes it
 static float             _gainLisse[MOTEURS] = {1.0f, 1.0f};   // the audio task's smoothed copy
-static volatile uint8_t  _ccEntrant[128];    // the Control Change table, written by the MIDI side
+static volatile uint8_t  _ccEntrant[MOTEURS][128];   // the Control Change tables, written by the MIDI side (§212: per engine)
 static volatile uint32_t _ccRecus = 0;       // diagnostic: CC that reached the table
 
 // ── what a note and a block COST, measured on the audio task itself (§208) ───
@@ -569,8 +569,9 @@ float gainLisse(uint8_t m) {
   return _gainLisse[m];
 }
 
-void controle(uint8_t cc, uint8_t valeur) {
-  _ccEntrant[cc & 127] = valeur;
+void controle(uint8_t m, uint8_t cc, uint8_t valeur) {
+  if (m >= MOTEURS) return;
+  _ccEntrant[m][cc & 127] = valeur;
   _ccRecus++;
 }
 
@@ -581,7 +582,7 @@ void noteOn(uint8_t m, uint8_t note, uint8_t velo) {
   /* The CC state the regions' locc/hicc gates read: copied now, the one moment
    * they do (a CC that came before this note, in the order the MIDI arrived —
    * it was stored before the note was queued). */
-  for (int i = 0; i < 128; i++) eng->cc[i] = _ccEntrant[i];
+  for (int i = 0; i < 128; i++) eng->cc[i] = _ccEntrant[m][i];
   const uint32_t c0 = ESP.getCycleCount();
   sfz16_note_on(eng, note, velo);
   const uint32_t dc = ESP.getCycleCount() - c0;
@@ -700,11 +701,19 @@ String diagnostic() {
   /* The Control Changes held (the ones that are not 0): what a locc/hicc gate sees. */
   j += "],\"cc\":{";
   bool premierCc = true;
-  for (int i = 0; i < 128; i++) {
-    if (!_ccEntrant[i]) continue;
+  for (int i = 0; i < 128; i++) {                // engine 0's; engine 1 under "cc1"
+    if (!_ccEntrant[0][i]) continue;
     if (!premierCc) j += ",";
     premierCc = false;
-    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[i];
+    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[0][i];
+  }
+  j += "},\"cc1\":{";
+  premierCc = true;
+  for (int i = 0; i < 128; i++) {
+    if (!_ccEntrant[1][i]) continue;
+    if (!premierCc) j += ",";
+    premierCc = false;
+    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[1][i];
   }
   return j + "}}";
 }
