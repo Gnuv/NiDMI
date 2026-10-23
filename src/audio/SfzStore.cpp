@@ -52,7 +52,7 @@ struct Voeu {
 };
 static Voeu             _voeux[MOTEURS] = {};
 static char             _erreur[160] = "";   // the last refusal
-static char* volatile   _employes = nullptr; // the cue list's sfz= paths, malloc'd, taken by the task
+static char* volatile   _employes = nullptr; // the playing cue's kits (sfz=, sfzpre=), malloc'd, taken by the task
 static volatile int32_t _proposition[MOTEURS] = {-1, -1};   // -1 none, -2 silence, else an _instrs index
 static char*            _csvMemo = nullptr;  // the last employed list (sd-card task's own copy)
 
@@ -274,7 +274,7 @@ static int _charger(const char* chemin, String& raison, Manque& manque) {
   return j;
 }
 
-// ── housekeeping: which instruments does the cue list still name? ───────────
+// ── housekeeping: which instruments does the cue that plays name? (§218) ─────
 
 static bool _nomme(const char* csv, const char* chemin) {
   const size_t n = strlen(chemin);
@@ -293,8 +293,9 @@ static bool _nomme(const char* csv, const char* chemin) {
 static uint32_t _echeance() { return (millis() + RETRAIT_MARGIN_MS) | 1; }
 static bool     _echu(uint32_t t) { return (int32_t)(millis() - t) > 0; }
 
-/* Marks the instruments NO cue names (and that are neither playing, nor asked
- * for, nor about to be adopted): they are freed RETRAIT_MARGIN_MS later. */
+/* Marks the instruments the cue that plays does not name (and that are neither playing — the
+ * leaving cue's, in its Release —, nor asked for, nor about to be adopted): they are freed
+ * RETRAIT_MARGIN_MS later. */
 /* An instrument an engine plays, or is about to adopt (§212: either engine). */
 static bool _tenu(int j) {
   for (uint8_t m = 0; m < MOTEURS; m++) if (_actif[m] == j || _proposition[m] == j) return true;
@@ -436,13 +437,14 @@ void entretenir(const String& employesCsv) {
 
 // ── the sd-card task ────────────────────────────────────────────────────────
 
-/* Takes a wish if one is waiting — the first engine that has one. */
-static bool _prendreVoeu(uint8_t& m, char* sortie, uint32_t& ticket) {
+/* Takes a wish if one is waiting — the first engine that has one, but those of `sauf` (a bit per
+ * engine: already tried in this round, and left waiting). */
+static bool _prendreVoeu(uint8_t& m, char* sortie, uint32_t& ticket, uint8_t sauf) {
   bool attend = false;
   portENTER_CRITICAL(&_mux);
   for (uint8_t k = 0; k < MOTEURS && !attend; k++) {
     const Voeu& v = _voeux[k];
-    if (v.servi == v.ticket) continue;
+    if (v.servi == v.ticket || (sauf & (1u << k))) continue;
     attend = true; m = k;
     strlcpy(sortie, v.veut, CHEMIN_MAX); ticket = v.ticket;
   }
@@ -469,6 +471,45 @@ static bool _conclure(uint8_t m, uint32_t ticket, int j, const String& raison, b
   return courant;
 }
 
+/* Room may come back: a kit in memory the playing cue does not name — the leaving cue's, in its
+ * Release, or one its engine has not let go yet (§218). */
+static bool _placeAVenir() {
+  for (int j = 0; j < SIMULTANES; j++)
+    if (_instrs[j].pris && !(_csvMemo && _nomme(_csvMemo, _instrs[j].chemin))) return true;
+  return false;
+}
+
+/* THE KITS A CUE HOLDS WITHOUT PLAYING THEM (§218, sfzpre=: a kit block muted on that cue): loaded
+ * here, after the played ones and after what left freed its room, given to no engine. A refusal is
+ * said like the others (status `erreur`, NIDMI_SFZ:refus). */
+static void _prechargerEmployes() {
+  if (!_csvMemo || !_csvMemo[0] || !SdCard::mounted()) return;
+  const char* p = _csvMemo;
+  while (*p) {
+    const char* fin = strchr(p, ',');
+    const size_t n = fin ? (size_t)(fin - p) : strlen(p);
+    char chemin[CHEMIN_MAX];
+    if (n > 0 && n < sizeof chemin) {
+      memcpy(chemin, p, n); chemin[n] = 0;
+      if (_instrDe(chemin) < 0 && !strstr(chemin, "..")) {
+        _annoncer("charge", chemin);
+        String raison; Manque manque = RIEN;
+        const uint32_t t0 = millis();
+        if (_obtenir(chemin, raison, manque) >= 0) {
+          NIDMI_WEB_LOG("[sfz] %s pret en %lu ms (precharge, sans jouer)", chemin, (unsigned long)(millis() - t0));
+          _annoncer("pret", chemin);
+        } else {
+          NIDMI_WEB_LOG("[sfz] %s refuse : %s", chemin, raison.c_str());
+          _poserErreur(raison);
+          _annoncer("refus", chemin);
+        }
+      }
+    }
+    if (!fin) break;
+    p = fin + 1;
+  }
+}
+
 void servir() {
   char* emp = __atomic_exchange_n(&_employes, (char*)nullptr, __ATOMIC_ACQ_REL);
   if (emp) {
@@ -477,35 +518,50 @@ void servir() {
     _marquer(_csvMemo);
   }
 
-  char voeu[CHEMIN_MAX]; uint32_t ticket; uint8_t m = 0;
-  while (_prendreVoeu(m, voeu, ticket)) {
-    if (!SdCard::mounted()) {                    // wait for the card: SdCard calls us again when it is back
-      _conclure(m, ticket, -1, "carte SD absente ou perdue : le chargement reprendra a son retour", false);
-      break;
+  /* Two rounds at most: a wish refused for ROOM waits (§218) — the leaving cue's kit still sounds,
+   * or its engine has not let it go yet. When the housekeeping below frees room, the waiting wishes
+   * are tried once more; otherwise the next ask (a slot drained, a cue) tries them. */
+  for (int tour = 0; tour < 2; tour++) {
+    char voeu[CHEMIN_MAX]; uint32_t ticket; uint8_t m = 0, enAttente = 0;
+    while (_prendreVoeu(m, voeu, ticket, enAttente)) {
+      if (!SdCard::mounted()) {                  // wait for the card: SdCard calls us again when it is back
+        _conclure(m, ticket, -1, "carte SD absente ou perdue : le chargement reprendra a son retour", false);
+        break;
+      }
+      if (_instrDe(voeu) < 0) _annoncer("charge", voeu);
+      String raison; Manque manque = RIEN;
+      const uint32_t t0 = millis();
+      const int j = _obtenir(voeu, raison, manque);
+      if (j >= 0) _dernierMs = millis() - t0;
+      /* NO ROOM while a kit that is leaving is still in memory: the wish waits, said "attente" (not
+       * a refusal: no alert in the app). Too big beside the playing cue's own kits, or any other
+       * cause: refused, final. */
+      const bool attendre = (j < 0 && manque != RIEN && _placeAVenir());
+      if (attendre) { enAttente |= (uint8_t)(1u << m); raison = "en attente de place : " + raison; }
+      const bool courant = _conclure(m, ticket, j, raison, !attendre);
+      if (j >= 0) {
+        NIDMI_WEB_LOG("[sfz] %s pret en %lu ms%s", voeu, (unsigned long)(millis() - t0),
+                      courant ? "" : " (remplace entre-temps : garde en reserve)");
+        if (courant) _annoncer("pret", voeu);
+      } else if (attendre) {
+        NIDMI_WEB_LOG("[sfz] %s %s", voeu, raison.c_str());
+        if (courant) _annoncer("attente", voeu);
+      } else {
+        NIDMI_WEB_LOG("[sfz] %s refuse : %s", voeu, raison.c_str());
+        if (courant) _annoncer("refus", voeu);
+      }
     }
-    if (_instrDe(voeu) < 0) _annoncer("charge", voeu);
-    String raison; Manque manque = RIEN;
-    const uint32_t t0 = millis();
-    const int j = _obtenir(voeu, raison, manque);
-    if (j >= 0) _dernierMs = millis() - t0;
-    const bool courant = _conclure(m, ticket, j, raison, true);
-    if (j >= 0) {
-      NIDMI_WEB_LOG("[sfz] %s pret en %lu ms%s", voeu, (unsigned long)(millis() - t0),
-                    courant ? "" : " (remplace entre-temps : garde en reserve)");
-      if (courant) _annoncer("pret", voeu);
-    } else {
-      NIDMI_WEB_LOG("[sfz] %s refuse : %s", voeu, raison.c_str());
-      if (courant) _annoncer("refus", voeu);
-    }
+    /* The housekeeping skips the PLAYING instrument, and the audio task adopts a
+     * proposition (a new kit, or silence) within a block (2.5 ms): once it did,
+     * the kit it replaced is retirable. Wait for the adoption, then sort again
+     * with the playing cue's kits — otherwise it would stay until the next cue. */
+    for (int t = 0; t < 20 && (_proposition[0] != -1 || _proposition[1] != -1); t++) vTaskDelay(pdMS_TO_TICKS(5));
+    vTaskDelay(pdMS_TO_TICKS(5));                // the audio task sets _actif right after taking it
+    if (_csvMemo) _marquer(_csvMemo);
+    const bool libere = _attendreLesRetraits();  // frees what the housekeeping marked (a few ms)
+    if (!enAttente || !libere) break;
   }
-  /* The housekeeping skips the PLAYING instrument, and the audio task adopts a
-   * proposition (a new kit, or silence) within a block (2.5 ms): once it did,
-   * the kit it replaced is retirable. Wait for the adoption, then sort again
-   * with the last cue list — otherwise it would stay until the next cue. */
-  for (int t = 0; t < 20 && (_proposition[0] != -1 || _proposition[1] != -1); t++) vTaskDelay(pdMS_TO_TICKS(5));
-  vTaskDelay(pdMS_TO_TICKS(5));                  // the audio task sets _actif right after taking it
-  if (_csvMemo) _marquer(_csvMemo);
-  _attendreLesRetraits();                        // frees what the housekeeping marked (a few ms)
+  _prechargerEmployes();                         // the kits a cue holds without playing them (§218)
 }
 
 // ── audio task ──────────────────────────────────────────────────────────────

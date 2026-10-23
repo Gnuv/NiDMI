@@ -3,8 +3,10 @@
 //
 // AN INSTRUMENT IS A CUE'S GUEST: `sfz=kit-test/kit.sfz` in a cue line loads
 // it (instruments live in PSRAM, samples int16 — the kernel's contract), and
-// it is UNLOADED when no cue of the list names it anymore — several .sfz can
-// live in one composition, at different times. Samples are deduplicated by
+// it is UNLOADED with the first cue that does not name it, once no slot sounds
+// with it (§218, Gael's rule: to keep a kit, its block spans the cues; to load it
+// ahead, `sfzpre=` — a kit block muted on the cue before — loads it without
+// playing it). Several .sfz live in one composition, at different times. Samples are deduplicated by
 // path across instruments (two kits sharing a WAV load it once), bounded by
 // BUDGET_PSRAM; refusals carry a message (missing file, bad WAV, budget…).
 //
@@ -57,9 +59,10 @@ constexpr uint8_t MOTEURS = 2;
  * goes silent now (its notes stop). False with `raison` only for a request
  * that cannot even be tried (path too long or climbing out of /sfz). */
 bool proposer(uint8_t moteur, const char* chemin, String& raison);
-/* Housekeeping, called after each cue apply: `employesCsv` is the comma list
- * of the sfz= paths the WHOLE cue list still names. The sd-card task retires
- * the others (freed RETRAIT_MARGIN_MS later, once drained). */
+/* Housekeeping, called after each cue apply and when a slot is drained: `employesCsv` is the
+ * comma list of the kits the cue that plays names (sfz= and sfzpre=, §218). The sd-card task
+ * loads the sfzpre= ones it lacks, and retires the others no engine holds (freed
+ * RETRAIT_MARGIN_MS later, once drained). */
 void entretenir(const String& employesCsv);
 
 // ── The sd-card task only (SdCard calls it for its `_wantSfz` flag) ─────────

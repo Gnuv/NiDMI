@@ -200,17 +200,14 @@ namespace {
 /* Les chemins sfz= que la LISTE ENTIÈRE nomme encore (§207, décision du 6
  * octobre) : l'entretien décharge un instrument chargé qu'aucune cue ne
  * nomme plus. Passe par lire() : _pourChaqueLigne est défini plus bas. */
-static String _sfzEmployes() {
-  String toutes;
-  const int n = nombre();
-  for (int i = 0; i < n; i++) {
-    Cue c;
-    if (!lire(i, c)) continue;
-    const String v = _valeurDe(c.params, "sfz");
-    if (v.length()) toutes += (toutes.length() ? "," : "") + v;
-  }
-  return toutes;
-}
+/* THE KITS OF THE CUE THAT PLAYS (§218): the one it plays (sfz=) and the ones it holds without
+ * playing them (sfzpre=: a kit block muted on that cue, loaded ahead). Gael: a kit loads with the
+ * cue that names it and leaves with the first one that does not — to keep it loaded, the block
+ * spans the cues; to load it ahead, it is muted on the cue before. The leaving cue's kit stays
+ * while its slot sounds (an engine holds it, SfzStore). It was "every kit the LIST names": with
+ * two big kits in a list, the second never found room. */
+static String _kitsCue;
+static String _sfzEmployes() { return _kitsCue; }
 
 /* ── THE CUE SLOTS (MESURES §212) ─────────────────────────────────────────
  * Gael: "the departure case and the arrival case must be active at the same time during the
@@ -292,6 +289,16 @@ void _appliquer(const Cue& c) {
    * duration as in the browser (D17): releases never pile up across cues. */
   const float releaseSortant = (c.duree > 0.0f && _releaseSortant > c.duree) ? c.duree : _releaseSortant;
   _releaseSortant = _valeurDe(c.params, "crelease").toFloat() / 1000.0f;
+  /* THE KITS (§218), on EVERY cue — a cue without sound unloads them too: the ones it names are
+   * loaded (sfzpre= ones without playing), the others leave once no slot sounds with them. Said
+   * BEFORE the cue's kit is asked for: the SD task judges a lack of room against this list (a
+   * kit that is leaving frees room: the wish waits; one the cue keeps does not). */
+  {
+    const String tenus = _valeurDe(c.params, "sfzpre");
+    _kitsCue = _valeurDe(c.params, "sfz");
+    if (tenus.length()) _kitsCue += (_kitsCue.length() ? "," : "") + tenus;
+    if (_kitsCue.length() || SfzStore::enMemoire()) SfzStore::entretenir(_kitsCue);
+  }
   const uint8_t ns = _changerDeSlot(releaseSortant,
                                     _valeurDe(c.params, "cdelay").toFloat() / 1000.0f,
                                     _valeurDe(c.params, "cattack").toFloat() / 1000.0f,
@@ -545,8 +552,6 @@ void _appliquer(const Cue& c) {
         if (!SfzStore::proposer((uint8_t)k, cheminSfz.c_str(), raisonSfz))
           Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
       }
-      /* The walk over the whole list costs: only when a kit is held or asked for. */
-      if (cheminSfz.length() || SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
     }
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
