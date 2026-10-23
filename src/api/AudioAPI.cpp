@@ -433,12 +433,12 @@ void setupAudioAPI(AsyncWebServer& server) {
                     if (sv >= 0) SynthVoice::setEngine((uint8_t)sv, e);
         }
         /* THE VOICE OPTIONS (§214), live, for the cue that plays: one voice or two taking turns
-         * (the second a clone of the first, taken when a voice is free), and the velocity glide
-         * in ms (a softer note lowers the level over that time instead of at once). */
-        if (request->hasParam("voices", true) || request->hasParam("velo_glide", true))
+         * (the second a clone of the first, taken when a voice is free), and the velocity gain
+         * (0/1: each note's velocity sets the voice's level; off, every note alike). */
+        if (request->hasParam("voices", true) || request->hasParam("velocity", true))
             Cues::setVoiceOptions(
                 request->hasParam("voices", true) ? request->getParam("voices", true)->value().toInt() : -1,
-                request->hasParam("velo_glide", true) ? request->getParam("velo_glide", true)->value().toFloat() : -1.0f);
+                request->hasParam("velocity", true) ? request->getParam("velocity", true)->value().toInt() : -1);
         AudioEngine::Params p = AudioEngine::params();
         auto lire = [&](const char* nom, float& dest){
             if (request->hasParam(nom, true))

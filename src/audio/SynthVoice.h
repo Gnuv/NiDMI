@@ -40,11 +40,12 @@ constexpr uint8_t VOICES = 2;
 /* The voice `v`'s engine 0..23, or -1 (none: silent, its state kept). The first engine >= 0
  * allocates the voice in PSRAM and starts the core 0 task; false + reason if that fails. */
 bool configure(uint8_t v, int engine, uint32_t bloc, uint8_t channel, float gain, String& reason);
-/* THE VELOCITY GLIDE (§214, an option of the Plaits block, cue key `synthvelo`): a note SOFTER than
- * the sound that rings brings the level down over `ms` instead of at once — at once, a soft hit in a
- * roll cut the loud one before it. A louder note is immediate (its attack stays sharp). 0: at once. */
-void setVelocityGlide(uint8_t v, float ms);
-/* Voice `to` takes `from`'s engine, block, channel, gain, parameters and glide — the second voice of
+/* THE VELOCITY GAIN (§214, an option of the Plaits block, cue key `synthvelo=1`; off by default):
+ * each note's velocity sets the level of the WHOLE voice. Plaits takes no velocity (its LEVEL input
+ * unpatched, as in the browser): off, every note plays at the same level. On, a soft hit in a roll
+ * lowers the loud note that still rings — a monophonic voice cannot do otherwise. */
+void setVelocityGain(uint8_t v, bool on);
+/* Voice `to` takes `from`'s engine, block, channel, gain, parameters and velocity gain — the second voice of
  * a cue in two voices (§214). False + reason if `to` cannot be allocated. */
 bool clone(uint8_t from, uint8_t to, String& reason);
 void setParams(uint8_t v, const AudioEngine::Params& p);

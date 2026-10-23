@@ -43,9 +43,7 @@ struct Voice {
   Note                 notes[16];
   volatile uint8_t     notesHead = 0, notesTail = 0;
   float                velNow = 1.0f;             // core 0 task: the level the velocity gives, now
-  float                velTarget = 1.0f;          // ... the last note's
-  float                velStep = 0.0f;            // ... per sample, while it glides down
-  volatile float       velGlideS = 0.0f;          // the glide down, in seconds (0: at once) — §214
+  volatile bool        velocityGain = false;      // the option (§214): off, every note at the same level
   volatile uint32_t    lateBlocks = 0, rendered = 0, worstCycles = 0;
   volatile uint64_t    sumCycles = 0;
   uint32_t             overInRow = 0;             // core 0 task
@@ -71,15 +69,12 @@ inline Voice* voiceOf(uint8_t v) { return v < VOICES ? &voices[v] : nullptr; }
 
 void render(Voice& s, float* out) {
   bool trigger = false;
+  float vel = s.velNow;
   while (s.notesTail != s.notesHead) {
     const Note n = s.notes[s.notesTail & 15];
     s.notesTail = s.notesTail + 1;
     s.patch.note = n.note;
-    /* THE VELOCITY (§214): up at once; down at once, or over the glide. */
-    const float v = n.velocity / 127.0f, glide = s.velGlideS;
-    s.velTarget = v;
-    if (v >= s.velNow || glide <= 0.0f) { s.velNow = v; s.velStep = 0.0f; }
-    else s.velStep = (s.velNow - v) / (glide * (float)AudioEngine::SAMPLE_RATE);
+    vel = n.velocity / 127.0f;                // the last note of the block wins, as its pitch
     trigger = true;
   }
   s.mod.trigger_patched = !s.droneWanted;
@@ -88,16 +83,20 @@ void render(Voice& s, float* out) {
     s.voice->Render(s.patch, s.mod, &frames[i], plaits::kBlockSize);
   }
   constexpr float K = 1.0f / 32768.0f;
-  if (s.velStep > 0.0f) {
-    for (size_t i = 0; i < FRAMES; i++) {
-      s.velNow -= s.velStep;
-      if (s.velNow <= s.velTarget) { s.velNow = s.velTarget; s.velStep = 0.0f; }
-      out[i] = frames[i].out * s.velNow * K;
-    }
-  } else {
-    const float k = s.velNow * K;
-    for (size_t i = 0; i < FRAMES; i++) out[i] = frames[i].out * k;
+  if (!s.velocityGain) {                    // as in the browser: Plaits' own level, every note alike
+    s.velNow = 1.0f;
+    for (size_t i = 0; i < FRAMES; i++) out[i] = frames[i].out * K;
+    return;
   }
+  /* THE VELOCITY GAIN (§214), from the sample where the note starts: Plaits delays its trigger by
+   * kTriggerDelay renders of kBlockSize (60 samples, 1.25 ms). Changed at the block's start, the
+   * level of the sound still ringing took the new note's 1.25 ms BEFORE the note. */
+  constexpr size_t AT = (size_t)plaits::kTriggerDelay * plaits::kBlockSize;
+  static_assert(AT < FRAMES, "the delayed trigger falls in the block it was given in");
+  const size_t from = trigger ? AT : FRAMES;
+  for (size_t i = 0; i < from; i++) out[i] = frames[i].out * s.velNow * K;
+  if (trigger) s.velNow = vel;
+  for (size_t i = from; i < FRAMES; i++) out[i] = frames[i].out * s.velNow * K;
 }
 
 void taskLoop(void*) {
@@ -223,10 +222,9 @@ bool configure(uint8_t v, int engine, uint32_t bloc, uint8_t ch, float gain, Str
   return true;
 }
 
-void setVelocityGlide(uint8_t v, float ms) {
+void setVelocityGain(uint8_t v, bool on) {
   Voice* s = voiceOf(v);
-  if (!s) return;
-  s->velGlideS = (ms == ms && ms > 0.0f) ? (ms > 500.0f ? 0.5f : ms / 1000.0f) : 0.0f;
+  if (s) s->velocityGain = on;
 }
 
 bool clone(uint8_t from, uint8_t to, String& reason) {
@@ -236,7 +234,7 @@ bool clone(uint8_t from, uint8_t to, String& reason) {
   /* configure first: the first time, it allocates the voice and puts its patch to the defaults. */
   if (!configure(to, a->engineNow, a->blockId, a->channel, a->gainTarget, reason)) return false;
   setParams(to, params(from));
-  b->velGlideS = a->velGlideS;
+  b->velocityGain = a->velocityGain;
   return true;
 }
 

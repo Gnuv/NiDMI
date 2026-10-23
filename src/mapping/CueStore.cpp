@@ -360,9 +360,9 @@ void _appliquer(const Cue& c) {
     String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
     /* §210: the channels of the keyboard and of the kit, and the synth voice. */
     String canalClavier, canalSfz, synth, synthBloc, synthCanal, synthGain;
-    /* §214: the synth voice's options — two voices taking turns, the velocity glide (ms). */
+    /* §214: the synth voice's options — two voices taking turns, the velocity gain. */
     uint8_t synthPoly = 1;
-    float   synthVelo = 0.0f;
+    bool    synthVelo = false;
     AudioEngine::Params synthParams = AudioEngine::params();
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
@@ -388,7 +388,7 @@ void _appliquer(const Cue& c) {
         else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
         else if (cle == "synthgain") { synthGain = kv.substring(eq + 1); synthGain.trim(); }
         else if (cle == "synthpoly") synthPoly = (uint8_t)kv.substring(eq + 1).toInt();     // §214
-        else if (cle == "synthvelo") synthVelo = kv.substring(eq + 1).toFloat();            // §214, ms
+        else if (cle == "synthvelo") synthVelo = kv.substring(eq + 1).toInt() != 0;         // §214
         else if (cle == "harmonics" || cle == "timbre" || cle == "morph" || cle == "decay"
                  || cle == "lpg_colour" || cle == "drone") {
           const float v = kv.substring(eq + 1).toFloat();
@@ -441,7 +441,7 @@ void _appliquer(const Cue& c) {
             Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
           /* After configure: the voice's first allocation puts its patch to the defaults. */
           if (synthParamsVus) AudioEngine::setParams(synthParams);   // the slot's voices, now its own
-          SynthVoice::setVelocityGlide((uint8_t)v1, synthVelo);
+          SynthVoice::setVelocityGain((uint8_t)v1, synthVelo);
           /* Two voices: the second a clone of the first — taken now if one is free, else when the
            * leaving cue lets its voice go (_servirReleases). A handed-over second voice is cloned
            * again: the engine or the parameters may have changed. */
@@ -1125,13 +1125,13 @@ void restaurerOptions() {
 void surChangement(void (*rappel)(const Etat&)) { VerrouSeq verrou; _rappelEtat = rappel; }
 void annoncerEtat() { VerrouSeq verrou; _annoncer(); }
 
-void setVoiceOptions(int voices, float glideMs) {
+void setVoiceOptions(int voices, int velocityGain) {
   VerrouSeq verrou;
   const int8_t sc = AudioEngine::slotCourant();
   if (sc < 0) return;
-  if (glideMs >= 0.0f)
+  if (velocityGain >= 0)
     for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
-      if (sv >= 0) SynthVoice::setVelocityGlide((uint8_t)sv, glideMs);
+      if (sv >= 0) SynthVoice::setVelocityGain((uint8_t)sv, velocityGain > 0);
   if (voices > 0) {
     AudioEngine::fixerVoixVoulues((uint8_t)sc, (uint8_t)voices);
     AudioEngine::ajusterVoix((uint8_t)sc);
