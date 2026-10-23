@@ -479,9 +479,11 @@ static bool _placeAVenir() {
   return false;
 }
 
-/* THE KITS A CUE HOLDS WITHOUT PLAYING THEM (§218, sfzpre=: a kit block muted on that cue): loaded
- * here, after the played ones and after what left freed its room, given to no engine. A refusal is
- * said like the others (status `erreur`, NIDMI_SFZ:refus). */
+/* THE KITS OF THE PLAYING CUE THAT ARE NOT IN MEMORY (§218): the sfzpre= ones (a kit block muted on
+ * that cue), given to no engine — and the one it plays, when its list is said before its wish (the
+ * cue says it first: CueStore). Loaded here, after the wishes and after what left freed its room.
+ * No room while a leaving kit is still in memory: it waits, like a wish (said "attente", tried at
+ * the next ask); any other refusal is said like the others (status `erreur`, NIDMI_SFZ:refus). */
 static void _prechargerEmployes() {
   if (!_csvMemo || !_csvMemo[0] || !SdCard::mounted()) return;
   const char* p = _csvMemo;
@@ -496,8 +498,12 @@ static void _prechargerEmployes() {
         String raison; Manque manque = RIEN;
         const uint32_t t0 = millis();
         if (_obtenir(chemin, raison, manque) >= 0) {
-          NIDMI_WEB_LOG("[sfz] %s pret en %lu ms (precharge, sans jouer)", chemin, (unsigned long)(millis() - t0));
+          _dernierMs = millis() - t0;
+          NIDMI_WEB_LOG("[sfz] %s pret en %lu ms (kit de la cue)", chemin, (unsigned long)_dernierMs);
           _annoncer("pret", chemin);
+        } else if (manque != RIEN && _placeAVenir()) {
+          NIDMI_WEB_LOG("[sfz] %s en attente de place : %s", chemin, raison.c_str());
+          _annoncer("attente", chemin);
         } else {
           NIDMI_WEB_LOG("[sfz] %s refuse : %s", chemin, raison.c_str());
           _poserErreur(raison);
