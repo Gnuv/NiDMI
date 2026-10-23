@@ -2647,7 +2647,6 @@ bool silencePourLaFlash() {
 }
 void ecritureFlashDebut() { ecrituresFlash = ecrituresFlash + 1; }   // -> impair
 void ecritureFlashFin()   { ecrituresFlash = ecrituresFlash + 1; }   // -> pair
-uint32_t flashWriteSeq() { return ecrituresFlash; }
 
 uint32_t silenceDepuisMs() {
   if (!demarre) return UINT32_MAX;          // pas de son a proteger

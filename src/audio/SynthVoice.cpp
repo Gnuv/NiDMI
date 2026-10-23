@@ -1,5 +1,6 @@
 /* THE SYNTH VOICE — see SynthVoice.h. */
 #include "SynthVoice.h"
+#include "../diag/SurveillantFlash.h"   // the flash's stops, out of what a voice costs (§214)
 
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -110,19 +111,19 @@ void taskLoop(void*) {
       more = false;
       for (Voice& s : voices) {
         if (!(s.enabled && !s.overloaded && s.voice && s.produced - s.consumed < LEAD)) continue;
-        const uint32_t w0 = AudioEngine::flashWriteSeq();
+        const uint32_t f0 = SurveillantFlash::cyclesSinceBoot();
         const uint32_t t = ESP.getCycleCount();
         render(s, s.ring + (s.produced % RING) * FRAMES);
-        const uint32_t c = ESP.getCycleCount() - t;
-        /* A flash write stops both cores (§155, up to 186 ms measured): the render that spans it
-         * says nothing of what the voices cost. Counted, it alone overran the two voices' 40
-         * blocks — the guard stopped a voice until the next cue, at the bench's first silence. */
-        const bool stalled = (w0 & 1u) || AudioEngine::flashWriteSeq() != w0;
+        const uint32_t elapsed = ESP.getCycleCount() - t;
+        /* WHAT THE VOICE COST, the flash's stops taken out (§214). Any flash operation — a write
+         * (§155: 30 ms, 186 ms measured), a LittleFS or NVS read — stops both cores. Counted,
+         * the writes of the bench's cues and the reads that follow them overran the two voices'
+         * budget: the guard stopped a voice until the next cue, at the first silence. */
+        const uint32_t f = SurveillantFlash::cyclesSinceBoot() - f0;
+        const uint32_t c = (f < elapsed) ? elapsed - f : 0;
         const bool deux = voices[0].enabled && !voices[0].overloaded && voices[0].voice
                        && voices[1].enabled && !voices[1].overloaded && voices[1].voice;
-        if (stalled) {
-          // left out of the guards and of the measures
-        } else if (deux) {
+        if (deux) {
           bothCycles += c;
           if (++bothRenders >= 2 * OVER_RENDERS) {
             if (bothCycles > (uint64_t)OVER_RENDERS * limitBoth) {
@@ -142,7 +143,6 @@ void taskLoop(void*) {
         __sync_synchronize();                   // the samples before the counter, seen in that order
         s.produced = s.produced + 1;
         s.rendered = s.rendered + 1;
-        if (stalled) { more = true; continue; }
         s.sumCycles = s.sumCycles + c;
         if (c > s.worstCycles) s.worstCycles = c;
         if (c > limit) {

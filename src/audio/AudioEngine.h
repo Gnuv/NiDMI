@@ -423,9 +423,6 @@ uint32_t gardeRetardEtRaz();
  * ne s'est entendu). Le voyant « decrochages » ne compte que la difference. */
 void ecritureFlashDebut();
 void ecritureFlashFin();
-/* Their sequence: odd during a write. A render that saw it change, or odd, overlapped a write
- * (the synth voices' guards leave it out, §214). */
-uint32_t flashWriteSeq();
 
 // Métrologie — répond à la question §12.7 de CONVERGENCE_NIDMI.md : combien de
 // tas reste-t-il réellement une fois WiFi + serveur async + app embarquée en

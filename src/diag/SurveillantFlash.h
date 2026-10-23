@@ -33,6 +33,11 @@ void installer();
 /** Ce qui s'est passe depuis le releve precedent, et remise a zero. */
 Releve releverEtRaz();
 
+/** The cycles the flash operations have held since boot — each one's wait for the other core
+ *  included —, never reset (it wraps: take differences). Both cores are stopped meanwhile: a
+ *  measure of what a task costs takes them out of the time it took (the synth voices, §214). */
+uint32_t cyclesSinceBoot();
+
 /** La plus longue operation de flash depuis le demarrage, relevee a chaque lecture : sa duree,
  *  l'heure (ms) du releve qui l'a vue, la tache qui l'a lancee. */
 void pireDepuisLeBoot(uint32_t& us, uint32_t& atMs, char* tache, size_t n);

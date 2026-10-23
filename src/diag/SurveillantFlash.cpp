@@ -17,6 +17,7 @@ DRAM_ATTR volatile uint32_t g_debutCycles = 0;
 DRAM_ATTR volatile uint32_t g_n = 0;
 DRAM_ATTR volatile uint32_t g_totalCycles = 0;   // cycles bruts : pas de division
 DRAM_ATTR volatile uint32_t g_pireCycles = 0;    // cache coupe (voir releverEtRaz)
+DRAM_ATTR volatile uint32_t g_cyclesSinceBoot = 0;   // never reset (§214)
 DRAM_ATTR TaskHandle_t g_tacheEnCours = nullptr;
 DRAM_ATTR TaskHandle_t g_pireTache = nullptr;
 // L'ATTENTE avant l'operation : le temps que l'autre coeur se gare (ipc).
@@ -38,6 +39,7 @@ IRAM_ATTR esp_err_t debut(void* arg) {
   g_debutCycles = (uint32_t)esp_cpu_get_cycle_count();
   const uint32_t attente = g_debutCycles - avant;
   if (attente > g_pireAttenteCycles) { g_pireAttenteCycles = attente; g_pireAttenteTache = t; }
+  g_cyclesSinceBoot = g_cyclesSinceBoot + attente;
   return r;
 }
 
@@ -45,6 +47,7 @@ IRAM_ATTR esp_err_t fin(void* arg) {
   const uint32_t d = (uint32_t)esp_cpu_get_cycle_count() - g_debutCycles;
   g_n = g_n + 1;
   g_totalCycles = g_totalCycles + d;
+  g_cyclesSinceBoot = g_cyclesSinceBoot + d;
   if (d > g_pireCycles) { g_pireCycles = d; g_pireTache = g_tacheEnCours; }
   return g_finOrig(arg);
 }
@@ -93,6 +96,8 @@ Releve releverEtRaz() {
   }
   return r;
 }
+
+uint32_t cyclesSinceBoot() { return g_cyclesSinceBoot; }
 
 void pireDepuisLeBoot(uint32_t& us, uint32_t& atMs, char* tache, size_t n) {
   us = g_bootPireUs; atMs = g_bootPireAtMs;
