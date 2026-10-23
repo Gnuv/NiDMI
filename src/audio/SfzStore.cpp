@@ -534,11 +534,12 @@ void servir() {
         _conclure(m, ticket, -1, "carte SD absente ou perdue : le chargement reprendra a son retour", false);
         break;
       }
-      if (_instrDe(voeu) < 0) _annoncer("charge", voeu);
+      const bool froid = _instrDe(voeu) < 0;     // read now; else already in memory (held, preloaded)
+      if (froid) _annoncer("charge", voeu);
       String raison; Manque manque = RIEN;
       const uint32_t t0 = millis();
       const int j = _obtenir(voeu, raison, manque);
-      if (j >= 0) _dernierMs = millis() - t0;
+      if (j >= 0 && froid) _dernierMs = millis() - t0;   // a kit found in memory says nothing of a load
       /* NO ROOM while a kit that is leaving is still in memory: the wish waits, said "attente" (not
        * a refusal: no alert in the app). Too big beside the playing cue's own kits, or any other
        * cause: refused, final. */
