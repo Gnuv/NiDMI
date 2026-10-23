@@ -723,56 +723,82 @@ static bool _finit(const char* nom, const char* ext) {
   return n >= e && !strcasecmp(nom + n - e, ext);
 }
 
-/* One folder of /sfz, and the sub-folders (depth 1) below it: the .sfz it holds and the weight
- * of its WAV files. `d` is an open directory. */
-static void _balayerKit(File& d, int profondeur, String* sfz, uint32_t* tailles, int& ns,
-                        uint32_t& wavOctets, int& wavN, int& vus, uint32_t t0, bool& tronque) {
-  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-    if (++vus > 400 || millis() - t0 > 900) { tronque = true; return; }
-    const char* nom = f.name();
-    if (nom[0] == '.') continue;                 // what a Mac leaves on a card: ._kit.sfz, .DS_Store, .Spotlight-V100...
-    if (f.isDirectory()) {
-      if (profondeur < 1) _balayerKit(f, profondeur + 1, sfz, tailles, ns, wavOctets, wavN, vus, t0, tronque);
-      if (tronque) return;
-    } else if (_finit(nom, ".wav")) {
-      wavOctets += (f.size() > 44) ? (uint32_t)f.size() - 44 : 0;   // the PCM, not the header
-      wavN++;
-    } else if (profondeur == 0 && _finit(nom, ".sfz") && ns < 8) {
-      sfz[ns] = nom; tailles[ns] = (uint32_t)f.size(); ns++;
+/* THE KITS OF /sfz, read as DIRECTORY ENTRIES (SdCard::listForWeb, §216): nothing is opened. Opening
+ * every file to weigh it cost ~7 ms each, the "._" twins a Mac leaves beside every file included, and
+ * the list ran out of its 900 ms before the last kit. A kit is a folder holding .sfz files; its WAV
+ * files may sit one folder below (samples/), their weight is their size minus a 44-byte header (a
+ * majorant of the PSRAM they take). Names starting with '.' are skipped: ._kit.sfz, .DS_Store,
+ * .Spotlight-V100. */
+namespace {
+struct KitWalk {
+  String   sfz[8];
+  uint32_t sizes[8] = {0};
+  int      ns = 0, wavCount = 0, seen = 0, depth = 0;
+  uint32_t wavBytes = 0, t0 = 0;
+  bool     truncated = false;
+  String   folder;
+};
+bool visitKit(const char* name, bool dir, uint32_t size, void* ctx) {
+  KitWalk& k = *(KitWalk*)ctx;
+  if (++k.seen > 800 || millis() - k.t0 > 900) { k.truncated = true; return false; }
+  if (name[0] == '.') return true;
+  if (dir) {
+    if (k.depth < 1) {
+      const String back = k.folder;
+      k.folder = back + "/" + name;
+      k.depth++;
+      SdCard::listForWeb(k.folder.c_str(), visitKit, ctx);
+      k.depth--;
+      k.folder = back;
     }
+    return !k.truncated;
   }
+  if (_finit(name, ".wav")) { k.wavBytes += (size > 44) ? size - 44 : 0; k.wavCount++; }
+  else if (k.depth == 0 && _finit(name, ".sfz") && k.ns < 8) { k.sfz[k.ns] = name; k.sizes[k.ns] = size; k.ns++; }
+  return true;
 }
+struct RootWalk {
+  String*  json;
+  int      kits = 0, seen = 0;
+  uint32_t t0 = 0;
+  bool     truncated = false;
+};
+bool visitRoot(const char* name, bool dir, uint32_t size, void* ctx) {
+  RootWalk& r = *(RootWalk*)ctx;
+  if (name[0] == '.') return true;             // hidden entries are not kits (nor folders of kits)
+  if (++r.seen > 64 || r.kits >= 64 || millis() - r.t0 > 900) { r.truncated = true; return false; }
+  String& j = *r.json;
+  if (!dir) {                                  // a .sfz at the root of /sfz: no folder, no WAV to weigh
+    if (_finit(name, ".sfz")) {
+      if (r.kits++) j += ",";
+      j += String("{\"path\":\"") + echapper(name) + "\",\"bytes\":" + String((unsigned)size)
+         + ",\"wav_bytes\":0,\"wav_count\":0}";
+    }
+    return true;
+  }
+  KitWalk k;
+  k.t0 = r.t0;
+  k.folder = String(DOSSIER) + "/" + name;
+  SdCard::listForWeb(k.folder.c_str(), visitKit, &k);
+  for (int i = 0; i < k.ns && r.kits < 64; i++) {
+    if (r.kits++) j += ",";
+    j += String("{\"path\":\"") + echapper(String(name) + "/" + k.sfz[i]) + "\",\"bytes\":"
+       + String((unsigned)k.sizes[i]) + ",\"wav_bytes\":" + String((unsigned)k.wavBytes)
+       + ",\"wav_count\":" + String(k.wavCount) + "}";
+  }
+  if (k.truncated) { r.truncated = true; return false; }
+  return true;
+}
+}  // namespace
 
 String listerKits() {
   String j = String("{\"sd\":\"") + SdCard::state() + "\",\"folder\":\"" + DOSSIER
            + "\",\"budget\":" + String((unsigned)BUDGET_PSRAM) + ",\"kits\":[";
-  bool tronque = false;
-  File racine = SdCard::openForWeb(DOSSIER);
-  if (racine && racine.isDirectory()) {
-    const uint32_t t0 = millis();
-    int nKits = 0, vus = 0;
-    for (File d = racine.openNextFile(); d && !tronque; d = racine.openNextFile()) {
-      if (++vus > 32 || nKits >= 64) { tronque = true; break; }
-      const String dossier = d.name();
-      if (dossier[0] == '.') continue;           // hidden entries are not kits (nor folders of kits)
-      if (!d.isDirectory()) {                    // a .sfz at the root of /sfz: no folder, no WAV to weigh
-        if (_finit(dossier.c_str(), ".sfz")) {
-          if (nKits++) j += ",";
-          j += String("{\"path\":\"") + echapper(dossier) + "\",\"bytes\":" + String((unsigned)d.size())
-             + ",\"wav_bytes\":0,\"wav_count\":0}";
-        }
-        continue;
-      }
-      String sfz[8]; uint32_t tailles[8]; int ns = 0; uint32_t wavOctets = 0; int wavN = 0, vusKit = 0;
-      _balayerKit(d, 0, sfz, tailles, ns, wavOctets, wavN, vusKit, t0, tronque);
-      for (int i = 0; i < ns && nKits < 64; i++) {
-        if (nKits++) j += ",";
-        j += String("{\"path\":\"") + echapper(dossier + "/" + sfz[i]) + "\",\"bytes\":" + String((unsigned)tailles[i])
-           + ",\"wav_bytes\":" + String((unsigned)wavOctets) + ",\"wav_count\":" + String(wavN) + "}";
-      }
-    }
-  }
-  return j + "],\"truncated\":" + (tronque ? "true" : "false") + "}";
+  RootWalk r;
+  r.json = &j;
+  r.t0 = millis();
+  SdCard::listForWeb(DOSSIER, visitRoot, &r);
+  return j + "],\"truncated\":" + (r.truncated ? "true" : "false") + "}";
 }
 
 String echapper(const String& s) {

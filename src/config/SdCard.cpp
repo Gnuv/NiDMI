@@ -652,6 +652,11 @@ File openForWeb(const char* path) {
   return open(path);
 }
 
+bool listForWeb(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx) {
+  if (!_mounted || _wantCheck || SdSpiDisk::failStreak() > 0) return false;
+  return SdSpiDisk::listDir(path, visit, ctx);
+}
+
 File open(const char* path) {
   if (!_mounted) return File();
   return SdSpiDisk::open(path);

@@ -83,6 +83,8 @@ File open(const char* path);
  * list then simply does not show the SD for a moment. The streams and the heads use `open`:
  * they must try again. */
 File openForWeb(const char* path);
+/* A folder's entries without opening them (SdSpiDisk::listDir), under the same guard. */
+bool listForWeb(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx);
 
 /* DIAGNOSTICS — a board without a serial port cannot say why a card won't mount.
  * The `[SD]` messages go to the web console (NIDMI_WEB_LOG); and when mounting

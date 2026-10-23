@@ -399,4 +399,21 @@ File open(const char* path) {
   return _fs->open(path, FILE_READ);
 }
 
+bool listDir(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx) {
+  if (!_ready) return false;
+  /* In PSRAM: a FILINFO holds a 256-byte long name, and the web task's stack is short. */
+  struct Walk { FF_DIR d; FILINFO fi; char full[200]; };
+  Walk* w = (Walk*)heap_caps_malloc(sizeof(Walk), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!w) return false;
+  snprintf(w->full, sizeof w->full, "%c:%s", (char)('0' + _pdrv), path);
+  bool ok = f_opendir(&w->d, w->full) == FR_OK;
+  if (ok) {
+    while (f_readdir(&w->d, &w->fi) == FR_OK && w->fi.fname[0])
+      if (!visit(w->fi.fname, (w->fi.fattrib & AM_DIR) != 0, (uint32_t)w->fi.fsize, ctx)) break;
+    f_closedir(&w->d);
+  }
+  heap_caps_free(w);
+  return ok;
+}
+
 }  // namespace SdSpiDisk

@@ -36,6 +36,12 @@ uint32_t    cmd8Echo();          // what CMD8 returned (0x1AA: a conforming card
 
 File open(const char* path);                     // read-only; empty when nothing is mounted
 
+/* A folder's entries WITHOUT OPENING THEM (FatFs f_readdir): name, folder or not, size — `visit`
+ * returns false to stop. Opening every file to weigh it cost ~7 ms each, the "._" twins a Mac
+ * leaves beside each file included: the list of /sfz ran out of time before the last kit (§216).
+ * False if the folder cannot be read. */
+bool listDir(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx);
+
 // ── For the cluster maps (src/audio/SdClusters.h) ────────────────────────────────────────────────
 /* Whole 512-byte sectors, straight from the bus: one transaction, bus-locked, with the driver's retries
  * and CRC checks; no FatFs. False when not mounted or when the read failed. */
