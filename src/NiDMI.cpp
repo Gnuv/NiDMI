@@ -5,6 +5,7 @@
 #include "utils/PinMapper.h"
 #include "midi/MidiRouter.h"
 #include "midi/CcMap.h"
+#include "midi/TransportNotes.h"   // the transport notes of the Settings (§215)
 #include "mapping/MappingEngine.h"
 #include "network/UsbMidiManager.h"
 #include "network/UsbNetBootstrap.h"
@@ -400,7 +401,7 @@ static volatile bool g_sysInconnu = false;
 /* Les demandes de TRANSPORT des scripts (MESURES §181) : posees par la tache du
  * script, executees par nidmi_loop au tour suivant. Un mot de bits pour les
  * gestes (front montant), un index pour sys.cue, deux options. */
-enum : uint32_t { T_PLAY = 1, T_STOP = 2, T_PAUSE = 4, T_NEXT = 8, T_PREV = 16, T_FIRST = 32 };
+enum : uint32_t { T_PLAY = 1, T_STOP = 2, T_PAUSE = 4, T_NEXT = 8, T_PREV = 16, T_FIRST = 32, T_PLAYSTOP = 64 };
 static uint32_t g_transportDemande = 0;          // __atomic_* : deux taches de scripts
 static volatile int16_t g_cueDemandee = -1;      // index ; -1 = rien
 static volatile int8_t  g_boucleDemandee = -1;   // -1 rien ; 0 non ; 1 oui
@@ -707,6 +708,8 @@ extern "C" bool nidmi_regleTientLeWifiCoupe(){
  *   sys.play        lecture (reprend apres une pause ; deja en lecture : rien)
  *   sys.stop        arret
  *   sys.pause       pause en lecture, lecture sinon — UN bouton
+ *   sys.playstop    arret en lecture, lecture sinon — UN bouton, la note Play/Stop
+ *                   des Reglages (§215)
  *   sys.nextcue     cue suivante (GO ; la premiere si la liste boucle)
  *   sys.prevcue     cue precedente
  *   sys.firstcue    la premiere cue
@@ -749,6 +752,7 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     else if (!strcmp(nom, "sys.play"))         demanderTransport(oui, T_PLAY);
     else if (!strcmp(nom, "sys.stop"))         demanderTransport(oui, T_STOP);
     else if (!strcmp(nom, "sys.pause"))        demanderTransport(oui, T_PAUSE);
+    else if (!strcmp(nom, "sys.playstop"))     demanderTransport(oui, T_PLAYSTOP);
     else if (!strcmp(nom, "sys.nextcue"))      demanderTransport(oui, T_NEXT);
     else if (!strcmp(nom, "sys.prevcue"))      demanderTransport(oui, T_PREV);
     else if (!strcmp(nom, "sys.firstcue"))     demanderTransport(oui, T_FIRST);
@@ -919,6 +923,7 @@ static void executerTransport(){
     if (d & T_PREV)  Cues::precedent();
     if (d & T_NEXT)  Cues::suivant();
     if (d & T_PAUSE) { if (Cues::enLecture()) Cues::pauser(); else Cues::demarrer(); }
+    if (d & T_PLAYSTOP) { if (Cues::enLecture()) Cues::arreter(); else Cues::demarrer(); }
     /* Deja en lecture : rien. demarrer() relancerait la cue — un bouton PLAY
      * appuye pendant le jeu ne doit pas la reprendre du debut (§182). */
     if ((d & T_PLAY) && !Cues::enLecture()) Cues::demarrer();
@@ -1569,6 +1574,7 @@ void nidmi_begin() {
     /* Le transport : ses options (NVS, une lecture) et qui publie son etat. Le
        premier etat part a 3 s, avec la liste (elle se lit dans storage) — §181. */
     Cues::restaurerOptions();
+    TransportNotes::begin();        // a pedal on the next cue (§215): before MIDI reaches the cues
     Cues::surChangement(publierEtatsTransport);
     Repertoire::surOuverture(rechargerComposition);     // ouvrir = redemarrer dessus (§186)
     /* Ce qui attend le silence pour s'ecrire en flash, dit aux onglets quand ca
@@ -1679,6 +1685,7 @@ void nidmi_loop() {
 
     uint32_t tc = nidmi_section("cues");
     executerRepertoire();           // s("sys.compo")…, avant le transport (§186)
+    TransportNotes::service();      // a learnt note: written, announced (§215)
     executerTransport();            // ce que les scripts ont demandé (s("sys.nextcue")…, §181)
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
     nidmi_chrono("cues", tc); tc = nidmi_section("differe");

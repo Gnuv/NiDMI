@@ -6,6 +6,7 @@
 #include <LittleFS.h>
 #include <Preferences.h>
 #include "CcMap.h"
+#include "TransportNotes.h"   // a pedal on the next cue, swallowed before the scripts (§215)
 #include <Arduino.h>
 #include <esp_heap_caps.h>   // le plus gros bloc contigu : la vraie limite de la chaine
 #include <new>               // std::nothrow : une allocation refusee se dit, elle ne jette pas
@@ -738,6 +739,9 @@ void MidiRouter::_jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, Au
 void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff) {
     uint8_t n = note, v = velocity, c = channel;
     noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
+    /* A TRANSPORT NOTE (§215) — a pedal on the next cue — does its gesture and plays nothing:
+     * before the scripts, on every input. */
+    if (TransportNotes::take(channel, note, velocity, estNoteOff)) return;
 
     /* LES DEUX CUES (§212) : MAIN d'abord, puis une branche par cue — celle qui joue et,
      * pendant son Release, celle qui part — chacune vers SES instruments. Une seule cue :

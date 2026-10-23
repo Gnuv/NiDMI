@@ -28,6 +28,7 @@ void setupOtaAPI(AsyncWebServer& server);
 void setupAudioAPI(AsyncWebServer& server);
 void setupFichiersAPI(AsyncWebServer& server);
 void setupInterfaceAPI(AsyncWebServer& server);
+void setupTransportNotesAPI(AsyncWebServer& server);   // the transport notes (§215)
 void setupConcertAPI(AsyncWebServer& server);
 
 Preferences preferences;
@@ -640,4 +641,5 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
     setupFichiersAPI(server);
     setupInterfaceAPI(server);
     setupConcertAPI(server);
+    setupTransportNotesAPI(server);
 }
