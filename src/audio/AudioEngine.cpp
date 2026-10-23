@@ -365,6 +365,9 @@ struct CueSlot {
   volatile int8_t   kit = -1;               // its SfzStore engine, -1 none
   volatile uint8_t  kitCanal = 0;           // the kit's channel, its track's (0: all) — §210
   volatile int8_t   synth = -1;             // its SynthVoice voice, -1 none
+  volatile int8_t   synth2 = -1;            // its second voice, the cue in two voices (§214), -1 none
+  uint8_t           prochaine = 0;          // audio task: which of the two takes the next note
+  volatile uint8_t  voixVoulues = 1;        // what its cue asks: 1, or 2 voices (§214)
 };
 CueSlot           slots[CUE_SLOTS];
 volatile int8_t   slotCurrent = -1;         // the cue that plays (loopTask writes, anyone reads)
@@ -940,11 +943,15 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
       else           { mixL[i] += sfzG[i] * sfzK; mixR[i] += sfzD[i] * sfzK; }
     }
   }
-  /* THE SLOT'S SYNTH VOICE (rendered ahead on core 0). */
-  const int8_t sv = c.synth;
+  /* THE SLOT'S SYNTH VOICE, or its two (rendered ahead on core 0; the same block, the same
+   * routing — §214). */
+  const int8_t sv = c.synth, sv2 = c.synth2;
   memset(synthMono, 0, sizeof(synthMono));
-  if (sv >= 0 && SynthVoice::take((uint8_t)sv, synthMono, FRAMES)) {
-    float* l = Effects::filters(s, SynthVoice::bloc((uint8_t)sv)) ? busL : mixL;
+  bool synthSonne = false;
+  if (sv >= 0)  synthSonne |= SynthVoice::take((uint8_t)sv, synthMono, FRAMES);
+  if (sv2 >= 0) synthSonne |= SynthVoice::take((uint8_t)sv2, synthMono, FRAMES);
+  if (synthSonne) {
+    float* l = Effects::filters(s, SynthVoice::bloc((uint8_t)(sv >= 0 ? sv : sv2))) ? busL : mixL;
     float* r = (l == busL) ? busR : mixR;
     for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
   }
@@ -1025,7 +1032,15 @@ void appliquer(const Evenement& e) {
       if (!(e.slots & (1u << s))) continue;
       CueSlot& c = slots[s];
       if (e.velo != 0) _notePourLesListes(e.note, e.canal, s);
-      const int8_t sv = c.synth;
+      /* One voice: it takes every note. Two (§214): they take turns — a voice the guard
+       * stopped is skipped, the other takes them all. */
+      int8_t sv = c.synth;
+      const int8_t sv2 = c.synth2;
+      if (sv2 >= 0 && e.velo != 0) {
+        const bool a = sv >= 0 && SynthVoice::active((uint8_t)sv), b = SynthVoice::active((uint8_t)sv2);
+        if (a && b) { if (c.prochaine) sv = sv2; c.prochaine ^= 1; }
+        else if (b) sv = sv2;
+      }
       if (sv >= 0) SynthVoice::noteOn((uint8_t)sv, e.canal, e.note, e.velo);
       const int8_t kit = c.kit;
       if (kit >= 0 && SfzStore::notesArmees((uint8_t)kit) && _ecoute(c.kitCanal, e.canal)) {
@@ -1704,9 +1719,10 @@ void fixerParamSynth(const char* nom, float v, Pour pour) {
   if (pour != Pour::SORTANTE && (sc < 0 || (m & (1u << sc)))) { Params p = params(); poser(p); setParams(p); }
   for (uint8_t s = 0; s < CUE_SLOTS; s++) {
     if (!(m & (1u << s)) || (int8_t)s == sc) continue;
-    const int8_t sv = slots[s].synth;
-    if (sv < 0) continue;
-    Params p = SynthVoice::params((uint8_t)sv); poser(p); SynthVoice::setParams((uint8_t)sv, p);
+    for (const int8_t sv : {slots[s].synth, slots[s].synth2}) {
+      if (sv < 0) continue;
+      Params p = SynthVoice::params((uint8_t)sv); poser(p); SynthVoice::setParams((uint8_t)sv, p);
+    }
   }
 }
 
@@ -1801,7 +1817,7 @@ void libererSlot(uint8_t slot) {
   if (slot >= CUE_SLOTS) return;
   CueSlot& c = slots[slot];
   c.clavier = Clavier{};
-  c.kit = -1; c.kitCanal = 0; c.synth = -1;
+  c.kit = -1; c.kitCanal = 0; c.synth = -1; c.synth2 = -1;
   __sync_synchronize();
   c.state = SLOT_FREE;
   if (slotLeaving == (int8_t)slot) slotLeaving = -1;
@@ -1809,6 +1825,39 @@ void libererSlot(uint8_t slot) {
 
 int8_t kitDuSlot(uint8_t slot)   { return slot < CUE_SLOTS ? slots[slot].kit : -1; }
 int8_t synthDuSlot(uint8_t slot) { return slot < CUE_SLOTS ? slots[slot].synth : -1; }
+int8_t synth2DuSlot(uint8_t slot) { return slot < CUE_SLOTS ? slots[slot].synth2 : -1; }
+void   fixerSynth2Slot(uint8_t slot, int8_t voix) { if (slot < CUE_SLOTS) slots[slot].synth2 = voix; }
+void fixerVoixVoulues(uint8_t slot, uint8_t n) { if (slot < CUE_SLOTS) slots[slot].voixVoulues = (n >= 2) ? 2 : 1; }
+
+bool ajusterVoix(uint8_t slot) {
+  if (slot >= CUE_SLOTS) return false;
+  CueSlot& c = slots[slot];
+  const int8_t v1 = c.synth, v2 = c.synth2;
+  if (c.voixVoulues >= 2 && v1 >= 0 && v2 < 0) {
+    const int8_t libre = voixSynthLibre();
+    if (libre < 0) return false;            // the other cue holds it: when it lets it go
+    String r;
+    c.synth2 = libre;
+    if (!SynthVoice::clone((uint8_t)v1, (uint8_t)libre, r)) { c.synth2 = -1; return false; }
+    return true;
+  }
+  if ((c.voixVoulues < 2 || v1 < 0) && v2 >= 0) {
+    c.synth2 = -1;
+    String r;
+    SynthVoice::configure((uint8_t)v2, -1, 0, 0, 1.0f, r);
+    return true;
+  }
+  return false;
+}
+
+int8_t voixSynthLibre() {
+  for (uint8_t v = 0; v < SynthVoice::VOICES; v++) {
+    bool tenue = false;
+    for (const CueSlot& c : slots) tenue = tenue || c.synth == (int8_t)v || c.synth2 == (int8_t)v;
+    if (!tenue) return (int8_t)v;
+  }
+  return -1;
+}
 void   fixerKitSlot(uint8_t slot, int8_t moteur) { if (slot < CUE_SLOTS) slots[slot].kit = moteur; }
 void   fixerSynthSlot(uint8_t slot, int8_t voix) { if (slot < CUE_SLOTS) slots[slot].synth = voix; }
 
@@ -1821,14 +1870,14 @@ String etatSlots() {
     for (uint8_t v = 0; v < VOIX_MAX; v++) voix += (voixEch[v].actif && voixEch[v].slot == s) ? 1 : 0;
     uint8_t listes = 0;
     if (banques) for (uint8_t li = 0; li < banques[banqueActive].n; li++) listes += (banques[banqueActive].listes[li].slot == s) ? 1 : 0;
-    char t[300];
+    char t[360];
     snprintf(t, sizeof t, "%s{\"slot\":%u,\"state\":\"%s\",\"level\":%.3f,\"target\":%.3f,\"cut\":%.3f,"
                           "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"kit\":%d,"
-                          "\"synth\":%d,\"synth_on\":%s,\"gen\":%lu}",
+                          "\"synth\":%d,\"synth_on\":%s,\"synth2\":%d,\"gen\":%lu}",
              s ? "," : "", (unsigned)s, NOMS[c.state < 5 ? c.state : 0], c.env.now, c.env.target, c.cut,
              (unsigned)voix, (unsigned)listes, c.clavier.surCue ? "" : c.clavier.nom, (unsigned)c.clavier.canal,
              (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
-             (unsigned long)c.gen);
+             (int)c.synth2, (unsigned long)c.gen);
     j += t;
   }
   return j + String("],\"current\":") + (int)slotCurrent + ",\"leaving\":" + (int)slotLeaving;
@@ -2534,8 +2583,9 @@ Bascule derniereBascule() { return derniereBasc; }
 
 void setParams(const Params& p) {
   /* The synth voice of the cue that plays (§210, §212). */
-  const int8_t sv = slots[_slotIci()].synth;
+  const int8_t sv = slots[_slotIci()].synth, sv2 = slots[_slotIci()].synth2;
   if (sv >= 0) SynthVoice::setParams((uint8_t)sv, p);
+  if (sv2 >= 0) SynthVoice::setParams((uint8_t)sv2, p);   // its second voice (§214)
   // Écriture directe : ce sont des float alignés, lus par la tâche audio au
   // bloc suivant. Un verrou coûterait plus cher que le pire cas — un bloc rendu
   // avec un mélange de l'ancien et du nouveau réglage, soit 2,5 ms.

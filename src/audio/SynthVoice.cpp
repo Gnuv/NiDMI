@@ -41,7 +41,10 @@ struct Voice {
   volatile int         engineNow = -1;
   Note                 notes[16];
   volatile uint8_t     notesHead = 0, notesTail = 0;
-  float                velocityGain = 1.0f;       // core 0 task: the last note's velocity
+  float                velNow = 1.0f;             // core 0 task: the level the velocity gives, now
+  float                velTarget = 1.0f;          // ... the last note's
+  float                velStep = 0.0f;            // ... per sample, while it glides down
+  volatile float       velGlideS = 0.0f;          // the glide down, in seconds (0: at once) — §214
   volatile uint32_t    lateBlocks = 0, rendered = 0, worstCycles = 0;
   volatile uint64_t    sumCycles = 0;
   uint32_t             overInRow = 0;             // core 0 task
@@ -71,7 +74,11 @@ void render(Voice& s, float* out) {
     const Note n = s.notes[s.notesTail & 15];
     s.notesTail = s.notesTail + 1;
     s.patch.note = n.note;
-    s.velocityGain = n.velocity / 127.0f;
+    /* THE VELOCITY (§214): up at once; down at once, or over the glide. */
+    const float v = n.velocity / 127.0f, glide = s.velGlideS;
+    s.velTarget = v;
+    if (v >= s.velNow || glide <= 0.0f) { s.velNow = v; s.velStep = 0.0f; }
+    else s.velStep = (s.velNow - v) / (glide * (float)AudioEngine::SAMPLE_RATE);
     trigger = true;
   }
   s.mod.trigger_patched = !s.droneWanted;
@@ -79,8 +86,17 @@ void render(Voice& s, float* out) {
     s.mod.trigger = (trigger && i == 0) ? 1.0f : 0.0f;
     s.voice->Render(s.patch, s.mod, &frames[i], plaits::kBlockSize);
   }
-  const float k = s.velocityGain / 32768.0f;
-  for (size_t i = 0; i < FRAMES; i++) out[i] = frames[i].out * k;
+  constexpr float K = 1.0f / 32768.0f;
+  if (s.velStep > 0.0f) {
+    for (size_t i = 0; i < FRAMES; i++) {
+      s.velNow -= s.velStep;
+      if (s.velNow <= s.velTarget) { s.velNow = s.velTarget; s.velStep = 0.0f; }
+      out[i] = frames[i].out * s.velNow * K;
+    }
+  } else {
+    const float k = s.velNow * K;
+    for (size_t i = 0; i < FRAMES; i++) out[i] = frames[i].out * k;
+  }
 }
 
 void taskLoop(void*) {
@@ -196,6 +212,23 @@ bool configure(uint8_t v, int engine, uint32_t bloc, uint8_t ch, float gain, Str
   bothSaid = false;
   s->enabled = true;
   xTaskNotifyGive(task);
+  return true;
+}
+
+void setVelocityGlide(uint8_t v, float ms) {
+  Voice* s = voiceOf(v);
+  if (!s) return;
+  s->velGlideS = (ms == ms && ms > 0.0f) ? (ms > 500.0f ? 0.5f : ms / 1000.0f) : 0.0f;
+}
+
+bool clone(uint8_t from, uint8_t to, String& reason) {
+  Voice* a = voiceOf(from);
+  Voice* b = voiceOf(to);
+  if (!a || !b || a == b) { reason = "synth voice: no such voice"; return false; }
+  /* configure first: the first time, it allocates the voice and puts its patch to the defaults. */
+  if (!configure(to, a->engineNow, a->blockId, a->channel, a->gainTarget, reason)) return false;
+  setParams(to, params(from));
+  b->velGlideS = a->velGlideS;
   return true;
 }
 

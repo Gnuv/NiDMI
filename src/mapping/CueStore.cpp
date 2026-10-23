@@ -223,8 +223,8 @@ int8_t _slotScriptsSortants = -1;      // the slot whose cue links are the leavi
 /* The audio task drained the slot: the loop disarms what it armed there, and frees it. */
 static void _nettoyerSlot(uint8_t s) {
   if (_slotScriptsSortants == (int8_t)s) { g_midiRouter.fermerSortie(); _slotScriptsSortants = -1; }
-  const int8_t sv = AudioEngine::synthDuSlot(s);
-  if (sv >= 0) { String r; SynthVoice::configure((uint8_t)sv, -1, 0, 0, 1.0f, r); }
+  for (const int8_t sv : {AudioEngine::synthDuSlot(s), AudioEngine::synth2DuSlot(s)})
+    if (sv >= 0) { String r; SynthVoice::configure((uint8_t)sv, -1, 0, 0, 1.0f, r); }
   const int8_t k = AudioEngine::kitDuSlot(s);
   if (k >= 0) { String r; SfzStore::proposer((uint8_t)k, "", r); }   // the engine lets go of its kit
   Effects::off(s);
@@ -270,12 +270,12 @@ static uint8_t _changerDeSlot(float releaseSortant, float delai, float attaque, 
   return nouveau;
 }
 
-/* The other slot's voice or engine, when it is that of the same block: a synth voice, a kit
- * that goes on from the cue that leaves is handed over, not restarted (§212). Otherwise the one
- * the other slot does not hold. */
-static int8_t _prendre(int8_t chezLAutre, bool memeBloc, uint8_t autre, bool kit) {
+/* The other slot's SFZ engine, when it is that of the same block: a kit that goes on from the
+ * cue that leaves is handed over, not restarted (§212). Otherwise the one the other slot does
+ * not hold. (The synth voices are picked in _appliquer: a slot may hold two, §214.) */
+static int8_t _prendreKit(int8_t chezLAutre, bool memeBloc, uint8_t autre) {
   if (chezLAutre >= 0 && memeBloc) {
-    if (kit) AudioEngine::fixerKitSlot(autre, -1); else AudioEngine::fixerSynthSlot(autre, -1);
+    AudioEngine::fixerKitSlot(autre, -1);
     return chezLAutre;
   }
   return (chezLAutre == 0) ? 1 : 0;
@@ -360,6 +360,9 @@ void _appliquer(const Cue& c) {
     String noms, boucles, gains, blocs, cheminSfz, blocSfz, gainSfz;
     /* §210: the channels of the keyboard and of the kit, and the synth voice. */
     String canalClavier, canalSfz, synth, synthBloc, synthCanal, synthGain;
+    /* §214: the synth voice's options — two voices taking turns, the velocity glide (ms). */
+    uint8_t synthPoly = 1;
+    float   synthVelo = 0.0f;
     AudioEngine::Params synthParams = AudioEngine::params();
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
@@ -384,6 +387,8 @@ void _appliquer(const Cue& c) {
         else if (cle == "synthbloc") { synthBloc = kv.substring(eq + 1); synthBloc.trim(); }
         else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
         else if (cle == "synthgain") { synthGain = kv.substring(eq + 1); synthGain.trim(); }
+        else if (cle == "synthpoly") synthPoly = (uint8_t)kv.substring(eq + 1).toInt();     // §214
+        else if (cle == "synthvelo") synthVelo = kv.substring(eq + 1).toFloat();            // §214, ms
         else if (cle == "harmonics" || cle == "timbre" || cle == "morph" || cle == "decay"
                  || cle == "lpg_colour" || cle == "drone") {
           const float v = kv.substring(eq + 1).toFloat();
@@ -416,17 +421,36 @@ void _appliquer(const Cue& c) {
     {
       String raison;
       if (synth.length()) {
-        /* The slot's voice: the leaving cue's if it is the same block (handed over, it goes on),
-         * else the one the other slot does not hold (§212). */
+        /* The slot's voices: the leaving cue's if it is the same block (handed over, they go on);
+         * else a free one — or the leaving cue's SECOND voice, which it gives up (§212, §214). */
         const uint32_t bs = (uint32_t)synthBloc.toInt();
-        const int8_t chezLAutre = AudioEngine::synthDuSlot(autre);
-        const int8_t sv = _prendre(chezLAutre, autreJoue && bs && chezLAutre >= 0 && SynthVoice::bloc((uint8_t)chezLAutre) == bs,
-                                   autre, false);
-        AudioEngine::fixerSynthSlot(ns, sv);
-        if (synthParamsVus) AudioEngine::setParams(synthParams);   // the slot's voice, now its own
-        if (!SynthVoice::configure((uint8_t)sv, synth.toInt(), bs, (uint8_t)synthCanal.toInt(),
-                                   synthGain.length() ? synthGain.toFloat() : 1.0f, raison))
-          Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
+        const int8_t a1 = AudioEngine::synthDuSlot(autre), a2 = AudioEngine::synth2DuSlot(autre);
+        int8_t v1 = -1, v2 = -1;
+        if (autreJoue && bs && a1 >= 0 && SynthVoice::bloc((uint8_t)a1) == bs) {
+          v1 = a1; AudioEngine::fixerSynthSlot(autre, -1);
+          if (a2 >= 0) { v2 = a2; AudioEngine::fixerSynth2Slot(autre, -1); }
+        } else {
+          v1 = AudioEngine::voixSynthLibre();
+          if (v1 < 0 && a2 >= 0) { v1 = a2; AudioEngine::fixerSynth2Slot(autre, -1); }
+        }
+        if (v1 >= 0) {
+          AudioEngine::fixerSynthSlot(ns, v1);
+          AudioEngine::fixerSynth2Slot(ns, v2);
+          if (!SynthVoice::configure((uint8_t)v1, synth.toInt(), bs, (uint8_t)synthCanal.toInt(),
+                                     synthGain.length() ? synthGain.toFloat() : 1.0f, raison))
+            Serial.printf("[cues] synth voice refused: %s\n", raison.c_str());
+          /* After configure: the voice's first allocation puts its patch to the defaults. */
+          if (synthParamsVus) AudioEngine::setParams(synthParams);   // the slot's voices, now its own
+          SynthVoice::setVelocityGlide((uint8_t)v1, synthVelo);
+          /* Two voices: the second a clone of the first — taken now if one is free, else when the
+           * leaving cue lets its voice go (_servirReleases). A handed-over second voice is cloned
+           * again: the engine or the parameters may have changed. */
+          AudioEngine::fixerVoixVoulues(ns, synthPoly);
+          if (v2 >= 0 && synthPoly >= 2) { String r; SynthVoice::clone((uint8_t)v1, (uint8_t)v2, r); }
+          AudioEngine::ajusterVoix(ns);
+        } else {
+          Serial.println("[cues] synth voice refused: both voices are held");
+        }
       }
       raison = "";
       if (!Effects::configureFromCue(ns, c.params, raison))
@@ -515,7 +539,7 @@ void _appliquer(const Cue& c) {
         const int8_t chezLAutre = AudioEngine::kitDuSlot(autre);
         const bool memeKit = autreJoue && bk && chezLAutre >= 0 && SfzStore::blocId((uint8_t)chezLAutre) == bk
                              && SfzStore::demande((uint8_t)chezLAutre) == cheminSfz;
-        const int8_t k = _prendre(chezLAutre, memeKit, autre, true);
+        const int8_t k = _prendreKit(chezLAutre, memeKit, autre);
         AudioEngine::fixerKitSlot(ns, k);
         SfzStore::fixerBloc((uint8_t)k, bk, gainSfz.length() ? gainSfz.toFloat() : 1.0f);
         if (!SfzStore::proposer((uint8_t)k, cheminSfz.c_str(), raisonSfz))
@@ -986,7 +1010,13 @@ void precedent() {
  * (its synth voice, its kit, its effects, its scripts) and frees it. Never the audio task. */
 static void _servirReleases() {
   for (uint8_t s = 0; s < AudioEngine::CUE_SLOTS; s++)
-    if (AudioEngine::etatSlot(s) == AudioEngine::SLOT_VIDE) _nettoyerSlot(s);
+    if (AudioEngine::etatSlot(s) == AudioEngine::SLOT_VIDE) {
+      _nettoyerSlot(s);
+      /* The cue that plays asked for two voices and had one: the voice the leaving cue let go
+       * becomes its second (§214). Not in _viderSlot: there, a cue is about to arrive. */
+      const int8_t sc = AudioEngine::slotCourant();
+      if (sc >= 0 && sc != (int8_t)s) AudioEngine::ajusterVoix((uint8_t)sc);
+    }
 }
 
 void boucle() {
@@ -1094,5 +1124,18 @@ void restaurerOptions() {
 
 void surChangement(void (*rappel)(const Etat&)) { VerrouSeq verrou; _rappelEtat = rappel; }
 void annoncerEtat() { VerrouSeq verrou; _annoncer(); }
+
+void setVoiceOptions(int voices, float glideMs) {
+  VerrouSeq verrou;
+  const int8_t sc = AudioEngine::slotCourant();
+  if (sc < 0) return;
+  if (glideMs >= 0.0f)
+    for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
+      if (sv >= 0) SynthVoice::setVelocityGlide((uint8_t)sv, glideMs);
+  if (voices > 0) {
+    AudioEngine::fixerVoixVoulues((uint8_t)sc, (uint8_t)voices);
+    AudioEngine::ajusterVoix((uint8_t)sc);
+  }
+}
 
 }  // namespace Cues

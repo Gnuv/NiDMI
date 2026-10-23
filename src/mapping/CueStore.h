@@ -126,4 +126,9 @@ bool  enPause();           // gelee — DIFFERENT d'arretee, et le son y coule e
 int   indexCourant();
 float restantSec();        // temps restant sur la cue courante (0 si infinie)
 
+/* The synth voice options of the cue that plays, live (§214): `voices` 1 or 2 (taking turns),
+ * `glideMs` the velocity glide; a negative value leaves it as it is. Under the sequencer's lock:
+ * a cue that arrives picks the voices too. */
+void setVoiceOptions(int voices, float glideMs);
+
 }  // namespace Cues

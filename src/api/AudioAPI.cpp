@@ -425,9 +425,18 @@ void setupAudioAPI(AsyncWebServer& server) {
          * game gesture, allowed under the concert lock. */
         if (request->hasParam("synth_engine", true)) {
             const int8_t sc = AudioEngine::slotCourant();
-            const int8_t sv = (sc >= 0) ? AudioEngine::synthDuSlot((uint8_t)sc) : -1;   // the cue that plays (§212)
-            if (sv >= 0) SynthVoice::setEngine((uint8_t)sv, request->getParam("synth_engine", true)->value().toInt());
+            const int e = request->getParam("synth_engine", true)->value().toInt();
+            if (sc >= 0)                                                                 // the cue that plays (§212), both its voices (§214)
+                for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
+                    if (sv >= 0) SynthVoice::setEngine((uint8_t)sv, e);
         }
+        /* THE VOICE OPTIONS (§214), live, for the cue that plays: one voice or two taking turns
+         * (the second a clone of the first, taken when a voice is free), and the velocity glide
+         * in ms (a softer note lowers the level over that time instead of at once). */
+        if (request->hasParam("voices", true) || request->hasParam("velo_glide", true))
+            Cues::setVoiceOptions(
+                request->hasParam("voices", true) ? request->getParam("voices", true)->value().toInt() : -1,
+                request->hasParam("velo_glide", true) ? request->getParam("velo_glide", true)->value().toFloat() : -1.0f);
         AudioEngine::Params p = AudioEngine::params();
         auto lire = [&](const char* nom, float& dest){
             if (request->hasParam(nom, true))

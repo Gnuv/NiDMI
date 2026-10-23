@@ -142,6 +142,14 @@ int8_t kitDuSlot(uint8_t slot);
 int8_t synthDuSlot(uint8_t slot);
 void   fixerKitSlot(uint8_t slot, int8_t moteur);
 void   fixerSynthSlot(uint8_t slot, int8_t voix);
+/* THE SECOND VOICE of a cue in two voices (§214): the two take turns on the notes. */
+int8_t synth2DuSlot(uint8_t slot);
+void   fixerSynth2Slot(uint8_t slot, int8_t voix);
+int8_t voixSynthLibre();              // a voice no slot holds, -1 none
+/* How many voices the slot's cue asks for (1 or 2, cue key `synthpoly`), and the slot brought to it:
+ * a second voice taken (a clone of the first) if one is free, or given back. True if it changed. */
+void fixerVoixVoulues(uint8_t slot, uint8_t n);
+bool ajusterVoix(uint8_t slot);
 /* The slots, for /api/audio/status: state, envelope level and target, what is armed. */
 String etatSlots();
 /* THE CAPTURE OF WHAT GOES TO THE DAC (diagnostics, §210): `frames` stereo frames
