@@ -110,12 +110,19 @@ void taskLoop(void*) {
       more = false;
       for (Voice& s : voices) {
         if (!(s.enabled && !s.overloaded && s.voice && s.produced - s.consumed < LEAD)) continue;
+        const uint32_t w0 = AudioEngine::flashWriteSeq();
         const uint32_t t = ESP.getCycleCount();
         render(s, s.ring + (s.produced % RING) * FRAMES);
         const uint32_t c = ESP.getCycleCount() - t;
+        /* A flash write stops both cores (§155, up to 186 ms measured): the render that spans it
+         * says nothing of what the voices cost. Counted, it alone overran the two voices' 40
+         * blocks — the guard stopped a voice until the next cue, at the bench's first silence. */
+        const bool stalled = (w0 & 1u) || AudioEngine::flashWriteSeq() != w0;
         const bool deux = voices[0].enabled && !voices[0].overloaded && voices[0].voice
                        && voices[1].enabled && !voices[1].overloaded && voices[1].voice;
-        if (deux) {
+        if (stalled) {
+          // left out of the guards and of the measures
+        } else if (deux) {
           bothCycles += c;
           if (++bothRenders >= 2 * OVER_RENDERS) {
             if (bothCycles > (uint64_t)OVER_RENDERS * limitBoth) {
@@ -123,7 +130,7 @@ void taskLoop(void*) {
               older.overloaded = true;
               if (!bothSaid) {
                 bothSaid = true;
-                Serial.printf("[audio] two synth voices over 85 %% of core 0: voice %u (the older cue's) stopped\n",
+                Serial.printf("[audio] two synth voices over 85 %% of core 0: voice %u (configured first: the leaving cue's, or the first of a cue's two) stopped\n",
                               (unsigned)(&older - voices));
               }
             }
@@ -135,6 +142,7 @@ void taskLoop(void*) {
         __sync_synchronize();                   // the samples before the counter, seen in that order
         s.produced = s.produced + 1;
         s.rendered = s.rendered + 1;
+        if (stalled) { more = true; continue; }
         s.sumCycles = s.sumCycles + c;
         if (c > s.worstCycles) s.worstCycles = c;
         if (c > limit) {

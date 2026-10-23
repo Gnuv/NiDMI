@@ -165,6 +165,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         const int8_t voixIci = AudioEngine::synthDuSlot(ici);
         const uint8_t kitIci = (AudioEngine::kitDuSlot(ici) >= 0) ? (uint8_t)AudioEngine::kitDuSlot(ici) : 0;
         json += "\"synth\":" + SynthVoice::status(voixIci >= 0 ? (uint8_t)voixIci : 0) + ",";
+        const int8_t voix2Ici = AudioEngine::synth2DuSlot(ici);   // its second voice (§214), or null
+        json += "\"synth2\":" + (voix2Ici >= 0 ? SynthVoice::status((uint8_t)voix2Ici) : String("null")) + ",";
         json += "\"fx\":" + Effects::status(ici) + ",";
         json += "\"slots\":" + AudioEngine::etatSlots() + ",";
         json += "\"sfz\":{";
