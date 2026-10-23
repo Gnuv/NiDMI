@@ -209,6 +209,12 @@ void shed() {
   }
 }
 
+uint32_t psramBytes() {
+  uint32_t n = 0;
+  for (const Slot& e : slots) if (e.reverb) n += (uint32_t)sizeof(FaustAmbience);
+  return n;
+}
+
 String status(uint8_t slot) {
   const Slot* e = slotOf(slot);
   if (!e) return "null";

@@ -41,6 +41,7 @@ bool setParam(const char* name, float value, uint8_t slots = 0xFF);
 /* The cue keys, live (POST /api/audio/fx), in `slot`: only those present change. */
 bool applyKeys(uint8_t slot, const String& params, String& reason);
 String status(uint8_t slot);                 // JSON for /api/audio/status and the route
+uint32_t psramBytes();                       // the reverbs allocated, kept once allocated (§217)
 
 // ── Audio task ───────────────────────────────────────────────────────────────
 /* Does the instrument of this block go through the slot's low-pass? (Read once per

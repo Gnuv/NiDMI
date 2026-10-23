@@ -462,6 +462,18 @@ void _retryFailed() {
   }
 }
 
+uint32_t headsBytes() {
+  uint32_t taken = 0;
+  for (uint8_t i = 0; _heads && i < MAX_HEADS; i++) if (_heads[i].state != 0) taken += _heads[i].bytes;
+  return taken;
+}
+
+uint32_t streamsBytes() {
+  uint32_t n = 0;
+  for (uint8_t i = 0; _streams && i < MAX_STREAMS; i++) if (_streams[i].ring) n++;
+  return n * RING_FRAMES * 2 * sizeof(int16_t);
+}
+
 bool anyActive() {
   if (!_streams) return false;
   for (uint8_t i = 0; i < MAX_STREAMS; i++) if (_streams[i].state == 1) return true;

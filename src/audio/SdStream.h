@@ -105,6 +105,8 @@ void     recordNoStream();                              // a clip did not start:
 void     recordNoHead();                                // a note whose clip has NO head (failed, refused): nothing to wait for
 bool     failedHeads();
 bool     anyActive();
+uint32_t headsBytes();                                  // the heads held, their weight in the budget (§217)
+uint32_t streamsBytes();                                // the streams' buffers taken (each one once, kept) (§217)
 void     resetFirstData();                              // zero the first-data latency counters (a bench measures one scenario at a time)                                   // some stream is playing (a measure would take its bandwidth)
 uint32_t trouble();                                     // everything missed so far: silent blocks, dropped notes, read errors, clips without a stream (the health reads it)                                 // some failed head may be read again (SdCard::service asks)
 

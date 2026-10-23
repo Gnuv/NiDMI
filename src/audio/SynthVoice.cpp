@@ -310,6 +310,13 @@ bool take(uint8_t v, float* out, size_t frameCount) {
   return true;
 }
 
+uint32_t psramBytes() {
+  uint32_t n = 0;
+  for (const Voice& s : voices)
+    if (s.voice) n += (uint32_t)(sizeof(plaits::Voice) + POOL + RING * FRAMES * sizeof(float));
+  return n;
+}
+
 String status(uint8_t v) {
   const Voice* s = voiceOf(v);
   if (!s) return "null";

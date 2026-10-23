@@ -29,6 +29,7 @@ void setupAudioAPI(AsyncWebServer& server);
 void setupFichiersAPI(AsyncWebServer& server);
 void setupInterfaceAPI(AsyncWebServer& server);
 void setupTransportNotesAPI(AsyncWebServer& server);   // the transport notes (§215)
+extern "C" void nidmi_announce_memory_now();           // NiDMI.cpp: the memory, to a tab that asked (§217)
 void setupConcertAPI(AsyncWebServer& server);
 
 Preferences preferences;
@@ -263,6 +264,8 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
          * sends NIDMI_CPU:<core 0>,<core 1> once a second to the tabs that asked. */
         if (message.startsWith("CPU_LOAD:")) {
             if (client) nidmi_ws_abonner(client->id(), NIDMI_ABO_CHARGE, message.substring(9) == "1");
+            /* ... and NIDMI_MEM, who holds the memory (§217): at once, not at its next change. */
+            if (message.substring(9) == "1") nidmi_announce_memory_now();
             return;
         }
         if (message.startsWith("PIN_MONITORING:")) {

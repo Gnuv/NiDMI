@@ -57,6 +57,7 @@ uint8_t setBlockGain(uint32_t bloc, float gain);   // the voices of that block
 bool active(uint8_t v);              // a cue names it, and the guard has not stopped it
 uint32_t bloc(uint8_t v);
 String status(uint8_t v);            // JSON
+uint32_t psramBytes();               // what the voices allocated hold in PSRAM, kept once allocated (§217)
 
 // ── Audio task only ──────────────────────────────────────────────────────────
 void noteOn(uint8_t v, uint8_t channel, uint8_t note, uint8_t velocity);

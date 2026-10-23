@@ -19,6 +19,9 @@
 #include "config/SdCard.h"
 #include "audio/SdStream.h"
 #include "audio/Effects.h"     // s("sys.lp_cutoff") … : the effects, from a script (§210)
+#include "audio/SfzStore.h"
+#include "audio/SampleStore.h"
+#include "audio/SynthVoice.h"   // with the kits and the sounds: who holds the memory (§217)
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -253,6 +256,43 @@ static void announceLoad() {
     char frame[40];
     snprintf(frame, sizeof frame, "NIDMI_CPU:%d,%d", load[0], load[1]);
     nidmi_ws_envoyer_aux_abonnes(NIDMI_ABO_CHARGE, frame);
+}
+
+/* THE MEMORY OF THE CARD (§217), for the app's menu bar, beside the load: the PSRAM and who holds it
+ * — the SFZ kits against THEIR budget (a kit beyond it is refused), the sounds of storage and of the SD,
+ * the heads of the SD clips against theirs, the streams' buffers, the synth voices, the reverbs — and
+ * the internal RAM's largest block (what a tab's socket needs). To the tabs that follow the load, when
+ * it changes (in KB) and every 10 s at the latest; at once to a tab that just asked. Never polled. */
+static volatile bool s_memoryNow = false;
+extern "C" void nidmi_announce_memory_now() { s_memoryNow = true; }
+
+static void announceMemory() {
+    static uint32_t next = 0, lastSent = 0;
+    static char last[200] = "";
+    const uint32_t now = millis();
+    if ((long)(now - next) < 0 && !s_memoryNow) return;
+    next = now + 1000;
+    if (!nidmi_ws_abonne(NIDMI_ABO_CHARGE)) return;
+    const auto kb = [](size_t b) { return (unsigned long)((b + 512) / 1024); };
+    char frame[200];
+    snprintf(frame, sizeof frame,
+             "{\"psram\":[%lu,%lu,%lu],\"kits\":[%lu,%lu,%d],\"sounds\":%lu,\"heads\":[%lu,%lu],"
+             "\"streams\":%lu,\"synth\":%lu,\"fx\":%lu,\"internal\":[%lu,%lu]}",
+             kb(heap_caps_get_total_size(MALLOC_CAP_SPIRAM)), kb(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+             kb(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)),
+             kb(SfzStore::octets()), kb(SfzStore::BUDGET_PSRAM), SfzStore::enMemoire(),
+             kb(SampleStore::octetsPsram()), kb(SdStream::headsBytes()), kb(SdStream::HEADS_BUDGET_BYTES),
+             kb(SdStream::streamsBytes()), kb(SynthVoice::psramBytes()), kb(Effects::psramBytes()),
+             kb(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
+             kb(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    const bool forced = s_memoryNow;
+    s_memoryNow = false;
+    if (!forced && !strcmp(frame, last) && now - lastSent < 10000) return;
+    strlcpy(last, frame, sizeof last);
+    lastSent = now;
+    char out[216];
+    snprintf(out, sizeof out, "NIDMI_MEM:%s", frame);
+    nidmi_ws_envoyer_aux_abonnes(NIDMI_ABO_CHARGE, out);
 }
 
 static void verifierSante() {
@@ -1798,6 +1838,7 @@ void nidmi_loop() {
     tc = nidmi_section("sante");
     verifierSante();
     announceLoad();                     // the load of the two cores, to the tabs that asked (§210)
+    announceMemory();                   // ... and who holds the memory (§217)
     nidmi_chrono("sante", tc);
 
     // Recharger pins si demandé (débounce 500 ms pour grouper les sauvegardes séquentielles)
