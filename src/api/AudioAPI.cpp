@@ -154,6 +154,7 @@ void setupAudioAPI(AsyncWebServer& server) {
             json += "],";
         }
         json += "\"sampler_oncue\":" + String(AudioEngine::declenchementSurCue() ? "true" : "false") + ",";
+        json += "\"sampler_poly\":" + String(AudioEngine::keyboardPoly()) + ",";   // §219
         /* L'INSTRUMENT SFZ (§207) : ce qui joue — chemin, regions, samples,
            PCM tenu en PSRAM, voix actives — et le DERNIER REFUS, pour que
            l'app le dise AVANT le concert. gen bouge a chaque changement. */
@@ -638,6 +639,9 @@ void setupAudioAPI(AsyncWebServer& server) {
         const float gain = request->hasParam("gain", true)
                          ? request->getParam("gain", true)->value().toFloat() : 1.0f;
         AudioEngine::fixerDeclenchementSurCue(surCue);
+        /* The keyboard's polyphony (§219): the block's setting, live — the cue says it again. */
+        if (request->hasParam("poly", true))
+            AudioEngine::setKeyboardPoly((uint8_t)request->getParam("poly", true)->value().toInt());
         /* L'apercu vient de designer ce son comme celui du clavier (POST
          * /api/audio/sampler) : le clavier prend aussi son bloc et son volume. */
         AudioEngine::fixerClavier(bloc, gain);
@@ -653,7 +657,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"name\":\"") + nom
             + "\",\"loop\":" + (boucle ? "true" : "false")
-            + ",\"oncue\":" + (surCue ? "true" : "false") + "}");
+            + ",\"oncue\":" + (surCue ? "true" : "false")
+            + ",\"poly\":" + String(AudioEngine::keyboardPoly()) + "}");
     });
 
     /* LE VOLUME D'UN BLOC QUI JOUE (MESURES §165) — le chemin VIVANT du

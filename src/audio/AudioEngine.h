@@ -355,6 +355,12 @@ uint32_t generationListes();
  * qui tranche, par son interrupteur Cue/MIDI (`oncue` dans la cue). */
 void fixerDeclenchementSurCue(bool surCue);
 bool declenchementSurCue();
+/* THE KEYBOARD'S POLYPHONY (MESURES §219), cue key `keypoly`: at most `n` of its voices sound
+ * (1..VOIX_MAX); a note beyond silences its oldest in 5 ms. A voice per note up to the card's
+ * eight was the processor's ceiling, and a fast roll on long sounds reached it. */
+constexpr uint8_t KEYBOARD_POLY_DEFAULT = 4;
+void    setKeyboardPoly(uint8_t n);
+uint8_t keyboardPoly();
 const char* samplerNom();
 void setParams(const Params& p);
 Params params();

@@ -373,6 +373,7 @@ void _appliquer(const Cue& c) {
     AudioEngine::Params synthParams = AudioEngine::params();
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
+    uint8_t polyClavier = AudioEngine::KEYBOARD_POLY_DEFAULT;   // the keyboard's polyphony (§219)
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -390,6 +391,7 @@ void _appliquer(const Cue& c) {
         else if (cle == "sfzgain") { gainSfz = kv.substring(eq + 1); gainSfz.trim(); }
         else if (cle == "sfzch")   { canalSfz = kv.substring(eq + 1); canalSfz.trim(); }
         else if (cle == "keych")   { canalClavier = kv.substring(eq + 1); canalClavier.trim(); }
+        else if (cle == "keypoly") polyClavier = (uint8_t)kv.substring(eq + 1).toInt();      // §219
         else if (cle == "synth")     { synth = kv.substring(eq + 1); synth.trim(); }
         else if (cle == "synthbloc") { synthBloc = kv.substring(eq + 1); synthBloc.trim(); }
         else if (cle == "synthch")   { synthCanal = kv.substring(eq + 1); synthCanal.trim(); }
@@ -420,6 +422,7 @@ void _appliquer(const Cue& c) {
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
     AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
+    AudioEngine::setKeyboardPoly(polyClavier);
 
     /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
      * longer instead of it. A cue without `synth=` silences the voice (its state

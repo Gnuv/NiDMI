@@ -351,7 +351,8 @@ enum : uint8_t { SLOT_FREE = 0, SLOT_CURRENT, SLOT_LEAVING, SLOT_CUTTING, SLOT_D
 enum : uint8_t { REQ_NONE = 0, REQ_ARRIVE, REQ_LEAVE, REQ_CUT };
 constexpr uint8_t SLOT_AUCUN = 0xFF;          // a list whose slot was drained: it answers nothing
 constexpr float SLOT_CUT_S = 0.010f;          // the brief fade-out of a cut
-struct Clavier { char nom[48] = ""; uint32_t bloc = 0; float gain = 1.0f; uint8_t canal = 0; bool surCue = true; };
+struct Clavier { char nom[48] = ""; uint32_t bloc = 0; float gain = 1.0f; uint8_t canal = 0; bool surCue = true;
+                 uint8_t poly = KEYBOARD_POLY_DEFAULT; };   // its polyphony (§219)
 struct CueSlot {
   volatile uint8_t  state = SLOT_FREE;
   EnvCue            env;                    // audio task
@@ -687,6 +688,27 @@ void _lancerClip(const Banque& b, uint8_t li, uint8_t k) {
   vo->slot  = (L.slot < CUE_SLOTS) ? L.slot : _slotIci();   // its list's cue slot (§212)
   __sync_synchronize();
   vo->actif = true;
+}
+
+/* THE KEYBOARD'S POLYPHONY (§219), audio task, before a note: the keyboard's voices that still
+ * sound (not fading out) are brought under its `poly` — the oldest fall silent in 5 ms, as a clip
+ * cut by another. Its voices: in its slot, outside any list, of its block (of its sound when it
+ * has no block, a preview). A fading voice still holds one of the card's eight for those 5 ms. */
+void _limitKeyboardVoices(const CueSlot& c, uint8_t s) {
+  const int i = c.clavier.bloc ? -1 : SampleStore::indexDe(c.clavier.nom);
+  for (;;) {
+    VoixEch* oldest = nullptr;
+    uint8_t n = 0;
+    for (uint8_t v = 0; v < VOIX_MAX; v++) {
+      VoixEch& vo = voixEch[v];
+      if (!vo.actif || vo.slot != s || vo.liste >= 0 || vo.fondu > 0.0f) continue;
+      if (c.clavier.bloc ? vo.bloc != c.clavier.bloc : (i < 0 || vo.iEch != (uint8_t)i)) continue;
+      n++;
+      if (!oldest || vo.age < oldest->age) oldest = &vo;
+    }
+    if (n < c.clavier.poly || !oldest) return;
+    _eteindreEnDouceur(*oldest);
+  }
 }
 
 /* LA FIN D'UN CLIP — sa selection lue, sans boucle : la liste decide (`suite`).
@@ -1056,7 +1078,8 @@ void appliquer(const Evenement& e) {
       if (!c.clavier.nom[0] || !_ecoute(c.clavier.canal, e.canal)) continue;
       /* Au clavier, c'est l'echantillon du CLAVIER qui joue — celui que la cue a
        * designe. Do central (60) = hauteur d'origine. Une voix par note : jouer un
-       * accord donne un accord. */
+       * accord donne un accord — within the keyboard's polyphony (§219). */
+      _limitKeyboardVoices(c, s);
       declencherEchantillon(c.clavier.nom, /*boucle=*/false, c.clavier.gain, float(e.note) - 60.0f,
                             c.clavier.bloc, float(e.velo) / 127.0f, (int8_t)s);
     }
@@ -1870,13 +1893,13 @@ String etatSlots() {
     for (uint8_t v = 0; v < VOIX_MAX; v++) voix += (voixEch[v].actif && voixEch[v].slot == s) ? 1 : 0;
     uint8_t listes = 0;
     if (banques) for (uint8_t li = 0; li < banques[banqueActive].n; li++) listes += (banques[banqueActive].listes[li].slot == s) ? 1 : 0;
-    char t[360];
+    char t[400];
     snprintf(t, sizeof t, "%s{\"slot\":%u,\"state\":\"%s\",\"level\":%.3f,\"target\":%.3f,\"cut\":%.3f,"
-                          "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"kit\":%d,"
+                          "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"keyboard_poly\":%u,\"kit\":%d,"
                           "\"synth\":%d,\"synth_on\":%s,\"synth2\":%d,\"gen\":%lu}",
              s ? "," : "", (unsigned)s, NOMS[c.state < 5 ? c.state : 0], c.env.now, c.env.target, c.cut,
              (unsigned)voix, (unsigned)listes, c.clavier.surCue ? "" : c.clavier.nom, (unsigned)c.clavier.canal,
-             (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
+             (unsigned)c.clavier.poly, (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
              (int)c.synth2, (unsigned long)c.gen);
     j += t;
   }
@@ -2450,6 +2473,12 @@ uint32_t generationListes() { return genListes; }
 /* Qui declenche : la cue (defaut, comportement d'origine) ou le clavier. */
 void fixerDeclenchementSurCue(bool surCue) { slots[_slotIci()].clavier.surCue = surCue; }
 bool declenchementSurCue() { return slots[_slotIci()].clavier.surCue; }
+
+/* The keyboard's polyphony (§219): one byte, written whole, read by the audio task at a note. */
+void setKeyboardPoly(uint8_t n) {
+  slots[_slotIci()].clavier.poly = (n < 1) ? 1 : ((n > VOIX_MAX) ? VOIX_MAX : n);
+}
+uint8_t keyboardPoly() { return slots[_slotIci()].clavier.poly; }
 
 /* ARMER LE LECTEUR — il ne « charge » plus rien : tout est deja en PSRAM.
  * `nom` designe seulement l'echantillon que le CLAVIER jouera ; les cues, elles,
