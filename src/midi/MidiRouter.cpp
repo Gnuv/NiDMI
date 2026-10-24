@@ -175,6 +175,10 @@ void MidiRouter::sendControlChange(uint8_t channel, uint8_t control, uint8_t val
         serverCore.sendOscCC(ch, control, value, oscToSta, oscPort);
     }
     #endif
+    /* A link's CC (a metro(), a del(), OSC — §225) is also its group's: set aside, applied
+     * after the lock. A sensor's goes out only, as before. */
+    if (_tacheEmission && xTaskGetCurrentTaskHandle() == _tacheEmission)
+        _retenirCcEmis(ch, control, value, _pourEmission, _groupeEmission);
 }
 
 void MidiRouter::sendProgramChange(uint8_t channel, uint8_t program) {
@@ -563,6 +567,30 @@ void MidiRouter::appliquerCc(uint8_t c, uint8_t n, uint8_t v, AudioEngine::Pour 
     if (dela && composants) g_componentManager.handleMidiControlChange(c, n, v);
 }
 
+void MidiRouter::_retenirCcEmis(uint8_t c, uint8_t n, uint8_t v, AudioEngine::Pour pour, uint8_t groupe) {
+    for (uint8_t i = 0; i < _nCcEmis; i++) {
+        CcEmis& x = _ccEmis[i];
+        if (x.c == c && x.n == n && x.groupe == groupe && x.pour == pour) { x.v = v; return; }
+    }
+    if (_nCcEmis >= kCcEmisMax) { _ccEmisPerdus++; return; }
+    _ccEmis[_nCcEmis++] = CcEmis{c, n, v, groupe, pour};
+}
+
+void MidiRouter::appliquerCcEmis() {
+    CcEmis copie[kCcEmisMax];
+    uint8_t n;
+    {
+        MappingEngine::Verrou verrou;   // the task that runs a script writes them under it
+        n = _nCcEmis;
+        if (!n) return;
+        memcpy(copie, _ccEmis, n * sizeof(CcEmis));
+        _nCcEmis = 0;
+    }
+    /* No components: a CC a script sends out never lit them (sendControlChange). */
+    for (uint8_t i = 0; i < n; i++)
+        appliquerCc(copie[i].c, copie[i].n, copie[i].v, copie[i].pour, copie[i].groupe, false);
+}
+
 // ── Script .nms sur le MIDI entrant ────────────────────────────────────────
 void MidiRouter::setParamsScript(const String& params) {
     int debut = 0;
@@ -585,55 +613,61 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
      * battre apres un STOP et le script de la cue emettait tout seul. Le MIDI
      * entrant, lui, reste traite plus bas : c'est du jeu live. */
     if (!_enLecture) return;
-    MappingEngine::Verrou verrou;   // voir MappingEngine.h (§170)
-    const uint16_t init = MappingEngine::masqueDe(MappingEngine::Evenement::Init);
-    const uint16_t tick = MappingEngine::masqueDe(MappingEngine::Evenement::Tick);
-    /* Les maillons de la cue qui joue, puis la branche de la cue qui part (§212) : ce
-     * qu'un maillon emet va aux instruments de SA cue ; MAIN, a toutes. */
-    for (uint8_t branche = 0; branche < 2; branche++) {
-        std::vector<Emplacement*>& v = branche ? sortants : emplacements;
-        for (uint8_t e = 0; e < v.size(); e++) {
-            Emplacement& em = *v[e];
-            if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
-            Contexte ctx(*this, branche ? AudioEngine::Pour::SORTANTE
-                               : (e < _nPermanents ? AudioEngine::Pour::TOUS : AudioEngine::Pour::COURANTE),
-                         em.groupe);   // and to its group's instruments (§221)
-            /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
-             * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
-             * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
-             * en tache bloquee. */
-            /* QUI execute : « map:0 »..« map:3 » (« out:1 » : la cue qui part). Sans
-             * cela un print() d'emplacement arrivait a l'app sans origine. */
-            char org[12];
-            snprintf(org, sizeof org, branche ? "out:%u" : "map:%u", (unsigned)(branche ? _nPermanents + e : e));
-            if (em.initEnAttente) {
-                em.initEnAttente = false;
-                if (em.repond & init)
-                    MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
-                                          maintenant, this, em.etats,
-                                          MappingEngine::MAX_PIPELINES_SCRIPT, org);
+    {
+        MappingEngine::Verrou verrou;   // voir MappingEngine.h (§170)
+        const uint16_t init = MappingEngine::masqueDe(MappingEngine::Evenement::Init);
+        const uint16_t tick = MappingEngine::masqueDe(MappingEngine::Evenement::Tick);
+        /* Les maillons de la cue qui joue, puis la branche de la cue qui part (§212) : ce
+         * qu'un maillon emet va aux instruments de SA cue ; MAIN, a toutes. */
+        for (uint8_t branche = 0; branche < 2; branche++) {
+            std::vector<Emplacement*>& v = branche ? sortants : emplacements;
+            for (uint8_t e = 0; e < v.size(); e++) {
+                Emplacement& em = *v[e];
+                if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
+                Contexte ctx(*this, branche ? AudioEngine::Pour::SORTANTE
+                                   : (e < _nPermanents ? AudioEngine::Pour::TOUS : AudioEngine::Pour::COURANTE),
+                             em.groupe);   // and to its group's instruments (§221)
+                /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
+                 * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
+                 * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
+                 * en tache bloquee. */
+                /* QUI execute : « map:0 »..« map:3 » (« out:1 » : la cue qui part). Sans
+                 * cela un print() d'emplacement arrivait a l'app sans origine. */
+                char org[12];
+                snprintf(org, sizeof org, branche ? "out:%u" : "map:%u", (unsigned)(branche ? _nPermanents + e : e));
+                if (em.initEnAttente) {
+                    em.initEnAttente = false;
+                    if (em.repond & init)
+                        MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Init,
+                                              maintenant, this, em.etats,
+                                              MappingEngine::MAX_PIPELINES_SCRIPT, org);
+                }
+                /* Le battement seulement quand un metro() est du : avant, il ne ferait
+                 * rien — l'interpreteur le dit lui-meme (prochainUtile, §170). */
+                if (!(em.repond & tick)) continue;
+                if (em.tickConnu && (int32_t)(maintenant - em.prochainTick) < 0) continue;
+                MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
+                                      maintenant, this, em.etats,
+                                      MappingEngine::MAX_PIPELINES_SCRIPT, org, &em.prochainTick);
+                em.tickConnu = true;
             }
-            /* Le battement seulement quand un metro() est du : avant, il ne ferait
-             * rien — l'interpreteur le dit lui-meme (prochainUtile, §170). */
-            if (!(em.repond & tick)) continue;
-            if (em.tickConnu && (int32_t)(maintenant - em.prochainTick) < 0) continue;
-            MappingEngine::battre(em.contenu.c_str(), MappingEngine::Evenement::Tick,
-                                  maintenant, this, em.etats,
-                                  MappingEngine::MAX_PIPELINES_SCRIPT, org, &em.prochainTick);
-            em.tickConnu = true;
         }
     }
+    appliquerCcEmis();   // what its metro() made a CC of: its group's (§225)
 }
 
 void MidiRouter::recevoirOsc(const char* adresse, float valeur) {
     /* MAIN, the cue that plays, the one in its Release (§212): what a link emits from it goes to
      * its own cue. */
-    MappingEngine::Verrou verrou;
-    const bool deux = !sortants.empty();
-    _passerOsc(emplacements, 0, _nPermanents, adresse, valeur, "map", AudioEngine::Pour::TOUS);
-    _passerOsc(emplacements, _nPermanents, emplacements.size(), adresse, valeur, "map",
-               deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
-    if (deux) _passerOsc(sortants, 0, sortants.size(), adresse, valeur, "out", AudioEngine::Pour::SORTANTE);
+    {
+        MappingEngine::Verrou verrou;
+        const bool deux = !sortants.empty();
+        _passerOsc(emplacements, 0, _nPermanents, adresse, valeur, "map", AudioEngine::Pour::TOUS);
+        _passerOsc(emplacements, _nPermanents, emplacements.size(), adresse, valeur, "map",
+                   deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
+        if (deux) _passerOsc(sortants, 0, sortants.size(), adresse, valeur, "out", AudioEngine::Pour::SORTANTE);
+    }
+    appliquerCcEmis();   // (§225)
 }
 
 // ── Script nomme : contenu et nom dans la composition (chain.txt, §186) ─────
@@ -784,10 +818,11 @@ bool MidiRouter::_passerNote(std::vector<Emplacement*>& liste, size_t de, size_t
         if (!(em.repond & genre)) continue;   // rien dans ce maillon ne repond a cette note (§170)
         MappingEngine::SortieNote sortie;
         char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
-        if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c, estNoteOff, sortie,
-                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
-            n = sortie.note; v = sortie.velo; c = sortie.canal;
-        }
+        const bool note = MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c, estNoteOff, sortie,
+                                                         em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
+        /* A CC made of the note goes to the group (§225); it was lost. */
+        if (sortie.ccEmise) _retenirCcEmis(sortie.ccCanal, sortie.cc, sortie.ccValeur, pour, groupe);
+        if (note) { n = sortie.note; v = sortie.velo; c = sortie.canal; }
         else if (sortie.traite) return false;   // il en parle, et n'a rien emis : il l'avale
     }
     return true;
@@ -844,6 +879,7 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
                 coups[nCoups++] = Coup{c2, n2, v2, g, AudioEngine::Pour::SORTANTE};
         }
     }
+    appliquerCcEmis();   // what the links made of it, after the lock (§225)
     for (uint8_t i = 0; i < nCoups; i++) {
         /* The paired LEDs once per note played, however many groups play it. */
         bool vue = false;

@@ -1557,7 +1557,7 @@ bool MappingEngine::executeMidiNote(const char* script,
                                     uint8_t noteIn, uint8_t veloIn, uint8_t canalIn,
                                     bool estNoteOff, SortieNote& sortie,
                                     Etat* etats, int nEtats, const char* origine) {
-    sortie.emise = sortie.traite = false;
+    sortie.emise = sortie.traite = sortie.ccEmise = false;
     Evenement e;
     e.type  = estNoteOff ? Evenement::NoteOff : Evenement::NoteOn;
     e.canal = canalIn; e.a = noteIn; e.b = veloIn;
@@ -1573,6 +1573,12 @@ bool MappingEngine::executeMidiNote(const char* script,
         sortie.velo  = (liste[i].type == Sortie::NoteOff) ? 0 : liste[i].b;
         sortie.canal = canalValide(liste[i].canal);
         sortie.emise = true;
+        break;
+    }
+    for (int i = 0; i < n; i++) {   // and the first CC it made (§225)
+        if (liste[i].type != Sortie::Cc) continue;
+        sortie.cc = liste[i].a; sortie.ccValeur = liste[i].b; sortie.ccCanal = canalValide(liste[i].canal);
+        sortie.ccEmise = true;
         break;
     }
     return sortie.emise;

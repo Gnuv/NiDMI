@@ -1909,6 +1909,9 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         /* Le RTP sortant, depose puis emis par la boucle (§175) : ce que sa
          * file pleine a jete. */
         json += ",\"rtp_sortant\":{\"jetes\":" + String((unsigned long)MidiRouter::rtpJetes()) + "}";
+        /* The CCs a script emitted whose local application was lost (§225): more distinct CCs
+         * in one go than the router sets aside. Their MIDI output was not. */
+        json += ",\"script_cc_lost\":" + String((unsigned long)g_midiRouter.ccEmisPerdus());
         /* L'OSC des scripts, depose puis emis par la boucle (§176). */
         uint32_t od = 0, oe = 0, oj = 0;
         ComponentManager::statsOscScripts(od, oe, oj);

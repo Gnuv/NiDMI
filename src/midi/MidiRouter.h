@@ -277,6 +277,15 @@ public:
      * emits (a note, s("sys.lp_cutoff")) goes to its own cue. Any other task: TOUS. */
     AudioEngine::Pour pourCourant() const;
 
+    /* EVERY CC A GROUP'S SCRIPTS EMIT IS THAT GROUP'S (§225), as in the browser
+     * (_applyCCToGroupParamMappings): learnt, applied, read by its kits — a CC made of a note
+     * (`note.in() : ctl.out(…)`), of a metro(), a del(), a lag() or an OSC message, not only
+     * one that came through the chain. They are set aside while the script runs, under its
+     * lock; this applies them, after it (the learning writes to the console and the flash).
+     * Called by whoever ran the scripts: the notes, the clock, the deferred emissions, OSC. */
+    void appliquerCcEmis();
+    uint32_t ccEmisPerdus() const { return _ccEmisPerdus; }   // /api/diag/reservoirs
+
     // Réception MIDI pour piloter les LEDs
     void handleMidiNoteOn(uint8_t channel, uint8_t note, uint8_t velocity);
     void handleMidiNoteOff(uint8_t channel, uint8_t note, uint8_t velocity);
@@ -336,6 +345,16 @@ private:
     uint8_t             _groupeAvantDiffere = AudioEngine::GROUP_ALL;
     bool                _differeEnCours = false;
     struct Contexte;
+    /* The CCs a link emitted, waiting for appliquerCcEmis (§225). Written under the scripts'
+     * lock, by the task that runs them; the same CC of the same group and cue keeps its last
+     * value. Beyond kCcEmisMax distinct CCs in one go, a CC's local application is lost
+     * (counted) — never its MIDI output. */
+    struct CcEmis { uint8_t c, n, v, groupe; AudioEngine::Pour pour; };
+    static constexpr uint8_t kCcEmisMax = 16;
+    CcEmis   _ccEmis[kCcEmisMax];
+    uint8_t  _nCcEmis = 0;
+    uint32_t _ccEmisPerdus = 0;
+    void _retenirCcEmis(uint8_t c, uint8_t n, uint8_t v, AudioEngine::Pour pour, uint8_t groupe);
     /* A message other than a note (§222): its kind and its fields, as MappingEngine reads
      * them — a: CC number, pressure, program, a pad's note; b: CC value, a pad's pressure;
      * v14: pitch bend. */

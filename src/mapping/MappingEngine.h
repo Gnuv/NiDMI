@@ -370,6 +370,10 @@ public:
         uint8_t note   = 0;
         uint8_t velo   = 0;
         uint8_t canal  = 1;
+        /* A CC the note made (`note.in() : ctl.out(…)`, §225): the first one. It drives its
+         * group's learnt CCs, as in the browser — where it was lost on the card. */
+        bool    ccEmise  = false;
+        uint8_t cc = 0, ccValeur = 0, ccCanal = 1;
     };
     /* `etats` : l'etat par pipeline de CE script. Sans lui, on retombe sur le
      * tableau GLOBAL — ce qui allait tant qu'il n'y avait qu'un script map, et

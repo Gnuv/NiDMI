@@ -996,6 +996,7 @@ void ComponentManager::midiTaskLoop() {
         /* Et la file des differes — del(), makenote()... — une seule fois pour
          * TOUS les scripts : broches comprises, qui n'ont pas d'horloge a elles. */
         MappingEngine::battreDifferes(millis(), &g_midiRouter);
+        g_midiRouter.appliquerCcEmis();   // a link's deferred CC: its group's (§225)
         Chronos::differes.noter(micros() - tEtape);
         usb.traiterEntree(0);
         tEtape = micros();
