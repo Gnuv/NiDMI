@@ -132,7 +132,7 @@ constexpr uint8_t SORTE_NOTE = 0, SORTE_CLIP = 1;
  * the app's socket). Each instrument listens to ITS track's channel (§210). */
 /* `slots`: the cue slots it is for, a bit each (§212) — resolved when it is deposited. */
 struct Evenement { uint8_t note; uint8_t velo; uint8_t sorte; uint8_t clip; uint32_t bloc; uint8_t canal;
-                   uint8_t slots; };   // velo 0 = extinction
+                   uint8_t slots; uint8_t group; };   // velo 0 = extinction; group: §221
 static inline bool _ecoute(uint8_t veut, uint8_t vient) { return !veut || !vient || veut == vient; }
 
 struct Voix {
@@ -369,8 +369,22 @@ struct CueSlot {
   volatile int8_t   synth2 = -1;            // its second voice, the cue in two voices (§214), -1 none
   uint8_t           prochaine = 0;          // audio task: which of the two takes the next note
   volatile uint8_t  voixVoulues = 1;        // what its cue asks: 1, or 2 voices (§214)
+  /* The group of each of its instrument blocks (§221), written by the cue like its channels:
+   * the count dropped first, the entries, then the count. */
+  struct BlockGroup { uint32_t bloc; uint8_t group; } groups[GROUPS_PER_SLOT];
+  volatile uint8_t  nGroups = 0;
 };
 CueSlot           slots[CUE_SLOTS];
+
+/* The group of an instrument block in a slot (§221): 0 when its cue does not place it. */
+static uint8_t _groupOf(const CueSlot& c, uint32_t bloc) {
+  const uint8_t n = c.nGroups;
+  for (uint8_t i = 0; i < n && i < GROUPS_PER_SLOT; i++) if (c.groups[i].bloc == bloc) return c.groups[i].group;
+  return 0;
+}
+static inline bool _forGroup(uint8_t group, const CueSlot& c, uint32_t bloc) {
+  return group == GROUP_ALL || _groupOf(c, bloc) == group;
+}
 /* THE METERS OF THE OTHER INSTRUMENTS (MESURES §220): the SFZ kit and the synth voice of each slot,
  * their peak since the last reading, after their gain — as a sample voice's (picG/picD), in int16
  * units. Written by the audio task, read and reset by releverCretes, without a lock: a peak can be
@@ -740,12 +754,13 @@ bool _clipSuivant(VoixEch& vo) {
 
 /* UNE NOTE CHOISIT LE CLIP, dans chaque liste armee : la note du clip 1 joue
  * le clip 1, la suivante le clip 2… ; celle juste en dessous arrete. */
-void _notePourLesListes(uint8_t note, uint8_t canal, uint8_t slot) {
+void _notePourLesListes(uint8_t note, uint8_t canal, uint8_t slot, uint8_t group) {
   if (!banques) return;
   const Banque& b = banques[banqueActive];
   for (uint8_t li = 0; li < b.n; li++) {
     if (b.listes[li].slot != slot) continue;             // another cue's list (§212)
     if (!_ecoute(b.listes[li].canal, canal)) continue;   // another track's channel (§210)
+    if (!_forGroup(group, slots[slot], b.listes[li].bloc)) continue;   // another group's (§221)
     const int k = int(note) - int(b.listes[li].note) + 1;   // 0 : la note d'arret
     if (k >= 0 && k <= b.listes[li].n) _lancerClip(b, li, (uint8_t)k);
   }
@@ -1077,19 +1092,23 @@ void appliquer(const Evenement& e) {
     for (uint8_t s = 0; s < CUE_SLOTS; s++) {
       if (!(e.slots & (1u << s))) continue;
       CueSlot& c = slots[s];
-      if (e.velo != 0) _notePourLesListes(e.note, e.canal, s);
+      if (e.velo != 0) _notePourLesListes(e.note, e.canal, s, e.group);
       /* One voice: it takes every note. Two (§214): they take turns — a voice the guard
-       * stopped is skipped, the other takes them all. */
+       * stopped is skipped, the other takes them all. The voice of another group's track
+       * takes none (§221). */
       int8_t sv = c.synth;
       const int8_t sv2 = c.synth2;
-      if (sv2 >= 0 && e.velo != 0) {
+      const int8_t svb = (sv >= 0) ? sv : sv2;
+      const bool synthIci = svb >= 0 && _forGroup(e.group, c, SynthVoice::bloc((uint8_t)svb));
+      if (synthIci && sv2 >= 0 && e.velo != 0) {
         const bool a = sv >= 0 && SynthVoice::active((uint8_t)sv), b = SynthVoice::active((uint8_t)sv2);
         if (a && b) { if (c.prochaine) sv = sv2; c.prochaine ^= 1; }
         else if (b) sv = sv2;
       }
-      if (sv >= 0) SynthVoice::noteOn((uint8_t)sv, e.canal, e.note, e.velo);
+      if (synthIci && sv >= 0) SynthVoice::noteOn((uint8_t)sv, e.canal, e.note, e.velo);
       const int8_t kit = c.kit;
-      if (kit >= 0 && SfzStore::notesArmees((uint8_t)kit) && _ecoute(c.kitCanal, e.canal)) {
+      if (kit >= 0 && SfzStore::notesArmees((uint8_t)kit) && _ecoute(c.kitCanal, e.canal)
+          && _forGroup(e.group, c, SfzStore::blocId((uint8_t)kit))) {
         if (e.velo == 0) SfzStore::noteOff((uint8_t)kit, e.note);
         else             SfzStore::noteOn((uint8_t)kit, e.note, e.velo);
       }
@@ -1100,6 +1119,7 @@ void appliquer(const Evenement& e) {
       if (c.clavier.surCue) continue;
       if (e.velo == 0) continue;               // l'échantillon va au bout
       if (!c.clavier.nom[0] || !_ecoute(c.clavier.canal, e.canal)) continue;
+      if (!_forGroup(e.group, c, c.clavier.bloc)) continue;   // another group's keyboard (§221)
       /* Au clavier, c'est l'echantillon du CLAVIER qui joue — celui que la cue a
        * designe. Do central (60) = hauteur d'origine. Une voix par note : jouer un
        * accord donne un accord — within the keyboard's polyphony (§219). */
@@ -1773,14 +1793,42 @@ void fixerParamSynth(const char* nom, float v, Pour pour) {
   }
 }
 
-void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour) {
+void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour, uint8_t group) {
   if (!demarre) return;
-  deposerEvenement(Evenement{note, velocity, SORTE_NOTE, 0, 0, canal, _masque(pour)});
+  deposerEvenement(Evenement{note, velocity, SORTE_NOTE, 0, 0, canal, _masque(pour), group});
 }
 
-void noteOff(uint8_t canal, uint8_t note, Pour pour) {
+void noteOff(uint8_t canal, uint8_t note, Pour pour, uint8_t group) {
   if (!demarre) return;
-  deposerEvenement(Evenement{note, 0, SORTE_NOTE, 0, 0, canal, _masque(pour)});
+  deposerEvenement(Evenement{note, 0, SORTE_NOTE, 0, 0, canal, _masque(pour), group});
+}
+
+void setBlockGroups(const uint32_t* blocks, const uint8_t* groups, uint8_t n) {
+  CueSlot& c = slots[_slotIci()];
+  c.nGroups = 0;
+  __sync_synchronize();
+  if (n > GROUPS_PER_SLOT) n = GROUPS_PER_SLOT;
+  for (uint8_t i = 0; i < n; i++) c.groups[i] = CueSlot::BlockGroup{blocks[i], groups[i] > GROUP_MAX ? GROUP_MAX : groups[i]};
+  __sync_synchronize();
+  c.nGroups = n;
+}
+
+uint32_t instrumentGroups() {
+  uint32_t m = 0;
+  const uint8_t vivants = _masque(Pour::TOUS);
+  for (uint8_t s = 0; s < CUE_SLOTS; s++) {
+    if (!(vivants & (1u << s))) continue;
+    const CueSlot& c = slots[s];
+    if (c.clavier.nom[0]) m |= 1u << _groupOf(c, c.clavier.bloc);
+    const int8_t kit = c.kit, sv = c.synth;
+    if (kit >= 0) m |= 1u << _groupOf(c, SfzStore::blocId((uint8_t)kit));
+    if (sv >= 0)  m |= 1u << _groupOf(c, SynthVoice::bloc((uint8_t)sv));
+    if (banques) {
+      const Banque& b = banques[banqueActive];
+      for (uint8_t li = 0; li < b.n; li++) if (b.listes[li].slot == s) m |= 1u << _groupOf(c, b.listes[li].bloc);
+    }
+  }
+  return m;
 }
 
 bool armerCapture(uint32_t frames) {
@@ -1865,6 +1913,7 @@ void libererSlot(uint8_t slot) {
   CueSlot& c = slots[slot];
   c.clavier = Clavier{};
   c.kit = -1; c.kitCanal = 0; c.synth = -1; c.synth2 = -1;
+  c.nGroups = 0;
   __sync_synchronize();
   c.state = SLOT_FREE;
   if (slotLeaving == (int8_t)slot) slotLeaving = -1;
@@ -1926,6 +1975,12 @@ String etatSlots() {
              (unsigned)c.clavier.poly, (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
              (int)c.synth2, (unsigned long)c.gen);
     j += t;
+    /* Its instrument blocks' groups (§221): "bloc:group,…". */
+    j.remove(j.length() - 1);
+    j += ",\"groups\":\"";
+    for (uint8_t i = 0; i < c.nGroups && i < GROUPS_PER_SLOT; i++)
+      j += String(i ? "," : "") + String((unsigned long)c.groups[i].bloc) + ":" + String((unsigned)c.groups[i].group);
+    j += "\"}";
   }
   return j + String("],\"current\":") + (int)slotCurrent + ",\"leaving\":" + (int)slotLeaving;
 }

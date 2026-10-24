@@ -183,6 +183,7 @@ public:
         float   argsSup[MAX_ARGS_OSC_SUP] = {0, 0, 0};
         uint8_t nArgsSup = 0;
         uint8_t hote     = 0;
+        uint8_t tag      = 0xFF; // who a deferred emission is for (setTag, §221); 0xFF: nobody said
     };
 
     // Seize : deux pipelines qui emettent chacun un accord de quatre notes, et
@@ -323,6 +324,17 @@ public:
     typedef void (*EmetteurOsc)(const char* adresse, const float* args, int n,
                                 uint8_t hote);
     static void surOsc(EmetteurOsc fn);
+
+    /* WHO A DEFERRED EMISSION IS FOR (MESURES §221). A byte the caller puts down before it runs
+     * a script — the card: the cue branch and the group of the link — kept by every del(),
+     * makenote(), lag() and ramp() the run sets aside, and handed to `onTag` before their
+     * emission (battreDifferes with a sender), then TAG_NONE after. Set and read under the lock:
+     * one run at a time. */
+    static constexpr uint8_t TAG_NONE = 0xFF;
+    static void    setTag(uint8_t tag);
+    static uint8_t tag();
+    typedef void (*TagHandler)(uint8_t tag);
+    static void onTag(TagHandler fn);
 
     // ── Enveloppes historiques ──────────────────────────────────────────────
     // executeMidiNote / executeMidiCc restent l'interface de MidiRouter : elles

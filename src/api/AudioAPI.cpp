@@ -1153,6 +1153,7 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
                       /* La branche de la cue qui part, pendant son Release (§212) : ses maillons
                        * de cue, rang pour rang ceux qui suivent les permanents. */
                       + ",\"sortants\":" + g_midiRouter.nomsSortantsJson()
+                      + ",\"groups\":" + g_midiRouter.linkGroupsJson()   // each link's group (§221)
                       + ",\"fichiers\":" + ScriptStore::listerJson(lieuDe(request, false)) + "}");
     });
 

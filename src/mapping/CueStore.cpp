@@ -339,6 +339,18 @@ void _appliquer(const Cue& c) {
       if (e < perm) continue;          // zone MAIN : la cue passe son chemin
       g_midiRouter.chargerScriptNomme(nom.c_str(), false, e);
     }
+    /* THE GROUP OF EVERY LINK (§221), by position like the scripts, MAIN included: a link's
+     * notes go to its group's instruments only. Absent: every link in group 0. */
+    uint8_t groupes[MidiRouter::PLAFOND_SCRIPTS_MAP] = {0};
+    const String sgrp = _valeurDe(c.params, "sgrp");
+    uint8_t ng = 0;
+    for (int d = 0; d < (int)sgrp.length() && ng < MidiRouter::PLAFOND_SCRIPTS_MAP;) {
+      const int v = sgrp.indexOf(',', d);
+      groupes[ng++] = (uint8_t)constrain(sgrp.substring(d, v < 0 ? sgrp.length() : v).toInt(), 0, AudioEngine::GROUP_MAX);
+      if (v < 0) break;
+      d = v + 1;
+    }
+    g_midiRouter.setLinkGroups(groupes, ng);
   }
   if (c.paramsScript.length()) g_midiRouter.setParamsScript(c.paramsScript);
 
@@ -425,6 +437,26 @@ void _appliquer(const Cue& c) {
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
     AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
     AudioEngine::setKeyboardPoly(polyClavier);
+    /* THE GROUP OF EVERY INSTRUMENT BLOCK (§221): grp=<bloc>:<group>,… — a block it does not
+     * place is in group 0. */
+    {
+      uint32_t blocsG[AudioEngine::GROUPS_PER_SLOT]; uint8_t groupesG[AudioEngine::GROUPS_PER_SLOT];
+      uint8_t n = 0;
+      const String grp = _valeurDe(c.params, "grp");
+      for (int d = 0; d < (int)grp.length() && n < AudioEngine::GROUPS_PER_SLOT;) {
+        const int v = grp.indexOf(',', d);
+        const String paire = grp.substring(d, v < 0 ? grp.length() : v);
+        const int dp = paire.indexOf(':');
+        if (dp > 0) {
+          blocsG[n] = (uint32_t)paire.substring(0, dp).toInt();
+          groupesG[n] = (uint8_t)constrain(paire.substring(dp + 1).toInt(), 0, AudioEngine::GROUP_MAX);
+          n++;
+        }
+        if (v < 0) break;
+        d = v + 1;
+      }
+      AudioEngine::setBlockGroups(blocsG, groupesG, n);
+    }
 
     /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
      * longer instead of it. A cue without `synth=` silences the voice (its state

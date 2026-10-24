@@ -129,6 +129,7 @@ struct Reprise {
     uint8_t  genre = 0;
     float    de = 0, vers = 0;    // bornes de l'interpolation
     uint32_t debut = 0, duree = 0;
+    uint8_t  tag = MappingEngine::TAG_NONE;   // who its emission is for, from the run that set it aside (§221)
 };
 enum : uint8_t { RepDifferee = 0, RepLag = 1, RepRampe = 2 };
 constexpr int MAX_REPRISES = 16;
@@ -185,6 +186,8 @@ void noterIndice(uint32_t echeance) {
 
 MappingEngine::Impression g_impression = nullptr;
 MappingEngine::EmetteurOsc g_emetteurOsc = nullptr;
+uint8_t g_tag = MappingEngine::TAG_NONE;          // the run's, under the lock (§221)
+MappingEngine::TagHandler g_onTag = nullptr;
 
 // ── Outils de chaine ───────────────────────────────────────────────────────
 
@@ -326,6 +329,9 @@ int32_t versInt32(float v) {
 
 void MappingEngine::surImpression(Impression fn) { g_impression = fn; }
 void MappingEngine::surOsc(EmetteurOsc fn) { g_emetteurOsc = fn; }
+void MappingEngine::setTag(uint8_t t) { g_tag = t; }
+uint8_t MappingEngine::tag() { return g_tag; }
+void MappingEngine::onTag(TagHandler fn) { g_onTag = fn; }
 
 void MappingEngine::reinitialiser() {
     Verrou verrou;
@@ -721,6 +727,7 @@ bool continuer(const Contexte* c, uint8_t genre, float de, float vers,
     cible->debut = debut;      cible->duree = duree;
     cible->valeur = de;        cible->echeance = debut;
     cible->evt = e;            cible->actif = true;
+    cible->tag = g_tag;
     _repNoter();
     return true;
 }
@@ -736,6 +743,7 @@ bool differer(const Contexte* c, float valeur, const Evt& e, uint32_t echeance) 
         r.evt = e;            r.actif = true;
         r.horsLigne = c->horsLigne;   // la reprise reste dans SA ligne de temps
         r.genre = RepDifferee;
+        r.tag = g_tag;
         _repNoter();
         return true;
     }
@@ -1469,10 +1477,13 @@ int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
             const float v = r.de + (r.vers - r.de) * t;
             // lag() garde sa position ; ramp() ne laisse rien derriere elle.
             if (r.genre == RepLag) etatDe(r.etats, r.nEtats, r.pipe).lagCur = v;
-            if (total < max)
-                total += rejouerDepuis(r.script, r.pipe, r.seg, v, r.evt,
-                                       r.etats, r.nEtats, sorties + total,
-                                       max - total, horsLigne);
+            if (total < max) {
+                const int k = rejouerDepuis(r.script, r.pipe, r.seg, v, r.evt,
+                                            r.etats, r.nEtats, sorties + total,
+                                            max - total, horsLigne);
+                for (int j = total; j < total + k; j++) sorties[j].tag = r.tag;
+                total += k;
+            }
             if (t >= 1.f) r.actif = false;
             continue;
         }
@@ -1480,10 +1491,14 @@ int MappingEngine::battreDifferes(uint32_t maintenant, Sortie* sorties, int max,
         if ((int32_t)(maintenant - r.echeance) < 0) continue;
         r.actif = false;                            // libere AVANT de rejouer :
                                                     // le rejeu peut re-differer
-        if (total < max)
-            total += rejouerDepuis(r.script, r.pipe, r.seg, r.valeur, r.evt,
-                                   r.etats, r.nEtats, sorties + total, max - total,
-                                   horsLigne);
+        if (total < max) {
+            const uint8_t tag = r.tag;              // r may be taken again by the replay
+            const int k = rejouerDepuis(r.script, r.pipe, r.seg, r.valeur, r.evt,
+                                        r.etats, r.nEtats, sorties + total, max - total,
+                                        horsLigne);
+            for (int j = total; j < total + k; j++) sorties[j].tag = tag;
+            total += k;
+        }
     }
     return total;
 }
@@ -1611,8 +1626,10 @@ bool MappingEngine::executeMidiCc(const char* script,
  * fini par diverger sur un type de message. */
 static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, int n) {
     if (!sender) return;
+    uint8_t tag = MappingEngine::TAG_NONE;   // a deferred emission says who it is for (§221)
     for (int i = 0; i < n; i++) {
         const MappingEngine::Sortie& s = liste[i];
+        if (g_onTag && s.tag != tag) { tag = s.tag; g_onTag(tag); }
         const uint8_t ch = (uint8_t)constrain((int)s.canal, 1, 16);
         switch (s.type) {
             case MappingEngine::Sortie::Note:      sender->sendNoteOn(ch, s.a, s.b);        break;
@@ -1633,11 +1650,15 @@ static void emettreVers(MidiSender* sender, const MappingEngine::Sortie* liste, 
             }
         }
     }
+    if (g_onTag && tag != MappingEngine::TAG_NONE) g_onTag(MappingEngine::TAG_NONE);
 }
 
 /* La variante a EMETTEUR emploie emettreVers, qui n'existe que dans la carte —
  * elle vit donc sous la garde, avec executerCapteur. */
 void MappingEngine::battreDifferes(uint32_t maintenant, MidiSender* sender) {
+    /* Emitted under the lock: the tag handler sets the emitter's context, as a link's run does,
+     * and no run of another task may see it (§221). */
+    Verrou verrou;
     Sortie liste[MAX_SORTIES];
     const int n = battreDifferes(maintenant, liste, MAX_SORTIES);
     if (n > 0) emettreVers(sender, liste, n);

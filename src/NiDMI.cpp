@@ -1570,6 +1570,9 @@ void nidmi_begin() {
        open a filter (s("sys.lp_cutoff")). */
     serverCore.usbMidi().setPolyTouchHook(
         [](uint8_t ch, uint8_t note, uint8_t p) { g_midiRouter.polytouchEntrant(ch, note, p); });
+    /* A del(), a makenote(), a lag() go to the cue branch and the group of the link that set them
+       aside (§221). */
+    MappingEngine::onTag([](uint8_t tag) { g_midiRouter.emissionDifferee(tag); });
     NIDMI_WEB_LOG("[MEM] apres MidiRouter: %d\n", (int)ESP.getFreeHeap());
 
     // Interface réseau sur le câble USB. Impérativement APRÈS MidiRouter :

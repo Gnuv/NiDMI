@@ -115,6 +115,22 @@ public:
     bool sortieOuverte() const { return !sortants.empty(); }
     String nomsSortantsJson();   // ["a.nms",""] : les maillons de la branche sortante, sous le verrou
 
+    /* ── THE GROUPS (MESURES §221) ──────────────────────────────────────────
+     * Each map link belongs to its track's group, and what a group's links make of a note is for
+     * that group's instruments only — each group its own walk of the chain, from the note as it
+     * came, as in the browser. A link runs once per event, in its group's walk. The cue says the
+     * group of every link (sgrp=, by position, MAIN included; 0 when it does not) and of every
+     * instrument block (grp=, AudioEngine::setBlockGroups). Without them everything is in group 0:
+     * one walk, as before. The CCs still walk the whole chain once; what a link EMITS — a note
+     * from a metro(), an OSC message, a del() — goes to its own group. */
+    void setLinkGroups(const uint8_t* groups, uint8_t n);
+    String linkGroupsJson();     // [0,1,2] : the group of each link, under the lock
+    uint8_t groupeCourant() const;
+    /* A deferred emission's tag (MappingEngine::onTag): its branch and group, set around it on
+     * the task that emits (under the scripts lock); TAG_NONE puts the context back. */
+    void emissionDifferee(uint8_t tag);
+    static uint8_t tagDe(AudioEngine::Pour pour, uint8_t groupe);
+
     MidiRouter();
     ~MidiRouter() override;
 
@@ -296,6 +312,7 @@ private:
          * a faire (MESURES §170) : on ne l'execute pas pour rien. Voir
          * MappingEngine, « A QUOI UN SCRIPT REPOND ». Pose avec le contenu. */
         uint16_t repond = 0;
+        uint8_t  groupe = 0;              // its track's group, from the cue (§221)
         uint32_t prochainTick = 0;
         bool     tickConnu = false;       // faux : battre au prochain tour
         MappingEngine::Etat etats[MappingEngine::MAX_PIPELINES_SCRIPT];
@@ -311,12 +328,18 @@ private:
      * d'une autre tache, un capteur, va partout). */
     TaskHandle_t        _tacheEmission = nullptr;
     AudioEngine::Pour   _pourEmission  = AudioEngine::Pour::TOUS;
+    uint8_t             _groupeEmission = AudioEngine::GROUP_ALL;   // and to which group (§221)
+    /* The context a deferred emission replaced, given back after it. */
+    TaskHandle_t        _tacheAvantDiffere = nullptr;
+    AudioEngine::Pour   _pourAvantDiffere  = AudioEngine::Pour::TOUS;
+    uint8_t             _groupeAvantDiffere = AudioEngine::GROUP_ALL;
+    bool                _differeEnCours = false;
     struct Contexte;
     /* Les maillons [de, a) de `v`, pour la cue `pour`. Note, CC : faux si l'un l'a avale.
      * Pression : vrai si l'un en a fait un CC (le premier). OSC : chacun l'entend. */
     bool _passerNote(std::vector<Emplacement*>& v, size_t de, size_t a,
                      uint8_t& c, uint8_t& n, uint8_t& vel, bool estNoteOff, const char* branche,
-                     AudioEngine::Pour pour);
+                     AudioEngine::Pour pour, uint8_t groupe);
     bool _passerCc(std::vector<Emplacement*>& v, size_t de, size_t a,
                    uint8_t& c, uint8_t& n, uint8_t& vel, const char* branche, AudioEngine::Pour pour);
     bool _passerTouch(std::vector<Emplacement*>& v, size_t de, size_t a, uint8_t canal, uint8_t note,
@@ -325,7 +348,8 @@ private:
     void _passerOsc(std::vector<Emplacement*>& v, size_t de, size_t a, const char* adresse, float valeur,
                     const char* branche, AudioEngine::Pour pour);
     /* La note jouee — les LEDs appairees, puis les instruments de la cue `pour`. */
-    void _jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour);
+    void _jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour, uint8_t groupe,
+                    bool leds);
     uint8_t _nPermanents = 0;     // les maillons de la zone MAIN, en tete
     bool    _enLecture   = false; // transport : l'horloge des scripts ne bat que sous PLAY
     /* Rend l'emplacement `e`, en allouant ce qui manque jusqu'a lui. nullptr si

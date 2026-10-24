@@ -124,8 +124,8 @@ void MidiRouter::sendNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 
     // Écho AUDIO : le boîtier s'entend lui-même. Le moteur démarre à la
     // première note (init paresseuse) — rien au boot, l'OTA reste sauf.
-    // Vers les instruments de la cue du maillon qui l'emet (§212).
-    AudioEngine::noteOn(ch, note, velocity, pourCourant());
+    // Vers les instruments de la cue du maillon qui l'emet (§212), et de son groupe (§221).
+    AudioEngine::noteOn(ch, note, velocity, pourCourant(), groupeCourant());
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -149,7 +149,7 @@ void MidiRouter::sendNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     // Écho local (cf. sendNoteOn) : éteint les LEDs appairées à cette note.
     g_componentManager.handleMidiNoteOff(ch, note, velocity);
 
-    AudioEngine::noteOff(ch, note, pourCourant());
+    AudioEngine::noteOff(ch, note, pourCourant(), groupeCourant());
 
     #ifdef NIDMI_ENABLE_OSC_ROUTER
     if (oscEnabled) {
@@ -327,13 +327,20 @@ void MidiRouter::handleMidiControlChange(uint8_t channel, uint8_t control, uint8
  * Rend false si un emplacement a AVALE l'evenement (traite sans emission) :
  * c'est ce qui rend un filtre exprimable.
  */
-/* WHOSE SCRIPTS RUN (§212) — see MidiRouter.h. Nested contexts restore the outer one. */
+/* WHOSE SCRIPTS RUN (§212) — see MidiRouter.h — and of which group (§221): what the run sets
+ * aside (a del()) keeps both in its tag. Nested contexts restore the outer one. */
 struct MidiRouter::Contexte {
-    MidiRouter& r; TaskHandle_t tache; AudioEngine::Pour pour;
-    Contexte(MidiRouter& r_, AudioEngine::Pour p) : r(r_), tache(r_._tacheEmission), pour(r_._pourEmission) {
-        r._tacheEmission = xTaskGetCurrentTaskHandle(); r._pourEmission = p;
+    MidiRouter& r; TaskHandle_t tache; AudioEngine::Pour pour; uint8_t groupe, tag;
+    Contexte(MidiRouter& r_, AudioEngine::Pour p, uint8_t g = AudioEngine::GROUP_ALL)
+        : r(r_), tache(r_._tacheEmission), pour(r_._pourEmission), groupe(r_._groupeEmission),
+          tag(MappingEngine::tag()) {
+        r._tacheEmission = xTaskGetCurrentTaskHandle(); r._pourEmission = p; r._groupeEmission = g;
+        MappingEngine::setTag(tagDe(p, g));
     }
-    ~Contexte() { r._tacheEmission = tache; r._pourEmission = pour; }
+    ~Contexte() {
+        r._tacheEmission = tache; r._pourEmission = pour; r._groupeEmission = groupe;
+        MappingEngine::setTag(tag);
+    }
 };
 
 AudioEngine::Pour MidiRouter::pourCourant() const {
@@ -341,13 +348,56 @@ AudioEngine::Pour MidiRouter::pourCourant() const {
                                                                             : AudioEngine::Pour::TOUS;
 }
 
+uint8_t MidiRouter::groupeCourant() const {
+    return (_tacheEmission && xTaskGetCurrentTaskHandle() == _tacheEmission) ? _groupeEmission
+                                                                            : AudioEngine::GROUP_ALL;
+}
+
+/* A tag: the branch in bits 5-6, the group in bits 0-4 (31 = every group); TAG_NONE (bit 7) when
+ * nobody said. */
+uint8_t MidiRouter::tagDe(AudioEngine::Pour pour, uint8_t groupe) {
+    return (uint8_t)((((uint8_t)pour & 3u) << 5) | (groupe > AudioEngine::GROUP_MAX ? 31u : groupe));
+}
+
+void MidiRouter::emissionDifferee(uint8_t tag) {
+    if (tag == MappingEngine::TAG_NONE) {
+        if (!_differeEnCours) return;
+        _tacheEmission = _tacheAvantDiffere; _pourEmission = _pourAvantDiffere; _groupeEmission = _groupeAvantDiffere;
+        _differeEnCours = false;
+        return;
+    }
+    if (!_differeEnCours) {
+        _tacheAvantDiffere = _tacheEmission; _pourAvantDiffere = _pourEmission; _groupeAvantDiffere = _groupeEmission;
+        _differeEnCours = true;
+    }
+    const uint8_t g = tag & 31u;
+    _tacheEmission  = xTaskGetCurrentTaskHandle();
+    _pourEmission   = (AudioEngine::Pour)((tag >> 5) & 3u);
+    _groupeEmission = (g == 31u) ? AudioEngine::GROUP_ALL : g;
+}
+
+void MidiRouter::setLinkGroups(const uint8_t* groups, uint8_t n) {
+    MappingEngine::Verrou verrou;   // a link's group does not change under a note (§170)
+    for (size_t e = 0; e < emplacements.size(); e++) {
+        const uint8_t g = (e < n) ? groups[e] : 0;
+        emplacements[e]->groupe = (g > AudioEngine::GROUP_MAX) ? AudioEngine::GROUP_MAX : g;
+    }
+}
+
+String MidiRouter::linkGroupsJson() {
+    MappingEngine::Verrou verrou;
+    String j = "[";
+    for (size_t e = 0; e < emplacements.size(); e++) j += String(e ? "," : "") + String((unsigned)emplacements[e]->groupe);
+    return j + "]";
+}
+
 bool MidiRouter::_passerCc(std::vector<Emplacement*>& liste, size_t de, size_t a,
                            uint8_t& c, uint8_t& n, uint8_t& v, const char* branche, AudioEngine::Pour pour) {
-    Contexte ctx(*this, pour);
     const uint16_t cc = MappingEngine::masqueDe(MappingEngine::Evenement::Cc);
     for (size_t e = de; e < a && e < liste.size(); e++) {
         Emplacement& em = *liste[e];
         if (!(em.repond & cc)) continue;   // rien dans ce maillon ne repond a un CC (§170)
+        Contexte ctx(*this, pour, em.groupe);   // what it emits goes to its group (§221)
         MappingEngine::SortieCc sortie;
         /* QUI execute — « map:0 » (« out:1 » : la cue qui part). Le battement d'horloge le
          * passait deja ; ce chemin-ci, non, si bien qu'un print() ou un graph() declenche par
@@ -370,11 +420,11 @@ bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
 bool MidiRouter::_passerTouch(std::vector<Emplacement*>& liste, size_t de, size_t a, uint8_t canal,
                               uint8_t note, uint8_t pression, uint8_t& c, uint8_t& n, uint8_t& v,
                               const char* branche, AudioEngine::Pour pour) {
-    Contexte ctx(*this, pour);
     const uint16_t genre = MappingEngine::masqueDe(MappingEngine::Evenement::PolyTouch);
     for (size_t e = de; e < a && e < liste.size(); e++) {
         Emplacement& em = *liste[e];
         if (!(em.repond & genre)) continue;   // nothing in this link answers a pressure
+        Contexte ctx(*this, pour, em.groupe);   // what it emits goes to its group (§221)
         MappingEngine::SortieCc sortie;
         char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
         if (MappingEngine::executeMidiTouch(em.contenu.c_str(), note, pression, canal, sortie,
@@ -388,11 +438,11 @@ bool MidiRouter::_passerTouch(std::vector<Emplacement*>& liste, size_t de, size_
 
 void MidiRouter::_passerOsc(std::vector<Emplacement*>& liste, size_t de, size_t a, const char* adresse,
                             float valeur, const char* branche, AudioEngine::Pour pour) {
-    Contexte ctx(*this, pour);
     const uint16_t osc = MappingEngine::masqueDe(MappingEngine::Evenement::Osc);
     for (size_t e = de; e < a && e < liste.size(); e++) {
         Emplacement& em = *liste[e];
         if (!(em.repond & osc)) continue;   // rien ici n'ecoute l'OSC (§170)
+        Contexte ctx(*this, pour, em.groupe);   // what it emits goes to its group (§221)
         char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
         MappingEngine::battreOsc(em.contenu.c_str(), adresse, valeur, this,
                                  em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
@@ -502,7 +552,8 @@ void MidiRouter::battreHorloge(uint32_t maintenant) {
             Emplacement& em = *v[e];
             if (!(em.repond & (init | tick))) continue;   // ni loadbang() ni metro() (§170)
             Contexte ctx(*this, branche ? AudioEngine::Pour::SORTANTE
-                               : (e < _nPermanents ? AudioEngine::Pour::TOUS : AudioEngine::Pour::COURANTE));
+                               : (e < _nPermanents ? AudioEngine::Pour::TOUS : AudioEngine::Pour::COURANTE),
+                         em.groupe);   // and to its group's instruments (§221)
             /* Init d'abord : loadbang() doit partir avant le premier metro(). On le
              * differe jusqu'ici plutot que de l'emettre depuis le gestionnaire HTTP —
              * emettre du MIDI depuis async_tcp, c'est le genre de raccourci qui finit
@@ -707,12 +758,13 @@ bool MidiRouter::chaineScriptsNote(uint8_t& c, uint8_t& n, uint8_t& v, bool estN
 // pour celles qu'on aurait pense cabler une a une.
 bool MidiRouter::_passerNote(std::vector<Emplacement*>& liste, size_t de, size_t a,
                              uint8_t& c, uint8_t& n, uint8_t& v, bool estNoteOff, const char* branche,
-                             AudioEngine::Pour pour) {
-    Contexte ctx(*this, pour);
+                             AudioEngine::Pour pour, uint8_t groupe) {
+    Contexte ctx(*this, pour, groupe);
     const uint16_t genre = MappingEngine::masqueDe(estNoteOff ? MappingEngine::Evenement::NoteOff
                                                               : MappingEngine::Evenement::NoteOn);
     for (size_t e = de; e < a && e < liste.size(); e++) {
         Emplacement& em = *liste[e];
+        if (em.groupe != groupe) continue;    // another group's link: its own walk (§221)
         if (!(em.repond & genre)) continue;   // rien dans ce maillon ne repond a cette note (§170)
         MappingEngine::SortieNote sortie;
         char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
@@ -725,14 +777,15 @@ bool MidiRouter::_passerNote(std::vector<Emplacement*>& liste, size_t de, size_t
     return true;
 }
 
-void MidiRouter::_jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour) {
+void MidiRouter::_jouerNote(uint8_t c, uint8_t n, uint8_t v, bool estNoteOff, AudioEngine::Pour pour,
+                            uint8_t groupe, bool leds) {
     // Les LEDs appairees suivent la note REELLEMENT jouee, pas la note brute.
     if (estNoteOff) {
-        g_componentManager.handleMidiNoteOff(c, n, v);
-        AudioEngine::noteOff(c, n, pour);
+        if (leds) g_componentManager.handleMidiNoteOff(c, n, v);
+        AudioEngine::noteOff(c, n, pour, groupe);
     } else {
-        g_componentManager.handleMidiNoteOn(c, n, v);
-        AudioEngine::noteOn(c, n, v, pour);
+        if (leds) g_componentManager.handleMidiNoteOn(c, n, v);
+        AudioEngine::noteOn(c, n, v, pour, groupe);
     }
 }
 
@@ -745,23 +798,42 @@ void MidiRouter::noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, b
 
     /* LES DEUX CUES (§212) : MAIN d'abord, puis une branche par cue — celle qui joue et,
      * pendant son Release, celle qui part — chacune vers SES instruments. Une seule cue :
-     * comme avant, la chaine entiere, et la note a tous. */
-    bool courante, sortante = false, deux;
-    uint8_t c2 = 0, n2 = 0, v2 = 0;
+     * comme avant, la chaine entiere, et la note a tous.
+     * THE GROUPS (§221): that walk once per group — the groups of the links that answer a note
+     * and of the instruments that sound —, each from the note as it came, through its own links
+     * only, to its own instruments. A group without a link gets the note as it came. */
+    struct Coup { uint8_t c, n, v, groupe; AudioEngine::Pour pour; };
+    Coup coups[2 * (AudioEngine::GROUP_MAX + 1)];
+    uint8_t nCoups = 0;
     {
         MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous une note (§170)
-        if (!_passerNote(emplacements, 0, _nPermanents, c, n, v, estNoteOff, "map",
-                         AudioEngine::Pour::TOUS)) return;   // MAIN l'a avalee
-        deux = !sortants.empty();
-        c2 = c; n2 = n; v2 = v;
-        courante = _passerNote(emplacements, _nPermanents, emplacements.size(), c, n, v, estNoteOff, "map",
-                               deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
-        if (deux) sortante = _passerNote(sortants, 0, sortants.size(), c2, n2, v2, estNoteOff, "out",
-                                         AudioEngine::Pour::SORTANTE);
+        const uint16_t genre = MappingEngine::masqueDe(estNoteOff ? MappingEngine::Evenement::NoteOff
+                                                                  : MappingEngine::Evenement::NoteOn);
+        uint32_t groupes = AudioEngine::instrumentGroups();
+        for (Emplacement* em : emplacements) if (em->repond & genre) groupes |= 1u << em->groupe;
+        for (Emplacement* em : sortants)     if (em->repond & genre) groupes |= 1u << em->groupe;
+        if (!groupes) groupes = 1u;   // nothing anywhere: one walk all the same (the LEDs, the test tone)
+        const bool deux = !sortants.empty();
+        for (uint8_t g = 0; g <= AudioEngine::GROUP_MAX; g++) {
+            if (!(groupes & (1u << g))) continue;
+            uint8_t cg = c, ng = n, vg = v;
+            if (!_passerNote(emplacements, 0, _nPermanents, cg, ng, vg, estNoteOff, "map",
+                             AudioEngine::Pour::TOUS, g)) continue;   // MAIN l'a avalee, pour ce groupe
+            uint8_t c2 = cg, n2 = ng, v2 = vg;
+            if (_passerNote(emplacements, _nPermanents, emplacements.size(), cg, ng, vg, estNoteOff, "map",
+                            deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS, g))
+                coups[nCoups++] = Coup{cg, ng, vg, g, deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS};
+            if (deux && _passerNote(sortants, 0, sortants.size(), c2, n2, v2, estNoteOff, "out",
+                                    AudioEngine::Pour::SORTANTE, g))
+                coups[nCoups++] = Coup{c2, n2, v2, g, AudioEngine::Pour::SORTANTE};
+        }
     }
-    if (!deux) { if (courante) _jouerNote(c, n, v, estNoteOff, AudioEngine::Pour::TOUS); return; }
-    if (courante) _jouerNote(c, n, v, estNoteOff, AudioEngine::Pour::COURANTE);
-    if (sortante) _jouerNote(c2, n2, v2, estNoteOff, AudioEngine::Pour::SORTANTE);
+    for (uint8_t i = 0; i < nCoups; i++) {
+        /* The paired LEDs once per note played, however many groups play it. */
+        bool vue = false;
+        for (uint8_t k = 0; k < i && !vue; k++) vue = coups[k].c == coups[i].c && coups[k].n == coups[i].n;
+        _jouerNote(coups[i].c, coups[i].n, coups[i].v, estNoteOff, coups[i].pour, coups[i].groupe, !vue);
+    }
 }
 
 void MidiRouter::ouvrirSortie() {

@@ -104,8 +104,19 @@ void validerConfigBoot();
  * branch of the chain. Everything else (the permanent links of MAIN, the sensors, the app)
  * reaches both. */
 enum class Pour : uint8_t { TOUS = 0, COURANTE, SORTANTE };
-void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour = Pour::TOUS);
-void noteOff(uint8_t canal, uint8_t note, Pour pour = Pour::TOUS);
+/* WHICH GROUP A NOTE IS FOR (MESURES §221): what came out of a group's map scripts is for that
+ * group's instruments only — each group its own chain, as in the browser. A cue places each of
+ * its instrument blocks in a group (grp=<bloc>:<group>,…; one it does not place is in group 0).
+ * GROUP_ALL reaches every instrument: a sensor's script, the API. Groups 0..GROUP_MAX. */
+constexpr uint8_t GROUP_ALL = 0xFF;
+constexpr uint8_t GROUP_MAX = 30;
+void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour = Pour::TOUS, uint8_t group = GROUP_ALL);
+void noteOff(uint8_t canal, uint8_t note, Pour pour = Pour::TOUS, uint8_t group = GROUP_ALL);
+/* The group of each instrument block of the cue that plays (at most GROUPS_PER_SLOT). */
+constexpr uint8_t GROUPS_PER_SLOT = 12;
+void setBlockGroups(const uint32_t* blocks, const uint8_t* groups, uint8_t n);
+/* The groups the instruments of every slot not being cut are in, a bit each. */
+uint32_t instrumentGroups();
 /* The slots `pour` reaches, a bit each (TOUS: every slot not being cut). */
 uint8_t masqueSlots(Pour pour);
 /* A CC for the SFZ kits' locc/hicc gates (§208), from the branch `pour` (§212): TOUS every
