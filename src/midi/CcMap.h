@@ -17,6 +17,11 @@
 // La cible decide seule de sa famille (voir estParamAudio) : l'app n'a pas a
 // dire laquelle, et un futur parametre de script ne demande aucun code ici.
 //
+// A THIRD FAMILY (§228): the effects' parameters — lp_cutoff, lp_q, rv_wet, rv_decay,
+// rv_damp (Effects::isParam). The app names an FX block's parameter so, its prefix
+// saying the effect: the reverb's « decay » is rv_decay, never the synth's decay. Like a
+// synth parameter, it moves the effects of the cue the CC is for; the cutoff by octaves.
+//
 // PERSISTANCE : la table est celle de la COMPOSITION OUVERTE — son cc.txt
 // (CONVERGENCE §9.7, MESURES §187). Elle vivait en NVS, commune a toute la
 // carte : ouvrir une autre composition gardait les potentiometres de la

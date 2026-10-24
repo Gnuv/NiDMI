@@ -158,6 +158,13 @@ bool setParam(const char* name, float value, uint8_t mask) {
   return true;
 }
 
+bool isParam(const char* name) {
+  return name && (!strcmp(name, "lp_cutoff") || !strcmp(name, "lp_q") || !strcmp(name, "rv_wet") ||
+                  !strcmp(name, "rv_decay") || !strcmp(name, "rv_damp"));
+}
+
+bool inOctaves(const char* name) { return name && !strcmp(name, "lp_cutoff"); }
+
 bool filters(uint8_t slot, uint32_t bloc) {
   const Slot* e = slotOf(slot);
   if (!e || !e->lpOn || !bloc) return false;

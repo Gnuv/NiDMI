@@ -18,7 +18,7 @@
 #include "audio/AudioEngine.h"
 #include "config/SdCard.h"
 #include "audio/SdStream.h"
-#include "audio/Effects.h"     // s("sys.lp_cutoff") … : the effects, from a script (§210)
+#include "audio/Effects.h"     // the effects' PSRAM, in the memory report (§217)
 #include "audio/SfzStore.h"
 #include "audio/SampleStore.h"
 #include "audio/SynthVoice.h"   // with the kits and the sounds: who holds the memory (§217)
@@ -808,25 +808,8 @@ extern "C" void nidmi_sys_recevoir(const char* nom, float valeur){
     else if (!strcmp(nom, "sys.prevcompo"))    { if (oui) g_compoSens = -1; }
     else if (!strcmp(nom, "sys.cueloop"))      g_boucleDemandee = oui ? 1 : 0;
     else if (!strcmp(nom, "sys.autoplay"))     g_auDemarrageDemande = oui ? 1 : 0;
-    /* THE EFFECTS, FROM A SCRIPT (§210): a value, not a gesture — written at once
-     * (a float the audio task reads at its next block), never by the loop.
-     * `polytouch.in(10,38) : lag(10,5000) : curve(4) : scale(0,127,200,8000) :
-     * s("sys.lp_cutoff")` — the pressure of a pad opens the filter. */
-    /* The effects of the CUE whose script runs (§212): its branch of the chain says which —
-     * MAIN, a sensor, the API: both. */
-    else if (!strncmp(nom, "sys.lp_", 7) || !strncmp(nom, "sys.rv_", 7)) {
-        const uint8_t slots = AudioEngine::masqueSlots(g_midiRouter.pourCourant());
-        if      (!strcmp(nom, "sys.lp_cutoff")) Effects::setParam("lp_cutoff", valeur, slots);
-        else if (!strcmp(nom, "sys.lp_q"))      Effects::setParam("lp_q", valeur, slots);
-        else if (!strcmp(nom, "sys.rv_wet"))    Effects::setParam("rv_wet", valeur, slots);
-        else if (!strcmp(nom, "sys.rv_decay"))  Effects::setParam("rv_decay", valeur, slots);
-        else if (!strcmp(nom, "sys.rv_damp"))   Effects::setParam("rv_damp", valeur, slots);
-        else if (!g_sysInconnu) {
-            strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
-            __sync_synchronize();
-            g_sysInconnu = true;
-        }
-    }
+    /* The effects are no longer here (§228): sys.* is for the card, not for a process block.
+     * A script makes a CC (ctl.out), learnt on the effect's parameter, as an instrument's. */
     else if (!g_sysInconnu) {
         strlcpy(g_sysInconnuNom, nom, sizeof g_sysInconnuNom);
         __sync_synchronize();                  // le nom avant le drapeau
@@ -1579,7 +1562,7 @@ void nidmi_begin() {
     );
     /* THE PRESSURE OF A PAD (polyphonic aftertouch, §210): it was read and
        dropped. Through the map scripts — `polytouch.in(ch, note)` — it can now
-       open a filter (s("sys.lp_cutoff")). */
+       open a filter: a CC the script makes of it, learnt on the low-pass (§228). */
     serverCore.usbMidi().setPolyTouchHook(
         [](uint8_t ch, uint8_t note, uint8_t p) { g_midiRouter.polytouchEntrant(ch, note, p); });
     /* Pitch bend, channel pressure, program change (§222): through each group's map scripts,

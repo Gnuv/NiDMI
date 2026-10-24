@@ -7,6 +7,7 @@
 #include <freertos/semphr.h>
 
 #include "../audio/AudioEngine.h"
+#include "../audio/Effects.h"           // an effect's parameter as a target (§228)
 #include "../mapping/MappingEngine.h"   // FluxRegistry
 #include "../mapping/Repertoire.h"      // cc.txt de la composition ouverte
 
@@ -68,6 +69,13 @@ float etaler(uint8_t valeur, float mn, float mx) {
     return mn + (float(valeur) / 127.0f) * (mx - mn);
 }
 
+/* By octaves (§228), as the app's `log` slider (js/ui/widgets.js): min · (max/min)^(v/127).
+ * Linear when a bound is not positive. */
+float spreadOctaves(uint8_t valeur, float mn, float mx) {
+    if (mn <= 0.0f || mx <= 0.0f) return etaler(valeur, mn, mx);
+    return mn * powf(mx / mn, float(valeur) / 127.0f);
+}
+
 }  // namespace
 
 namespace CcMap {
@@ -83,6 +91,14 @@ bool estParamAudio(const char* nom) {
 // s'en servir : la cible bouge des le CC qui l'a apprise, sans qu'il faille
 // toucher le potentiometre une seconde fois.
 static void poser(const Entree& e, uint8_t valeur, AudioEngine::Pour pour = AudioEngine::Pour::TOUS) {
+    /* An effect's parameter (§228): the effects of the cue the CC is for, as the synth voice
+     * below. The group was settled by appliquer(): the FX block's. */
+    if (Effects::isParam(e.cible)) {
+        const float v = Effects::inOctaves(e.cible) ? spreadOctaves(valeur, e.min, e.max)
+                                                    : etaler(valeur, e.min, e.max);
+        Effects::setParam(e.cible, v, AudioEngine::masqueSlots(pour));
+        return;
+    }
     const float v = etaler(valeur, e.min, e.max);
     if (!estParamAudio(e.cible)) {
         // Parametre de script : meme chemin que /api/midi/script?params=.

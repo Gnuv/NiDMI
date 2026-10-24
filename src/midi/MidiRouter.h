@@ -274,7 +274,7 @@ public:
                      AudioEngine::Pour pour = AudioEngine::Pour::TOUS,
                      uint8_t groupe = AudioEngine::GROUP_ALL, bool composants = true);
     /* WHOSE SCRIPTS RUN on THIS task now (§212): the branch a link belongs to — what it
-     * emits (a note, s("sys.lp_cutoff")) goes to its own cue. Any other task: TOUS. */
+     * emits (a note, a CC an effect has learnt) goes to its own cue. Any other task: TOUS. */
     AudioEngine::Pour pourCourant() const;
 
     /* EVERY CC A GROUP'S SCRIPTS EMIT IS THAT GROUP'S (§225), as in the browser

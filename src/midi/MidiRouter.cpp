@@ -524,8 +524,8 @@ void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
 }
 
 void MidiRouter::polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure) {
-    /* A pad's pressure (§210): what a script makes of it — s("sys.lp_cutoff") smoothed by a
-     * lag, a CC — is its group's. */
+    /* A pad's pressure (§210): what a script makes of it — a CC, smoothed by a lag, that the
+     * low-pass has learnt (§228) — is its group's. */
     Message m; m.type = MappingEngine::Evenement::PolyTouch; m.c = channel; m.a = note; m.b = pressure;
     _messageEntrant(m);
 }
