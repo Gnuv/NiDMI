@@ -23,8 +23,9 @@
  * internal RAM (it fits in the cache, §209). Measured on core 1: reverb 360-730
  * cycles/sample (7-15 % of the budget); the low-pass was 150-330 (3-6 %) as a
  * biquad, which went unstable near 20 Hz and killed the cue's sound (§229). It is a
- * state-variable filter now, the same response: 144 instructions instead of 187,
- * one division per sample — its cycles are still to be measured on the card. */
+ * state-variable filter now, the same response and the same cost: 230-310
+ * cycles/sample (5-6 %), measured on the card with a cue playing, the filter
+ * turned off and on. */
 #include <Arduino.h>
 
 namespace Effects {
