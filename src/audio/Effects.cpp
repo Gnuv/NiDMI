@@ -8,6 +8,7 @@
 #include <freertos/semphr.h>
 #include <new>
 #include "AudioEngine.h"
+#include "ProcessCosts.h"
 #include "faust/FaustLowpass.h"
 #include "faust/FaustAmbience.h"
 
@@ -230,15 +231,18 @@ bool setChain(uint8_t slot, const String& params, String& reason) {
 
 inline bool runs(uint8_t kind) { return kind == LOWPASS ? shedLevel < 2 : (kind == REVERB && shedLevel < 1); }
 
-/* One effect on a sum, in place. */
+/* One effect on a sum, in place — and what it cost (§231). */
 void run(Unit& u, uint8_t kind, float* l, float* r, size_t frames) {
   float* in[2]  = {l, r};
   float* out[2] = {tmpL, tmpR};
+  const uint32_t t = ESP.getCycleCount();
   if (kind == LOWPASS && u.lp)     u.lp->compute((int)frames, in, out);
   else if (kind == REVERB && u.rv) u.rv->compute((int)frames, in, out);
   else return;
   memcpy(l, tmpL, frames * sizeof(float));
   memcpy(r, tmpR, frames * sizeof(float));
+  ProcessCosts::note(kind == LOWPASS ? ProcessCosts::LOW_PASS : ProcessCosts::AMBIENCE,
+                     ESP.getCycleCount() - t, (uint32_t)frames);
 }
 
 }  // namespace

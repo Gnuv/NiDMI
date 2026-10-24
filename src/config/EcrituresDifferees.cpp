@@ -49,6 +49,7 @@ struct Nvs {
   TypeNvs type = TypeNvs::Chaine;
   String chaine;
   uint8_t octet = 0;
+  bool quiet = false;                          // not announced (nvsQuietString)
   unsigned long poseA = 0, echecA = 0;
 };
 
@@ -218,7 +219,8 @@ bool traiterNvs(int i, unsigned long now, bool force) {
   return true;
 }
 
-void poserNvs(const char* espace, const char* cle, TypeNvs type, const String* chaine, uint8_t octet) {
+void poserNvs(const char* espace, const char* cle, TypeNvs type, const String* chaine, uint8_t octet,
+              bool quiet = false) {
   if (!espace || !cle || strlen(espace) >= 16 || strlen(cle) >= 16) return;
   Nvs* cible = nullptr;
   {
@@ -236,12 +238,16 @@ void poserNvs(const char* espace, const char* cle, TypeNvs type, const String* c
       cible->type = type;
       cible->chaine = chaine ? *chaine : String();
       cible->octet = octet;
+      cible->quiet = quiet;
       cible->poseA = millis();
       cible->echecA = 0;
       return;
     }
     refus++;
   }
+  /* A quiet value is a measurement: dropped, posted again later — never written outside the
+   * silence. */
+  if (quiet) return;
   // File pleine : ne rien perdre — ecrire tout de suite, comme avant.
   Nvs e;
   strlcpy(e.espace, espace, sizeof e.espace);
@@ -344,6 +350,9 @@ void nvsOctet(const char* espace, const char* cle, uint8_t valeur) {
 void nvsRetirer(const char* espace, const char* cle) {
   poserNvs(espace, cle, TypeNvs::Retirer, nullptr, 0);
 }
+void nvsQuietString(const char* espace, const char* cle, const String& valeur) {
+  poserNvs(espace, cle, TypeNvs::Chaine, &valeur, 0, true);
+}
 bool nvsEnAttente(const char* espace, const char* cle) {
   if (!espace || !cle) return false;
   Garde g;
@@ -363,7 +372,7 @@ uint16_t nombreEnAttente() {
   uint16_t n = 0;
   Garde g;
   for (auto& f : fichiers) if (f.actif) n++;
-  for (auto& v : nvs)      if (v.actif) n++;
+  for (auto& v : nvs)      if (v.actif && !v.quiet) n++;
   return n;
 }
 

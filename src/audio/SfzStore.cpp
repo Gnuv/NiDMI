@@ -15,6 +15,7 @@
 #include "sfz16.h"
 #include <strings.h>                    // strcasecmp
 #include "SampleStore.h"
+#include "ProcessCosts.h"
 #include "../config/SdCard.h"
 #include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES what it loads
 #include "../server/WebDebugConsole.h"
@@ -684,11 +685,14 @@ bool rendreBloc(uint8_t m, float* g, float* d, uint32_t trames) {
   _costNotesCyc = _costBlockOn;
   _costBlockOn = 0; _costBlockNotes = 0;
   if (!sfz16_needs_render(eng)) { _costKernel = 0; return false; }
+  uint32_t voices = 0;                    // what the block renders: a kit voice's cost is its share (§231)
+  for (int i = 0; i < SFZ16_MAX_VOICES; i++) voices += eng->voices[i].active ? 1 : 0;
   const uint32_t c0 = ESP.getCycleCount();
   memset(g, 0, trames * sizeof(float));
   memset(d, 0, trames * sizeof(float));
   sfz16_render(eng, g, d, trames);
   const uint32_t dc = ESP.getCycleCount() - c0;
+  if (voices) ProcessCosts::note(ProcessCosts::PLAY_SFZ, dc / voices, trames);
   const uint32_t budget = trames * 5000u;
   CostClass& c = _costClass[recents == 0 ? 0 : recents < 5 ? 1 : recents < 16 ? 2 : 3];
   c.n++; c.kcyc += dc >> 10; if (dc > c.max) c.max = dc;

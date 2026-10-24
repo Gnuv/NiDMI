@@ -22,6 +22,7 @@
 #include "audio/SfzStore.h"
 #include "audio/SampleStore.h"
 #include "audio/SynthVoice.h"   // with the kits and the sounds: who holds the memory (§217)
+#include "audio/ProcessCosts.h"
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -1733,6 +1734,7 @@ void nidmi_loop() {
     executerTransport();            // ce que les scripts ont demandé (s("sys.nextcue")…, §181)
     Cues::boucle();                 // avance les cues minutées — la carte tient son propre temps
     nidmi_chrono("cues", tc); tc = nidmi_section("differe");
+    ProcessCosts::loop();           // what each process cost, posted for the silence (§231)
     Differe::boucle();              // ce qui attend le silence pour s'écrire en flash
     nidmi_chrono("differe", tc);
 

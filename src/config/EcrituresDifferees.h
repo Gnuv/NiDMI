@@ -62,6 +62,10 @@ void visiterAttente(const char* prefixe,
 void nvsChaine(const char* espace, const char* cle, const String& valeur);
 void nvsOctet(const char* espace, const char* cle, uint8_t valeur);
 void nvsRetirer(const char* espace, const char* cle);
+/* The same as nvsChaine, NOT ANNOUNCED: left out of nombreEnAttente — a measurement the card
+ * keeps for itself (ProcessCosts, §231), nothing the user made; the title bar does not say it
+ * waits. A full queue drops it (posted again later) instead of writing outside the silence. */
+void nvsQuietString(const char* espace, const char* cle, const String& valeur);
 // Cette valeur attend-elle encore la flash ? (Pour le dire a l'app.)
 bool nvsEnAttente(const char* espace, const char* cle);
 

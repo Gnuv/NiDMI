@@ -11,6 +11,7 @@
 #include "../audio/DspBench.h"
 #include "../audio/SynthVoice.h"    // the synth voice beside the sampler (§210)
 #include "../audio/Effects.h"       // the low-pass and the reverb (§210)
+#include "../audio/ProcessCosts.h"  // what each process costs on this card (§231)
 #include "../midi/MidiRouter.h"
 #include "../midi/CcMap.h"
 #include "../mapping/MappingEngine.h"
@@ -349,6 +350,14 @@ void setupAudioAPI(AsyncWebServer& server) {
         r->addHeader("Cache-Control", "no-store");
         request->onDisconnect([entete]() { free(entete); });
         request->send(r);
+    });
+
+    /* WHAT EACH PROCESS COSTS ON THIS CARD (§231): measured while it plays, kept across
+     * restarts — cycles per sample of its core, per effect or per voice, the mean and the 99th
+     * percentile; `measures` 0: not measured yet. The inspector reads it when its process menu
+     * opens — a gesture, never polled. */
+    server.on("/api/audio/costs", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send(200, "application/json", ProcessCosts::json());
     });
 
     /* THE EFFECTS, LIVE (§210, §230): the chain of the cue that plays, whole — the cue's keys

@@ -1,6 +1,7 @@
 /* THE SYNTH VOICE — see SynthVoice.h. */
 #include "SynthVoice.h"
 #include "../diag/SurveillantFlash.h"   // the flash's stops, out of what a voice costs (§214)
+#include "ProcessCosts.h"
 
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -120,6 +121,9 @@ void taskLoop(void*) {
          * budget: the guard stopped a voice until the next cue, at the first silence. */
         const uint32_t f = SurveillantFlash::cyclesSinceBoot() - f0;
         const uint32_t c = (f < elapsed) ? elapsed - f : 0;
+        /* What its engine costs, declared to the app (§231) — only a render the flash did not
+         * stop: what the stop leaves (the cache to fill again) is not the engine's. */
+        if (!f) ProcessCosts::noteSynth(s.engineNow, elapsed, FRAMES);
         const bool deux = voices[0].enabled && !voices[0].overloaded && voices[0].voice
                        && voices[1].enabled && !voices[1].overloaded && voices[1].voice;
         if (deux) {
