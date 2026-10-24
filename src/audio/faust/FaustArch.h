@@ -66,3 +66,8 @@ struct FaustParams : UI {
     return nullptr;
   }
 };
+
+/* 1/x for the Faust sources (ffunction nidmi_inverse, lowpass.dsp). Their compiler
+ * cannot see into it: a reciprocal written in Faust is turned back into one division
+ * per product, each a call to __divsf3 on the card (MESURES §229). */
+inline float nidmi_inverse(float x) { return 1.0f / x; }

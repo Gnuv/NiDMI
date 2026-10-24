@@ -20,8 +20,11 @@
  *
  * Memory: the low-pass is 144 B (internal RAM); the reverb 18 KB, in PSRAM,
  * allocated the first time a cue asks for it — one of each per cue slot (§212) — it costs the same there as in
- * internal RAM (it fits in the cache, §209). Measured on core 1: low-pass
- * 150-330 cycles/sample, reverb 360-730 (3-6 % and 7-15 % of the budget). */
+ * internal RAM (it fits in the cache, §209). Measured on core 1: reverb 360-730
+ * cycles/sample (7-15 % of the budget); the low-pass was 150-330 (3-6 %) as a
+ * biquad, which went unstable near 20 Hz and killed the cue's sound (§229). It is a
+ * state-variable filter now, the same response: 144 instructions instead of 187,
+ * one division per sample — its cycles are still to be measured on the card. */
 #include <Arduino.h>
 
 namespace Effects {
