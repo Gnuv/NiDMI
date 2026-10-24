@@ -16,7 +16,7 @@ namespace {
  * qu'a etre effacee, une fois, au demarrage (§187). */
 constexpr const char* NVS_ESPACE_RETIRE = "nidmi-midi";
 constexpr const char* NVS_CLE_RETIREE   = "ccmap";
-constexpr const char* ENTETE = "# canal:cc:cible:min:max (canal 0 = tous) — les CC appris de cette composition\n";
+constexpr const char* ENTETE = "# canal:cc:cible:min:max:groupe (canal 0 = tous, groupe 0 = tous) — les CC appris de cette composition\n";
 
 CcMap::Entree s_table[CcMap::MAX];
 int           s_nb = 0;
@@ -24,6 +24,7 @@ int           s_nb = 0;
 // Armement du CC learn : une cible en attente du prochain CC entrant.
 char  s_cibleArmee[16] = {0};
 float s_minArme = 0.0f, s_maxArme = 1.0f;
+uint8_t s_groupeArme = 0;   // the group whose CC is learnt (§222); 0: any
 
 /* LE VERROU DE LA TABLE (MESURES §178). Trois taches y touchent : MidiTask (CC
  * USB et broches, coeur 0) et la boucle (CC RTP, coeur 1) l'appliquent et
@@ -98,7 +99,7 @@ static void poser(const Entree& e, uint8_t valeur, AudioEngine::Pour pour = Audi
     AudioEngine::fixerParamSynth(e.cible, v, pour);
 }
 
-int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur, AudioEngine::Pour pour) {
+int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur, AudioEngine::Pour pour, uint8_t groupe) {
     // Copier sous le verrou, poser hors du verrou : poser() peut changer de moteur.
     Entree vises[MAX];
     int touches = 0;
@@ -108,6 +109,8 @@ int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur, AudioEngine::Pour pour)
             const Entree& e = s_table[i];
             if (e.cc != cc) continue;
             if (e.canal != 0 && e.canal != canal) continue;   // 0 = tous canaux
+            /* Another group's: it takes the CC as ITS scripts leave it, in its own walk (§222). */
+            if (groupe != AudioEngine::GROUP_ALL && e.groupe != 0 && e.groupe != groupe) continue;
             vises[touches++] = e;
         }
     }
@@ -115,35 +118,47 @@ int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur, AudioEngine::Pour pour)
     return touches;
 }
 
+uint32_t groupes() {
+    Verrou verrou;
+    uint32_t m = 0;
+    for (int i = 0; i < s_nb; i++) if (s_table[i].groupe) m |= 1u << s_table[i].groupe;
+    if (s_cibleArmee[0] && s_groupeArme) m |= 1u << s_groupeArme;   // its walk learns it
+    return m;
+}
+
 // ── Apprentissage ────────────────────────────────────────────────────────────
 
-void armer(const char* cible, float mn, float mx) {
+void armer(const char* cible, float mn, float mx, uint8_t groupe) {
     if (!cible || !*cible) { desarmer(); return; }
     {
         Verrou verrou;
         strlcpy(s_cibleArmee, cible, sizeof(s_cibleArmee));
         s_minArme = mn; s_maxArme = mx;
+        s_groupeArme = (groupe > AudioEngine::GROUP_MAX) ? 0 : groupe;
     }
-    Serial.printf("[CcMap] apprentissage arme sur '%s' [%.3f..%.3f]\n", cible, mn, mx);
+    Serial.printf("[CcMap] apprentissage arme sur '%s' [%.3f..%.3f], groupe %u\n", cible, mn, mx, (unsigned)groupe);
 }
 
 void desarmer()          { Verrou verrou; s_cibleArmee[0] = '\0'; }
 bool arme()              { return s_cibleArmee[0] != '\0'; }
 const char* cibleArmee() { return s_cibleArmee; }
 
-bool apprendre(uint8_t canal, uint8_t cc) {
+bool apprendre(uint8_t canal, uint8_t cc, uint8_t groupe) {
     if (!arme()) return false;
     Entree e{};
     {
         Verrou verrou;
         if (!arme()) return false;       // desarme entre-temps (l'app, ou un autre CC)
+        /* The CC as the armed block's group leaves it, in that group's walk (§222). */
+        if (s_groupeArme && groupe != AudioEngine::GROUP_ALL && groupe != s_groupeArme) return false;
 
         // Reapprendre la MEME cible remplace son affectation au lieu d'en empiler
         // une seconde : sans ca, corriger un CC laissait l'ancien actif et deux
-        // potentiometres se disputaient le parametre.
+        // potentiometres se disputaient le parametre. La meme cible du meme groupe
+        // (§222) : deux groupes peuvent viser deux blocs du meme nom.
         int place = -1;
         for (int i = 0; i < s_nb; i++)
-            if (!strcmp(s_table[i].cible, s_cibleArmee)) { place = i; break; }
+            if (!strcmp(s_table[i].cible, s_cibleArmee) && s_table[i].groupe == s_groupeArme) { place = i; break; }
         if (place < 0) {
             if (s_nb >= MAX) {
                 s_cibleArmee[0] = '\0';
@@ -155,6 +170,7 @@ bool apprendre(uint8_t canal, uint8_t cc) {
         e.canal = canal; e.cc = cc;
         strlcpy(e.cible, s_cibleArmee, sizeof(e.cible));
         e.min = s_minArme; e.max = s_maxArme;
+        e.groupe = s_groupeArme;
         s_table[place] = e;
         if (place == s_nb) s_nb++;       // l'entree complete, PUIS le compte
         s_cibleArmee[0] = '\0';
@@ -183,7 +199,8 @@ String texte() {
         out += String(e.cc);    out += ':';
         out += e.cible;         out += ':';
         out += String(e.min, 3); out += ':';
-        out += String(e.max, 3);
+        out += String(e.max, 3); out += ':';
+        out += String(e.groupe);
     }
     return out;
 }
@@ -202,9 +219,10 @@ static int poserTable(const String& t) {
         ligne.trim();
         if (!ligne.length() || ligne[0] == '#') continue;
 
-        // canal:cc:cible:min:max — cinq champs, aucun optionnel. Une ligne
-        // malformee est IGNOREE plutot que de faire echouer toute la table :
-        // une affectation abimee ne doit pas emporter les onze autres.
+        // canal:cc:cible:min:max[:groupe] — cinq champs au moins ; le groupe
+        // absent vaut 0, tous (§222). Une ligne malformee est IGNOREE plutot que
+        // de faire echouer toute la table : une affectation abimee ne doit pas
+        // emporter les onze autres.
         int c[4];
         int cherche = 0, depuis = 0;
         for (int i = 0; i < 4; i++) {
@@ -221,7 +239,10 @@ static int poserTable(const String& t) {
         if (!cible.length() || e.cc > 127 || e.canal > 16) continue;
         strlcpy(e.cible, cible.c_str(), sizeof(e.cible));
         e.min = ligne.substring(c[2] + 1, c[3]).toFloat();
-        e.max = ligne.substring(c[3] + 1).toFloat();
+        const int c4 = ligne.indexOf(':', c[3] + 1);
+        e.max = ligne.substring(c[3] + 1, c4 < 0 ? ligne.length() : c4).toFloat();
+        const long g = (c4 < 0) ? 0 : ligne.substring(c4 + 1).toInt();
+        e.groupe = (uint8_t)((g < 0 || g > AudioEngine::GROUP_MAX) ? 0 : g);
         if (e.min == e.max) continue;                 // etalement impossible
         table[nb++] = e;
     }

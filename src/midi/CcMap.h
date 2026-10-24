@@ -40,6 +40,7 @@ struct Entree {
     uint8_t cc;         // 0..127
     char    cible[16];  // nom du parametre vise
     float   min, max;   // bornes dans lesquelles on etale la valeur 0..127
+    uint8_t groupe;     // the group of its block (§222): the CC as THAT group's scripts leave it; 0 = every group
 };
 
 // La table de la composition ouverte. A appeler une fois au demarrage, apres
@@ -53,25 +54,34 @@ void recharger();
 // Un CC vient d'arriver. Applique toutes les affectations qui le visent
 // (plusieurs cibles peuvent partager un CC) et renvoie leur nombre.
 /* `pour` (§212): the branch of the chain it came out of — the synth parameters go to that
- * cue's voice; the script parameters to the registry, which both cues read. */
+ * cue's voice; the script parameters to the registry, which both cues read. `groupe` (§222):
+ * the group whose scripts it came out of — the affectations of that group, and those of
+ * group 0. */
 int appliquer(uint8_t canal, uint8_t cc, uint8_t valeur,
-              AudioEngine::Pour pour = AudioEngine::Pour::TOUS);
+              AudioEngine::Pour pour = AudioEngine::Pour::TOUS,
+              uint8_t groupe = AudioEngine::GROUP_ALL);
+/* The groups the table names, as a mask (bit g); group 0 left out: it takes every walk. */
+uint32_t groupes();
 
 // ── Apprentissage ────────────────────────────────────────────────────────────
 // L'app arme une cible, puis l'utilisateur tourne un potentiometre : c'est la
 // CARTE qui capture le CC et cree l'affectation. Le navigateur n'a servi qu'a
 // dire quoi apprendre — debranche-le, l'affectation reste.
-void armer(const char* cible, float min, float max);
+/* `groupe` (§222): the group of the block it is learnt for — the CC as that group's scripts
+ * leave it is the one learnt. 0: the first CC, whatever the group. */
+void armer(const char* cible, float min, float max, uint8_t groupe = 0);
 void desarmer();
 bool arme();
 const char* cibleArmee();
-// Consomme l'armement si un CC arrive. Renvoie true si une affectation est nee.
-bool apprendre(uint8_t canal, uint8_t cc);
+// Consomme l'armement si un CC arrive — par le groupe arme (§222). Renvoie true si une
+// affectation est nee.
+bool apprendre(uint8_t canal, uint8_t cc, uint8_t groupe = AudioEngine::GROUP_ALL);
 
 // ── Serialisation ────────────────────────────────────────────────────────────
-// Format texte, cinq champs par ':' — une affectation par ';' pour l'API, par
+// Format texte, six champs par ':' — une affectation par ';' pour l'API, par
 // ligne dans cc.txt (les deux se lisent ; '#' ouvre un commentaire) :
-//     canal:cc:cible:min:max;canal:cc:cible:min:max
+//     canal:cc:cible:min:max:groupe;canal:cc:cible:min:max:groupe
+// The group (§222) may be left out: 0, every group.
 // Pas de JSON : aucune bibliotheque a bord, et le budget de tas se compte en
 // milliers d'octets (meme raison que CueStore).
 String texte();

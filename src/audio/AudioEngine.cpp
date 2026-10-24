@@ -1761,12 +1761,18 @@ static uint8_t _masque(Pour pour) {
 
 uint8_t masqueSlots(Pour pour) { return _masque(pour); }
 
-void controleKits(uint8_t cc, uint8_t valeur, Pour pour) {
+void controleKits(uint8_t cc, uint8_t valeur, Pour pour, uint8_t group) {
   const int8_t sl = slotLeaving;
   const int8_t kl = (sl >= 0) ? slots[sl].kit : -1;
   for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) {
     const bool sien = (kl >= 0 && m == (uint8_t)kl);
-    if (pour == Pour::SORTANTE ? sien : (pour == Pour::COURANTE ? !sien : true)) SfzStore::controle(m, cc, valeur);
+    if (!(pour == Pour::SORTANTE ? sien : (pour == Pour::COURANTE ? !sien : true))) continue;
+    /* The slot that plays this kit says its group (§222). */
+    bool ici = true;
+    if (group != GROUP_ALL)
+      for (uint8_t s = 0; s < CUE_SLOTS; s++)
+        if (slots[s].kit == (int8_t)m) { ici = _forGroup(group, slots[s], SfzStore::blocId(m)); break; }
+    if (ici) SfzStore::controle(m, cc, valeur);
   }
 }
 

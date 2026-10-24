@@ -120,8 +120,10 @@ uint32_t instrumentGroups();
 /* The slots `pour` reaches, a bit each (TOUS: every slot not being cut). */
 uint8_t masqueSlots(Pour pour);
 /* A CC for the SFZ kits' locc/hicc gates (§208), from the branch `pour` (§212): TOUS every
- * engine, COURANTE every engine but the leaving cue's, SORTANTE the leaving cue's alone. */
-void controleKits(uint8_t cc, uint8_t valeur, Pour pour);
+ * engine, COURANTE every engine but the leaving cue's, SORTANTE the leaving cue's alone.
+ * `group` (§222): a kit a slot plays only when its block is in that group; a kit no slot
+ * plays (held for the next cue) takes every CC. */
+void controleKits(uint8_t cc, uint8_t valeur, Pour pour, uint8_t group = GROUP_ALL);
 /* One synth parameter (harmonics, timbre, morph, decay, lpg_colour, drone), for the voices of
  * the cue `pour` — the CC table (CcMap), §212. */
 void fixerParamSynth(const char* nom, float valeur, Pour pour);

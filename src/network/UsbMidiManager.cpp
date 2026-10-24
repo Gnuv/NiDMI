@@ -447,8 +447,9 @@ void UsbMidiManager::stop() {
  *
  * Format d'un paquet USB-MIDI (4 octets) :
  *   header = (cable << 4) | CIN,  CIN 0x8 = note off, 0x9 = note on,
- *                                 0xB = control change
- *   byte1  = statut (0x9n / 0x8n / 0xBn), byte2 = note/CC, byte3 = velo/valeur
+ *                                 0xA = pression polyphonique, 0xB = control change,
+ *                                 0xC = programme, 0xD = pression de canal, 0xE = pitch bend
+ *   byte1  = statut (0x9n / 0x8n / 0xBn…), byte2 = note/CC, byte3 = velo/valeur
  *
  * Convention MIDI respectee : un note-on de velocite 0 EST un note-off. Sans
  * ca, les claviers qui n'emettent jamais de 0x8n laissent des notes tenues pour
@@ -496,8 +497,17 @@ bool UsbMidiManager::traiterEntree(TickType_t attente) {
                 case 0xA:    // polyphonic aftertouch: the pressure of a pad (§210)
                     if (onPolyTouch) onPolyTouch(canal, o[2], o[3]);
                     break;
+                case 0xC:    // program change (§222)
+                    if (onProgramChange) onProgramChange(canal, o[2]);
+                    break;
+                case 0xD:    // channel pressure (§222)
+                    if (onChannelPressure) onChannelPressure(canal, o[2]);
+                    break;
+                case 0xE:    // pitch bend, 14 bits, LSB first (§222)
+                    if (onPitchBend) onPitchBend(canal, (int16_t)((((int)o[3] & 0x7F) << 7 | (o[2] & 0x7F)) - 8192));
+                    break;
                 default:
-                    break;   // horloge, SysEx, pitch bend : pas encore route
+                    break;   // horloge, SysEx : pas encore route
             }
             Chronos::traitementUsb.noter((uint32_t)esp_timer_get_time() - t0);
         } while (xQueueReceive(s_entree, &e, 0) == pdTRUE);

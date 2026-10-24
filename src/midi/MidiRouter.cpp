@@ -391,49 +391,67 @@ String MidiRouter::linkGroupsJson() {
     return j + "]";
 }
 
-bool MidiRouter::_passerCc(std::vector<Emplacement*>& liste, size_t de, size_t a,
-                           uint8_t& c, uint8_t& n, uint8_t& v, const char* branche, AudioEngine::Pour pour) {
-    const uint16_t cc = MappingEngine::masqueDe(MappingEngine::Evenement::Cc);
+/* The kind of output that carries a message on (§222). */
+static MappingEngine::Sortie::Type sortieDe(MappingEngine::Evenement::Type t) {
+    switch (t) {
+        case MappingEngine::Evenement::Bend:      return MappingEngine::Sortie::Bend;
+        case MappingEngine::Evenement::Touch:     return MappingEngine::Sortie::Touch;
+        case MappingEngine::Evenement::PolyTouch: return MappingEngine::Sortie::PolyTouch;
+        case MappingEngine::Evenement::Pgm:       return MappingEngine::Sortie::Pgm;
+        default:                                  return MappingEngine::Sortie::Cc;
+    }
+}
+static uint8_t canalDe(uint8_t c) { return (c >= 1 && c <= 16) ? c : 1; }
+
+bool MidiRouter::_passerMessage(std::vector<Emplacement*>& liste, size_t de, size_t a, Message& m, CcFait& cc,
+                                const char* branche, AudioEngine::Pour pour, uint8_t groupe) {
+    const uint16_t genre = MappingEngine::masqueDe(m.type);
+    const MappingEngine::Sortie::Type meme = sortieDe(m.type);
     for (size_t e = de; e < a && e < liste.size(); e++) {
         Emplacement& em = *liste[e];
-        if (!(em.repond & cc)) continue;   // rien dans ce maillon ne repond a un CC (§170)
-        Contexte ctx(*this, pour, em.groupe);   // what it emits goes to its group (§221)
-        MappingEngine::SortieCc sortie;
-        /* QUI execute — « map:0 » (« out:1 » : la cue qui part). Le battement d'horloge le
-         * passait deja ; ce chemin-ci, non, si bien qu'un print() ou un graph() declenche par
-         * un CC arrivait a l'app sous « ? ». */
-        char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
-        MappingEngine::executeMidiCc(em.contenu.c_str(), n, v, c, sortie,
-                                     em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org);
-        if (sortie.emise) { c = sortie.canal; n = sortie.cc; v = sortie.valeur; }
-        else if (sortie.traite) return false;
-        // Ni emise ni traite : cet emplacement ne parle pas de CC, on passe.
+        if (em.groupe != groupe) continue;    // another group's link: its own walk (§221)
+        if (!(em.repond & genre)) continue;   // nothing in this link answers this kind (§170)
+        Contexte ctx(*this, pour, groupe);    // what it emits goes to its cue and its group
+        MappingEngine::Evenement evt;
+        evt.type = m.type; evt.canal = m.c; evt.a = m.a; evt.b = m.b; evt.valeur14 = m.v14;
+        /* WHO runs — « map:0 » (« out:1 »: the cue that leaves): a print() or a graph() would
+         * reach the app under « ? ». */
+        snprintf(evt.origine, sizeof evt.origine, "%s:%u", branche, (unsigned)e);
+        MappingEngine::Sortie sorties[MappingEngine::MAX_SORTIES];
+        bool traite = false;
+        const int n = MappingEngine::executer(em.contenu.c_str(), evt, sorties, MappingEngine::MAX_SORTIES,
+                                              traite, em.etats, MappingEngine::MAX_PIPELINES_SCRIPT);
+        const MappingEngine::Sortie* suite = nullptr;   // the first of its kind carries it on
+        const MappingEngine::Sortie* ctl = nullptr;     // the first CC made of it
+        for (int i = 0; i < n; i++) {
+            if (!suite && sorties[i].type == meme) suite = &sorties[i];
+            if (!ctl && sorties[i].type == MappingEngine::Sortie::Cc) ctl = &sorties[i];
+        }
+        if (suite) { m.c = canalDe(suite->canal); m.a = suite->a; m.b = suite->b; m.v14 = suite->valeur14; continue; }
+        if (ctl) { cc.fait = true; cc.c = canalDe(ctl->canal); cc.n = ctl->a; cc.v = ctl->b; return false; }
+        if (traite) return false;   // it answers, and gave nothing of it: it swallows it
+        // Neither: this link does not speak of this message, on to the next one.
     }
     return true;
 }
 
-bool MidiRouter::chaineScriptsCc(uint8_t& c, uint8_t& n, uint8_t& v) {
+bool MidiRouter::chaineScriptsCc(uint8_t groupe, uint8_t& c, uint8_t& n, uint8_t& v) {
     MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous un CC (§170)
-    return _passerCc(emplacements, 0, emplacements.size(), c, n, v, "map", AudioEngine::Pour::TOUS);
+    Message m; m.type = MappingEngine::Evenement::Cc; m.c = c; m.a = n; m.b = v;
+    CcFait cc;
+    const bool passe = _passerMessage(emplacements, 0, _nPermanents, m, cc, "map", AudioEngine::Pour::TOUS, groupe)
+                    && _passerMessage(emplacements, _nPermanents, emplacements.size(), m, cc, "map",
+                                      AudioEngine::Pour::TOUS, groupe);
+    c = m.c; n = m.a; v = m.b;
+    return passe;
 }
 
-bool MidiRouter::_passerTouch(std::vector<Emplacement*>& liste, size_t de, size_t a, uint8_t canal,
-                              uint8_t note, uint8_t pression, uint8_t& c, uint8_t& n, uint8_t& v,
-                              const char* branche, AudioEngine::Pour pour) {
-    const uint16_t genre = MappingEngine::masqueDe(MappingEngine::Evenement::PolyTouch);
-    for (size_t e = de; e < a && e < liste.size(); e++) {
-        Emplacement& em = *liste[e];
-        if (!(em.repond & genre)) continue;   // nothing in this link answers a pressure
-        Contexte ctx(*this, pour, em.groupe);   // what it emits goes to its group (§221)
-        MappingEngine::SortieCc sortie;
-        char org[12]; snprintf(org, sizeof org, "%s:%u", branche, (unsigned)e);
-        if (MappingEngine::executeMidiTouch(em.contenu.c_str(), note, pression, canal, sortie,
-                                            em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
-            c = sortie.canal; n = sortie.cc; v = sortie.valeur;
-            return true;                      // the first CC made of it, as before
-        }
-    }
-    return false;
+uint32_t MidiRouter::groupesDesMessages() {
+    MappingEngine::Verrou verrou;
+    uint32_t groupes = AudioEngine::instrumentGroups() | CcMap::groupes();
+    for (Emplacement* em : emplacements) if (em->repond) groupes |= 1u << em->groupe;
+    for (Emplacement* em : sortants)     if (em->repond) groupes |= 1u << em->groupe;
+    return groupes ? groupes : 1u;   // nothing anywhere: one walk all the same (the components)
 }
 
 void MidiRouter::_passerOsc(std::vector<Emplacement*>& liste, size_t de, size_t a, const char* adresse,
@@ -449,74 +467,100 @@ void MidiRouter::_passerOsc(std::vector<Emplacement*>& liste, size_t de, size_t 
     }
 }
 
-void MidiRouter::polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure) {
-    noterTrafic();
-    /* MAIN, then a branch per cue (§212): what a script does of the pressure — s("sys.lp_cutoff"),
-     * a CC — is its own cue's. A CC MAIN makes of it ends the walk, as before. */
-    uint8_t c[3] = {0, 0, 0}, n[3] = {0, 0, 0}, v[3] = {0, 0, 0};
-    bool cc[3] = {false, false, false};       // MAIN, the cue that plays, the one in its Release
-    bool deux;
+void MidiRouter::_messageEntrant(const Message& m) {
+    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
+    /* EVERY GROUP APART (§222), as a note (§221): MAIN, then a branch per cue — the one that
+     * plays and, during its Release, the one that leaves (§212) —, each from the message as it
+     * came, through that group's links only. A CC MAIN makes of it, or swallows, ends that
+     * group's walk, as before. What comes out is applied after the lock. */
+    struct Issue { Message m; CcFait cc; bool passe; uint8_t groupe; AudioEngine::Pour pour; };
+    Issue issues[2 * (AudioEngine::GROUP_MAX + 1)];
+    uint8_t nIssues = 0;
     {
-        MappingEngine::Verrou verrou;   // like the notes and the CCs (§170)
-        deux = !sortants.empty();
-        cc[0] = _passerTouch(emplacements, 0, _nPermanents, channel, note, pressure, c[0], n[0], v[0],
-                             "map", AudioEngine::Pour::TOUS);
-        if (!cc[0]) {
-            cc[1] = _passerTouch(emplacements, _nPermanents, emplacements.size(), channel, note, pressure,
-                                 c[1], n[1], v[1], "map", deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
-            if (deux) cc[2] = _passerTouch(sortants, 0, sortants.size(), channel, note, pressure,
-                                           c[2], n[2], v[2], "out", AudioEngine::Pour::SORTANTE);
+        MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous un message (§170)
+        const uint32_t groupes = groupesDesMessages();
+        const bool deux = !sortants.empty();
+        const AudioEngine::Pour ici = deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS;
+        for (uint8_t g = 0; g <= AudioEngine::GROUP_MAX; g++) {
+            if (!(groupes & (1u << g))) continue;
+            Message mg = m; CcFait cc;
+            if (!_passerMessage(emplacements, 0, _nPermanents, mg, cc, "map", AudioEngine::Pour::TOUS, g)) {
+                if (cc.fait) issues[nIssues++] = Issue{mg, cc, false, g, AudioEngine::Pour::TOUS};
+                continue;
+            }
+            Message m2 = mg; CcFait cc2;
+            const bool passe = _passerMessage(emplacements, _nPermanents, emplacements.size(), mg, cc, "map", ici, g);
+            if (passe || cc.fait) issues[nIssues++] = Issue{mg, cc, passe, g, ici};
+            if (deux) {
+                const bool passe2 = _passerMessage(sortants, 0, sortants.size(), m2, cc2, "out",
+                                                   AudioEngine::Pour::SORTANTE, g);
+                if (passe2 || cc2.fait) issues[nIssues++] = Issue{m2, cc2, passe2, g, AudioEngine::Pour::SORTANTE};
+            }
         }
     }
-    // what a script made a CC of goes where an incoming CC goes
-    if (cc[0]) appliquerCc(c[0], n[0], v[0]);
-    if (cc[1]) appliquerCc(c[1], n[1], v[1], deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
-    if (cc[2]) appliquerCc(c[2], n[2], v[2], AudioEngine::Pour::SORTANTE);
+    /* A CC — out of the chain, or made of the message — goes to its group (learnt CCs, kits);
+     * the components see it once. A pitch bend, a pressure, a program that came out plays
+     * nothing: no instrument of the card reads them (as in the browser). */
+    bool composants = true;
+    for (uint8_t i = 0; i < nIssues; i++) {
+        const Issue& x = issues[i];
+        if (x.cc.fait) { appliquerCc(x.cc.c, x.cc.n, x.cc.v, x.pour, x.groupe, composants); composants = false; }
+        else if (x.passe && x.m.type == MappingEngine::Evenement::Cc) {
+            appliquerCc(x.m.c, x.m.a, x.m.b, x.pour, x.groupe, composants); composants = false;
+        }
+    }
 }
 
-/* What an incoming CC does once the scripts have said what it becomes: learnt,
- * applied, read by the SFZ kit, shown by the components. Shared by ccEntrant and
- * polytouchEntrant (§210). */
-void MidiRouter::appliquerCc(uint8_t c, uint8_t n, uint8_t v, AudioEngine::Pour pour) {
+void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
+    /* Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC tel que le .nms
+     * l'a decide, pas tel qu'il est arrive. Un ctl.out() qui renumerote un CC renumerote
+     * donc aussi ce qu'apprend CcMap — dans SON groupe (§222). */
+    Message m; m.type = MappingEngine::Evenement::Cc; m.c = channel; m.a = control; m.b = value;
+    _messageEntrant(m);
+}
+
+void MidiRouter::polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure) {
+    /* A pad's pressure (§210): what a script makes of it — s("sys.lp_cutoff") smoothed by a
+     * lag, a CC — is its group's. */
+    Message m; m.type = MappingEngine::Evenement::PolyTouch; m.c = channel; m.a = note; m.b = pressure;
+    _messageEntrant(m);
+}
+
+void MidiRouter::bendEntrant(uint8_t channel, int16_t bend) {
+    Message m; m.type = MappingEngine::Evenement::Bend; m.c = channel; m.v14 = bend;
+    _messageEntrant(m);
+}
+
+void MidiRouter::touchEntrant(uint8_t channel, uint8_t pressure) {
+    Message m; m.type = MappingEngine::Evenement::Touch; m.c = channel; m.a = pressure;
+    _messageEntrant(m);
+}
+
+void MidiRouter::pgmEntrant(uint8_t channel, uint8_t program) {
+    Message m; m.type = MappingEngine::Evenement::Pgm; m.c = channel; m.a = program;
+    _messageEntrant(m);
+}
+
+/* What an incoming CC does once group `groupe`'s scripts have said what it becomes: learnt,
+ * applied, read by the SFZ kits, shown by the components. */
+void MidiRouter::appliquerCc(uint8_t c, uint8_t n, uint8_t v, AudioEngine::Pour pour, uint8_t groupe,
+                             bool composants) {
     const bool dela = (pour != AudioEngine::Pour::SORTANTE);   // the cue that plays (or both)
     // 2. Apprentissage. Il precede l'application pour que la cible bouge des
     //    le geste qui l'apprend — sans ca il faut toucher le potentiometre une
     //    seconde fois pour entendre quoi que ce soit, et l'apprentissage a
-    //    l'air de n'avoir rien fait. La cue qui joue seulement (§212).
-    if (dela) CcMap::apprendre(c, n);
+    //    l'air de n'avoir rien fait. La cue qui joue seulement (§212) ; le groupe
+    //    de la cible armee (§222).
+    if (dela) CcMap::apprendre(c, n, groupe);
     // 3. Table CC -> parametre (moteur audio ou parametre de script) : la voix Plaits
-    //    de la cue `pour` (§212).
-    CcMap::appliquer(c, n, v, pour);
+    //    de la cue `pour` (§212), les affectations du groupe (§222).
+    CcMap::appliquer(c, n, v, pour, groupe);
     // 3b. Le lecteur SFZ : les portes locc/hicc de ses regions lisent ce CC (une
     //     pedale de charley au CC4 choisit le son ouvert ou ferme). Un octet
-    //     range, rien n'attend, rien ne se perd. Les moteurs de la cue `pour`.
-    AudioEngine::controleKits(n, v, pour);
+    //     range, rien n'attend, rien ne se perd. Les kits de la cue `pour`, du groupe.
+    AudioEngine::controleKits(n, v, pour, groupe);
     // 4. Composants : comportement historique, conserve tel quel — une fois.
-    if (dela) g_componentManager.handleMidiControlChange(c, n, v);
-}
-
-void MidiRouter::ccEntrant(uint8_t channel, uint8_t control, uint8_t value) {
-    uint8_t c = channel, n = control, v = value;
-    noterTrafic();   // le moment d'ecrire en flash attend aussi le MIDI (§170)
-
-    // 1. Le SCRIPT d'abord, comme pour les notes : ce qui suit doit voir le CC
-    //    tel que le .nms l'a decide, pas tel qu'il est arrive. Un ctl.out() qui
-    //    renumerote un CC doit donc renumeroter aussi ce qu'apprend CcMap.
-    //    MAIN, puis une branche par cue (§212), chacune vers SA cue.
-    bool courante, sortante = false, deux;
-    uint8_t c2 = 0, n2 = 0, v2 = 0;
-    {
-        MappingEngine::Verrou verrou;   // un maillon ne se remplace pas sous un CC (§170)
-        if (!_passerCc(emplacements, 0, _nPermanents, c, n, v, "map", AudioEngine::Pour::TOUS)) return;
-        deux = !sortants.empty();
-        c2 = c; n2 = n; v2 = v;
-        courante = _passerCc(emplacements, _nPermanents, emplacements.size(), c, n, v, "map",
-                             deux ? AudioEngine::Pour::COURANTE : AudioEngine::Pour::TOUS);
-        if (deux) sortante = _passerCc(sortants, 0, sortants.size(), c2, n2, v2, "out", AudioEngine::Pour::SORTANTE);
-    }
-    if (!deux) { if (courante) appliquerCc(c, n, v); return; }
-    if (courante) appliquerCc(c, n, v, AudioEngine::Pour::COURANTE);
-    if (sortante) appliquerCc(c2, n2, v2, AudioEngine::Pour::SORTANTE);
+    if (dela && composants) g_componentManager.handleMidiControlChange(c, n, v);
 }
 
 // ── Script .nms sur le MIDI entrant ────────────────────────────────────────
@@ -722,34 +766,6 @@ void MidiRouter::_ecrireChaine() {
         return;
     }
     Differe::poserFichierCopie(Repertoire::chemin(Repertoire::CHAINE).c_str(), t.c_str(), t.length());
-}
-
-/* La chaine des scripts map appliquee a une note — pendant de chaineScriptsCc,
- * et sous le meme verrou (§170) : un maillon ne se remplace pas pendant qu'une
- * note le traverse. Rend false si un maillon l'a avalee. */
-bool MidiRouter::chaineScriptsNote(uint8_t& c, uint8_t& n, uint8_t& v, bool estNoteOff) {
-    MappingEngine::Verrou verrou;
-    const uint16_t genre = MappingEngine::masqueDe(estNoteOff ? MappingEngine::Evenement::NoteOff
-                                                              : MappingEngine::Evenement::NoteOn);
-    for (uint8_t e = 0; e < emplacements.size(); e++) {
-        Emplacement& em = *emplacements[e];
-        if (!(em.repond & genre)) continue;   // rien dans ce maillon ne repond a cette note (§170)
-        MappingEngine::SortieNote sortie;
-        char org[12]; snprintf(org, sizeof org, "map:%u", (unsigned)e);   // idem
-        if (MappingEngine::executeMidiNote(em.contenu.c_str(), n, v, c,
-                                           estNoteOff, sortie,
-                                           em.etats, MappingEngine::MAX_PIPELINES_SCRIPT, org)) {
-            n = sortie.note; v = sortie.velo; c = sortie.canal;
-        }
-        // Script qui PARLE de notes mais n'a rien emis pour celle-ci : on NE
-        // JOUE PAS. Un script qui filtre doit pouvoir bloquer une note — sinon
-        // « filtrer » serait impossible a exprimer.
-        // Mais un script qui ne parle QUE de CC ne doit rien bloquer : sans
-        // cette nuance, charger un mapping de controleurs rendait le clavier
-        // muet. Symetrique de ce que fait ccEntrant pour les CC.
-        else if (sortie.traite) return false;
-    }
-    return true;
 }
 
 // Point d'entree unique de toute note ENTRANTE. Le script est applique ICI,

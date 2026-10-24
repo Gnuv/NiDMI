@@ -41,6 +41,8 @@ public:
     // (canal 1..16, note/controleur, velocite/valeur)
     typedef void (*HookNote)(uint8_t, uint8_t, uint8_t);
     typedef void (*HookCC)(uint8_t, uint8_t, uint8_t);
+    typedef void (*HookBend)(uint8_t, int16_t);       // (channel, bend -8192..8191)
+    typedef void (*HookValue)(uint8_t, uint8_t);      // (channel, pressure | program)
 
 private:
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
@@ -58,6 +60,9 @@ private:
     HookNote onNoteOff = nullptr;
     HookCC   onControlChange = nullptr;
     HookCC   onPolyTouch = nullptr;      // (channel, note, pressure): the pressure of a pad (§210)
+    HookBend  onPitchBend = nullptr;     // the other messages of a controller (§222)
+    HookValue onChannelPressure = nullptr;
+    HookValue onProgramChange = nullptr;
     
 public:
     UsbMidiManager();
@@ -93,6 +98,10 @@ public:
     }
     /* Polyphonic aftertouch — a pad's pressure (§210). It was read and dropped. */
     void setPolyTouchHook(HookCC polyTouch) { onPolyTouch = polyTouch; }
+    /* Pitch bend, channel pressure, program change (§222): read and dropped until then. */
+    void setOtherInputHooks(HookBend bend, HookValue pressure, HookValue program) {
+        onPitchBend = bend; onChannelPressure = pressure; onProgramChange = program;
+    }
 
     // État de connexion
     bool isConnected() const;

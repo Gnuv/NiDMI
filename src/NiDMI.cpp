@@ -1570,6 +1570,12 @@ void nidmi_begin() {
        open a filter (s("sys.lp_cutoff")). */
     serverCore.usbMidi().setPolyTouchHook(
         [](uint8_t ch, uint8_t note, uint8_t p) { g_midiRouter.polytouchEntrant(ch, note, p); });
+    /* Pitch bend, channel pressure, program change (§222): through each group's map scripts,
+       like the rest — a bend.in(), a touch.in(), a pgm.in() never ran on the card. */
+    serverCore.usbMidi().setOtherInputHooks(
+        [](uint8_t ch, int16_t bend) { g_midiRouter.bendEntrant(ch, bend); },
+        [](uint8_t ch, uint8_t p)    { g_midiRouter.touchEntrant(ch, p); },
+        [](uint8_t ch, uint8_t pgm)  { g_midiRouter.pgmEntrant(ch, pgm); });
     /* A del(), a makenote(), a lag() go to the cue branch and the group of the link that set them
        aside (§221). */
     MappingEngine::onTag([](uint8_t tag) { g_midiRouter.emissionDifferee(tag); });

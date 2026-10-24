@@ -1281,12 +1281,22 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         auto par = [&](const char* n, int d) -> int {
             return request->hasParam(n, true) ? request->getParam(n, true)->value().toInt() : d;
         };
-        uint8_t c = (uint8_t)par("ch", 1), n = (uint8_t)par("cc", 0), v = (uint8_t)par("val", 0);
-        const bool passe = g_midiRouter.chaineScriptsCc(c, n, v);
-        request->send(200, "application/json",
-            String("{\"passe\":") + (passe ? "true" : "false")
-            + ",\"ch\":" + String((int)c) + ",\"cc\":" + String((int)n)
-            + ",\"val\":" + String((int)v) + "}");
+        /* Each group's chain apart (§222): what its links make of the CC, for every group a
+         * message walks through. */
+        const uint8_t c0 = (uint8_t)par("ch", 1), n0 = (uint8_t)par("cc", 0), v0 = (uint8_t)par("val", 0);
+        const uint32_t groupes = g_midiRouter.groupesDesMessages();
+        String j = "{\"groupes\":[";
+        bool premier = true;
+        for (uint8_t g = 0; g <= AudioEngine::GROUP_MAX; g++) {
+            if (!(groupes & (1u << g))) continue;
+            uint8_t c = c0, n = n0, v = v0;
+            const bool passe = g_midiRouter.chaineScriptsCc(g, c, n, v);
+            j += String(premier ? "" : ",") + "{\"groupe\":" + String((int)g)
+               + ",\"passe\":" + (passe ? "true" : "false")
+               + ",\"ch\":" + String((int)c) + ",\"cc\":" + String((int)n) + ",\"val\":" + String((int)v) + "}";
+            premier = false;
+        }
+        request->send(200, "application/json", j + "]}");
     });
 
     server.on("/api/midi/script/select", HTTP_POST, [](AsyncWebServerRequest *request){
@@ -2146,7 +2156,9 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         float mn = 0.0f, mx = 1.0f;
         if (request->hasParam("min", true)) mn = request->getParam("min", true)->value().toFloat();
         if (request->hasParam("max", true)) mx = request->getParam("max", true)->value().toFloat();
-        CcMap::armer(cible.c_str(), mn, mx);
+        /* The group of the block it is learnt for (§222): the CC as that group's scripts leave it. */
+        const int groupe = request->hasParam("groupe", true) ? request->getParam("groupe", true)->value().toInt() : 0;
+        CcMap::armer(cible.c_str(), mn, mx, (uint8_t)constrain(groupe, 0, (int)AudioEngine::GROUP_MAX));
         request->send(200, "application/json",
                       String("{\"status\":\"ok\",\"arme\":\"") + cible + "\"}");
     });

@@ -245,33 +245,34 @@ public:
     // n'aurait porte que sur celles qu'on aurait pense cabler.
     void noteEntrante(uint8_t channel, uint8_t note, uint8_t velocity, bool estNoteOff);
 
-    // Meme role pour les CONTROLEURS CONTINUS. Un CC entrant n'allait qu'aux
-    // composants (LEDs) : rien ne le reliait a un parametre, donc le CC learn
-    // n'existait que dans le navigateur et mourait avec lui. Il passe
-    // desormais par la table CcMap — apprentissage compris — avant d'aller
-    // aux composants comme avant.
+    /* THE OTHER MESSAGES OF A CONTROLLER (§222) — CC, pitch bend, channel pressure, a pad's
+     * pressure (polyphonic aftertouch), program change — each through the map scripts of
+     * EVERY GROUP apart, from the message as it came, as a note is (§221) and as the browser
+     * does (engine._routeCCToGroup, _routePBToGroup…). What a group's chain makes of a CC —
+     * or a CC a script makes of another message (`bend.in() : ctl.out(…)`) — goes to that
+     * group only: its learnt CCs (CcMap), its SFZ kits. A pitch bend, a pressure or a
+     * program that comes out of the chain plays nothing: no instrument of the card reads
+     * them, as in the browser — the scripts do (s("sys.cue"), a CC, a registry value). */
     void ccEntrant(uint8_t channel, uint8_t control, uint8_t value);
-    /* A pad's PRESSURE (polyphonic aftertouch) entering the card (§210): through
-     * the map scripts that answer `polytouch.in` — a script makes of it what it
-     * says (s("sys.lp_cutoff") smoothed by a lag opens the filter) — and a CC a
-     * script emits from it is applied as an incoming CC (CcMap, SFZ, components).
-     * Without a script that answers, it changes nothing: as before. */
     void polytouchEntrant(uint8_t channel, uint8_t note, uint8_t pressure);
+    void bendEntrant(uint8_t channel, int16_t bend);
+    void touchEntrant(uint8_t channel, uint8_t pressure);
+    void pgmEntrant(uint8_t channel, uint8_t program);
 
-    /* La chaine des scripts map appliquee a un CC, sans emission ni
-     * apprentissage : ce que les emplacements font de (canal, cc, valeur).
-     * Rend false si l'un d'eux a avale l'evenement. Employee par ccEntrant ET
-     * par /api/midi/chaine — un seul code, donc un essai qui prouve la
-     * production. */
-    bool chaineScriptsCc(uint8_t& canal, uint8_t& cc, uint8_t& valeur);
-    /* Son pendant pour les notes, sous le meme verrou. Rend false si un
-     * maillon a avale la note. */
-    bool chaineScriptsNote(uint8_t& canal, uint8_t& note, uint8_t& velocite, bool estNoteOff);
-    /* What an incoming CC does after the scripts (learn, CcMap, SFZ, components) — for the
-     * instruments of the cue `pour` (§212): the branch it came out of. The learning and the
-     * components follow the cue that plays only. */
+    /* What group `groupe`'s links (MAIN, then the cue's) make of a CC, without emitting nor
+     * learning — the production path, under the same lock; /api/midi/chaine. False if a link
+     * swallowed it. */
+    bool chaineScriptsCc(uint8_t groupe, uint8_t& canal, uint8_t& cc, uint8_t& valeur);
+    /* The groups a message other than a note walks through (§222): those of the instruments
+     * that sound, of the links, of the learnt CCs. */
+    uint32_t groupesDesMessages();
+    /* What an incoming CC does after group `groupe`'s scripts (learn, CcMap, SFZ, components)
+     * — for the instruments of the cue `pour` (§212): the branch it came out of. The learning
+     * and the components follow the cue that plays only; the components once per CC
+     * (`composants`). */
     void appliquerCc(uint8_t canal, uint8_t cc, uint8_t valeur,
-                     AudioEngine::Pour pour = AudioEngine::Pour::TOUS);
+                     AudioEngine::Pour pour = AudioEngine::Pour::TOUS,
+                     uint8_t groupe = AudioEngine::GROUP_ALL, bool composants = true);
     /* WHOSE SCRIPTS RUN on THIS task now (§212): the branch a link belongs to — what it
      * emits (a note, s("sys.lp_cutoff")) goes to its own cue. Any other task: TOUS. */
     AudioEngine::Pour pourCourant() const;
@@ -335,16 +336,28 @@ private:
     uint8_t             _groupeAvantDiffere = AudioEngine::GROUP_ALL;
     bool                _differeEnCours = false;
     struct Contexte;
-    /* Les maillons [de, a) de `v`, pour la cue `pour`. Note, CC : faux si l'un l'a avale.
-     * Pression : vrai si l'un en a fait un CC (le premier). OSC : chacun l'entend. */
+    /* A message other than a note (§222): its kind and its fields, as MappingEngine reads
+     * them — a: CC number, pressure, program, a pad's note; b: CC value, a pad's pressure;
+     * v14: pitch bend. */
+    struct Message {
+        MappingEngine::Evenement::Type type = MappingEngine::Evenement::Aucun;
+        uint8_t c = 1, a = 0, b = 0;
+        int16_t v14 = 0;
+    };
+    /* A CC a link made of another message (`polytouch.in() : ctl.out(…)`). */
+    struct CcFait { bool fait = false; uint8_t c = 1, n = 0, v = 0; };
+    /* Les maillons [de, a) de `v`, pour la cue `pour`. Note : faux si l'un l'a avalee.
+     * OSC : chacun l'entend. */
     bool _passerNote(std::vector<Emplacement*>& v, size_t de, size_t a,
                      uint8_t& c, uint8_t& n, uint8_t& vel, bool estNoteOff, const char* branche,
                      AudioEngine::Pour pour, uint8_t groupe);
-    bool _passerCc(std::vector<Emplacement*>& v, size_t de, size_t a,
-                   uint8_t& c, uint8_t& n, uint8_t& vel, const char* branche, AudioEngine::Pour pour);
-    bool _passerTouch(std::vector<Emplacement*>& v, size_t de, size_t a, uint8_t canal, uint8_t note,
-                      uint8_t pression, uint8_t& c, uint8_t& n, uint8_t& vel, const char* branche,
-                      AudioEngine::Pour pour);
+    /* Group `groupe`'s links in [de, a) of `v`, for the cue `pour` (§222): each takes the
+     * message as the previous one left it. False when the message stops there — a link
+     * answered and gave nothing of its kind: it swallowed it, or made a CC of it (`cc`). */
+    bool _passerMessage(std::vector<Emplacement*>& v, size_t de, size_t a, Message& m, CcFait& cc,
+                        const char* branche, AudioEngine::Pour pour, uint8_t groupe);
+    /* Every group's walk, then what comes out of them (§222). */
+    void _messageEntrant(const Message& m);
     void _passerOsc(std::vector<Emplacement*>& v, size_t de, size_t a, const char* adresse, float valeur,
                     const char* branche, AudioEngine::Pour pour);
     /* La note jouee — les LEDs appairees, puis les instruments de la cue `pour`. */
