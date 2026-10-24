@@ -2479,6 +2479,7 @@ void setKeyboardPoly(uint8_t n) {
   slots[_slotIci()].clavier.poly = (n < 1) ? 1 : ((n > VOIX_MAX) ? VOIX_MAX : n);
 }
 uint8_t keyboardPoly() { return slots[_slotIci()].clavier.poly; }
+uint32_t keyboardBlock() { return slots[_slotIci()].clavier.bloc; }
 
 /* ARMER LE LECTEUR — il ne « charge » plus rien : tout est deja en PSRAM.
  * `nom` designe seulement l'echantillon que le CLAVIER jouera ; les cues, elles,

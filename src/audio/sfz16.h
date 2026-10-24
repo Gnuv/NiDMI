@@ -140,6 +140,8 @@ typedef struct {
  * inc_int/inc_frac advance them with 32-bit arithmetic only. */
 typedef struct {
     uint8_t  active, note, velocity, releasing, held;
+    uint8_t  stolen;              /* fading out over the engine's polyphony   */
+    uint32_t age;                 /* note-on order: the oldest is stolen      */
 
     const sfz16_region *region;
     const sfz16_sample *sample;
@@ -162,6 +164,9 @@ typedef struct {
 typedef struct {
     sfz16_instrument *inst;         /* current instrument, NULL = silent       */
     sfz16_voice_state voices[SFZ16_MAX_VOICES];
+    uint8_t           max_voices;   /* polyphony, 0 = every voice: beyond it the
+                                       oldest sounding voice fades in 5 ms     */
+    uint32_t          clock;        /* note-on counter, for the voices' age   */
     uint8_t           cc[128];      /* CC state survives instrument swaps     */
     float             host_sample_rate;
 } sfz16_engine;

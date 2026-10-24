@@ -181,6 +181,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"samples\":" + String(SfzStore::samples(kitIci)) + ",";
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
         json += "\"voix\":" + String(SfzStore::voixActives(0) + SfzStore::voixActives(1)) + ",";
+        json += "\"voices_max\":" + String(SfzStore::maxVoices(kitIci)) + ",";   // §220, 0 = all
         json += "\"gen\":" + String((unsigned)SfzStore::generation()) + ",";
         json += "\"arme\":" + String(SfzStore::notesArmees(kitIci) ? "true" : "false") + ",";
         json += "\"notes\":" + String((unsigned)SfzStore::notesRecues()) + ",";
@@ -433,13 +434,16 @@ void setupAudioAPI(AsyncWebServer& server) {
                 for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
                     if (sv >= 0) SynthVoice::setEngine((uint8_t)sv, e);
         }
-        /* THE VOICE OPTIONS (§214), live, for the cue that plays: one voice or two taking turns
-         * (the second a clone of the first, taken when a voice is free), and the velocity gain
-         * (0/1: each note's velocity sets the voice's level; off, every note alike). */
-        if (request->hasParam("voices", true) || request->hasParam("velocity", true))
-            Cues::setVoiceOptions(
-                request->hasParam("voices", true) ? request->getParam("voices", true)->value().toInt() : -1,
-                request->hasParam("velocity", true) ? request->getParam("velocity", true)->value().toInt() : -1);
+        /* THE VELOCITY GAIN of the synth voice (§214), live, for the cue that plays (0/1: each
+         * note's velocity sets the voice's level; off, every note alike). */
+        if (request->hasParam("velocity", true))
+            Cues::setVelocityGain(request->getParam("velocity", true)->value().toInt() != 0);
+        /* THE POLYPHONY OF A BLOCK (§220), live: `voices` with its `bloc` — the play-sf keyboard,
+         * the SFZ kit or the synth voice (two taking turns, the second a clone of the first) of
+         * the cue that plays, whichever is that block's. */
+        if (request->hasParam("voices", true) && request->hasParam("bloc", true))
+            Cues::setBlockVoices((uint32_t)request->getParam("bloc", true)->value().toInt(),
+                                 request->getParam("voices", true)->value().toInt());
         AudioEngine::Params p = AudioEngine::params();
         auto lire = [&](const char* nom, float& dest){
             if (request->hasParam(nom, true))
@@ -639,9 +643,6 @@ void setupAudioAPI(AsyncWebServer& server) {
         const float gain = request->hasParam("gain", true)
                          ? request->getParam("gain", true)->value().toFloat() : 1.0f;
         AudioEngine::fixerDeclenchementSurCue(surCue);
-        /* The keyboard's polyphony (§219): the block's setting, live — the cue says it again. */
-        if (request->hasParam("poly", true))
-            AudioEngine::setKeyboardPoly((uint8_t)request->getParam("poly", true)->value().toInt());
         /* L'apercu vient de designer ce son comme celui du clavier (POST
          * /api/audio/sampler) : le clavier prend aussi son bloc et son volume. */
         AudioEngine::fixerClavier(bloc, gain);
@@ -657,8 +658,7 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json",
             String("{\"status\":\"ok\",\"name\":\"") + nom
             + "\",\"loop\":" + (boucle ? "true" : "false")
-            + ",\"oncue\":" + (surCue ? "true" : "false")
-            + ",\"poly\":" + String(AudioEngine::keyboardPoly()) + "}");
+            + ",\"oncue\":" + (surCue ? "true" : "false") + "}");
     });
 
     /* LE VOLUME D'UN BLOC QUI JOUE (MESURES §165) — le chemin VIVANT du

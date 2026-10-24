@@ -471,6 +471,30 @@ static sfz16_voice_state *alloc_voice(sfz16_engine *eng) {
     return &eng->voices[0];
 }
 
+/* The polyphony (MESURES §220): at most max_voices sound — releasing ones count, they cost the
+ * same; beyond it the oldest not already stolen fades out in 5 ms, as a retriggered note. */
+static void limit_voices(sfz16_engine *eng) {
+    const int max = (eng->max_voices > 0 && eng->max_voices < SFZ16_MAX_VOICES)
+                    ? eng->max_voices : SFZ16_MAX_VOICES;
+    for (;;) {
+        int n = 0;
+        sfz16_voice_state *oldest = NULL;
+        for (int i = 0; i < SFZ16_MAX_VOICES; i++) {
+            sfz16_voice_state *v = &eng->voices[i];
+            if (!v->active || v->stolen) continue;
+            n++;
+            if (!oldest || v->age < oldest->age) oldest = v;
+        }
+        if (n < max || !oldest) return;
+        oldest->stolen = 1;
+        oldest->held = 0;
+        oldest->releasing = 1;
+        oldest->env_stage = 5;
+        const float rel = 0.005f;
+        oldest->env_inc = -oldest->env / (rel * eng->host_sample_rate);
+    }
+}
+
 static int region_seq_ok(sfz16_instrument *inst, const sfz16_region *r, uint8_t note) {
     if (r->seq_length > 1) {
         int pos = (inst->seq_counter[note] % r->seq_length) + 1;
@@ -525,12 +549,15 @@ void sfz16_note_on(sfz16_engine *eng, uint8_t note, uint8_t velocity) {
             }
         }
 
+        limit_voices(eng);
         sfz16_voice_state *v = alloc_voice(eng);
         v->active = 1;
         v->note = note;
         v->velocity = velocity;
         v->releasing = 0;
         v->held = 1;
+        v->stolen = 0;
+        v->age = ++eng->clock;
         v->region = reg;
         v->sample = smp;
 

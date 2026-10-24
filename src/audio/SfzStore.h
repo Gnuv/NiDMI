@@ -85,6 +85,10 @@ uint8_t  fixerGainBloc(uint32_t bloc, float gain);   // the engines of that bloc
 float    gainLisse(uint8_t moteur);   // audio task only: the gain to apply to THIS block of audio
 uint32_t blocId(uint8_t moteur);      // status: the block that asked for the kit
 float    gainCible(uint8_t moteur);   // status: its target gain
+/* THE KIT'S POLYPHONY (MESURES §220), cue key `sfzpoly`: at most `n` voices (1..SFZ16_MAX_VOICES; 0 =
+ * all), the oldest fading in 5 ms beyond — read by the kernel at each note. Any task writes it. */
+void     setMaxVoices(uint8_t moteur, uint8_t n);
+uint8_t  maxVoices(uint8_t moteur);   // status: 0 = every voice
 
 /* Renders the engine's block into g/d (cleared first, float — the caller converts at
  * its int16 bus). False when nothing plays; buffers untouched then. */

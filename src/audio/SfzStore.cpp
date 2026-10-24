@@ -615,6 +615,14 @@ void fixerBloc(uint8_t m, uint32_t bloc, float gain) {
   _gain[m] = _borne(gain);
 }
 
+/* The kit's polyphony (§220): one byte per engine, copied into the kernel at each note — an engine
+ * allocated later (the second, in PSRAM) takes it too. */
+static volatile uint8_t _maxVoix[MOTEURS] = {0};
+void setMaxVoices(uint8_t m, uint8_t n) {
+  if (m < MOTEURS) _maxVoix[m] = (n >= SFZ16_MAX_VOICES) ? 0 : n;
+}
+uint8_t maxVoices(uint8_t m) { return (m < MOTEURS) ? _maxVoix[m] : 0; }
+
 uint8_t fixerGainBloc(uint32_t bloc, float gain) {
   if (!bloc) return 0;
   uint8_t n = 0;
@@ -646,6 +654,7 @@ void noteOn(uint8_t m, uint8_t note, uint8_t velo) {
    * they do (a CC that came before this note, in the order the MIDI arrived —
    * it was stored before the note was queued). */
   for (int i = 0; i < 128; i++) eng->cc[i] = _ccEntrant[m][i];
+  eng->max_voices = _maxVoix[m];          // the kit's polyphony (§220)
   const uint32_t c0 = ESP.getCycleCount();
   sfz16_note_on(eng, note, velo);
   const uint32_t dc = ESP.getCycleCount() - c0;

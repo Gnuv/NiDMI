@@ -359,8 +359,9 @@ bool declenchementSurCue();
  * (1..VOIX_MAX); a note beyond silences its oldest in 5 ms. A voice per note up to the card's
  * eight was the processor's ceiling, and a fast roll on long sounds reached it. */
 constexpr uint8_t KEYBOARD_POLY_DEFAULT = 4;
-void    setKeyboardPoly(uint8_t n);
-uint8_t keyboardPoly();
+void     setKeyboardPoly(uint8_t n);
+uint8_t  keyboardPoly();
+uint32_t keyboardBlock();             // the block the keyboard of the cue that plays is (0: none)
 const char* samplerNom();
 void setParams(const Params& p);
 Params params();

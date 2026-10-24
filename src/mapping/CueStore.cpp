@@ -374,6 +374,7 @@ void _appliquer(const Cue& c) {
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
     uint8_t polyClavier = AudioEngine::KEYBOARD_POLY_DEFAULT;   // the keyboard's polyphony (§219)
+    uint8_t polySfz = 0;                                        // the kit's, 0 = every voice (§220)
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -390,6 +391,7 @@ void _appliquer(const Cue& c) {
         else if (cle == "sfzbloc") { blocSfz = kv.substring(eq + 1); blocSfz.trim(); }
         else if (cle == "sfzgain") { gainSfz = kv.substring(eq + 1); gainSfz.trim(); }
         else if (cle == "sfzch")   { canalSfz = kv.substring(eq + 1); canalSfz.trim(); }
+        else if (cle == "sfzpoly") polySfz = (uint8_t)kv.substring(eq + 1).toInt();          // §220
         else if (cle == "keych")   { canalClavier = kv.substring(eq + 1); canalClavier.trim(); }
         else if (cle == "keypoly") polyClavier = (uint8_t)kv.substring(eq + 1).toInt();      // §219
         else if (cle == "synth")     { synth = kv.substring(eq + 1); synth.trim(); }
@@ -552,6 +554,7 @@ void _appliquer(const Cue& c) {
         const int8_t k = _prendreKit(chezLAutre, memeKit, autre);
         AudioEngine::fixerKitSlot(ns, k);
         SfzStore::fixerBloc((uint8_t)k, bk, gainSfz.length() ? gainSfz.toFloat() : 1.0f);
+        SfzStore::setMaxVoices((uint8_t)k, polySfz);
         if (!SfzStore::proposer((uint8_t)k, cheminSfz.c_str(), raisonSfz))
           Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
       }
@@ -1133,17 +1136,33 @@ void restaurerOptions() {
 void surChangement(void (*rappel)(const Etat&)) { VerrouSeq verrou; _rappelEtat = rappel; }
 void annoncerEtat() { VerrouSeq verrou; _annoncer(); }
 
-void setVoiceOptions(int voices, int velocityGain) {
+void setVelocityGain(bool on) {
   VerrouSeq verrou;
   const int8_t sc = AudioEngine::slotCourant();
   if (sc < 0) return;
-  if (velocityGain >= 0)
-    for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
-      if (sv >= 0) SynthVoice::setVelocityGain((uint8_t)sv, velocityGain > 0);
-  if (voices > 0) {
-    AudioEngine::fixerVoixVoulues((uint8_t)sc, (uint8_t)voices);
-    AudioEngine::ajusterVoix((uint8_t)sc);
+  for (const int8_t sv : {AudioEngine::synthDuSlot((uint8_t)sc), AudioEngine::synth2DuSlot((uint8_t)sc)})
+    if (sv >= 0) SynthVoice::setVelocityGain((uint8_t)sv, on);
+}
+
+bool setBlockVoices(uint32_t bloc, int voices) {
+  if (!bloc || voices < 1) return false;
+  VerrouSeq verrou;
+  const int8_t sc = AudioEngine::slotCourant();
+  if (sc < 0) return false;
+  bool found = false;
+  if (AudioEngine::keyboardBlock() == bloc) { AudioEngine::setKeyboardPoly((uint8_t)voices); found = true; }
+  const int8_t kit = AudioEngine::kitDuSlot((uint8_t)sc);
+  if (kit >= 0 && SfzStore::blocId((uint8_t)kit) == bloc) {
+    SfzStore::setMaxVoices((uint8_t)kit, (uint8_t)(voices > 255 ? 255 : voices));
+    found = true;
   }
+  const int8_t sv = AudioEngine::synthDuSlot((uint8_t)sc);
+  if (sv >= 0 && SynthVoice::bloc((uint8_t)sv) == bloc) {
+    AudioEngine::fixerVoixVoulues((uint8_t)sc, (uint8_t)(voices >= 2 ? 2 : 1));
+    AudioEngine::ajusterVoix((uint8_t)sc);
+    found = true;
+  }
+  return found;
 }
 
 }  // namespace Cues

@@ -126,9 +126,12 @@ bool  enPause();           // gelee — DIFFERENT d'arretee, et le son y coule e
 int   indexCourant();
 float restantSec();        // temps restant sur la cue courante (0 si infinie)
 
-/* The synth voice options of the cue that plays, live (§214): `voices` 1 or 2 (taking turns),
- * `velocityGain` 0 or 1 (each note's velocity sets the level); a negative value leaves it as it
- * is. Under the sequencer's lock: a cue that arrives picks the voices too. */
-void setVoiceOptions(int voices, int velocityGain);
+/* The synth voice's velocity gain in the cue that plays, live (§214): 0 or 1 (each note's
+ * velocity sets the level). Under the sequencer's lock: a cue that arrives picks the voices too. */
+void setVelocityGain(bool on);
+/* THE POLYPHONY OF A BLOCK, live (MESURES §220) — the inspector bar's « Voix », for every engine:
+ * the block's instrument in the cue that plays — its play-sf keyboard (1..8), its SFZ kit (1..32),
+ * its synth voice (1 or 2, taking turns). False: no instrument of that cue is the block's. */
+bool setBlockVoices(uint32_t bloc, int voices);
 
 }  // namespace Cues
