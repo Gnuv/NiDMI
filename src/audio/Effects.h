@@ -1,68 +1,73 @@
 #pragma once
-/* THE EFFECTS OF THE CARD (MESURES §209-210): a low-pass on ONE chosen part of
- * the mix, and a light reverb on the whole of it — both Faust, src/audio/faust/.
+/* THE EFFECTS OF THE CARD (MESURES §209-210, §230): low-passes and light reverbs, both
+ * Faust (src/audio/faust/), placed as in the web version — an FX track treats the SUM of its
+ * group's instruments, and an FX of the MIX zone the sum of all the groups:
  *
- *   instruments ──┬──────────────────────────────┐
- *                 └─ those the cue names in       ├─ + ─ reverb ─ out
- *                    `lpblocs` ─ low-pass ────────┘
+ *   group 1's instruments ─ + ─ its FX, in track order ─┐
+ *   group 2's instruments ─ + ─ its FX, in track order ─┼─ + ─ the MIX zone's FX ─ envelope ─ out
+ *   instruments of a group without FX, of no group ─────┘
  *
- * The low-pass filters the instruments of ITS group in the app (the blocks of the
- * group its FX track belongs to): `lpblocs` lists their ids — a play-list, a
- * sound, the SFZ kit, the synth voice. The reverb takes the sum.
+ * Per cue slot (§212) a CHAIN of at most PER_SLOT effects. The cue says it (engine -2):
+ *   fx=low-pass:<block>:<group>:<cutoff>:<q>,ambience:<block>:<group>:<wet>:<decay>:<damp>,…
+ *   fxmix=<the MIX zone's group>
+ * in the order the signal takes them; the group is the app's rank (1 for the first group, the
+ * MIX zone after them — the numbering of the instruments' grp= and of the learnt-CC table, §221).
+ * A cue without `fx` has no effect. Live: POST /api/audio/fx, the same two keys — the whole
+ * chain of the cue that plays. A learnt CC (CcMap, §228) moves the effects of its kind in the
+ * FX block's group: "lp_cutoff", "lp_q", "rv_wet", "rv_decay", "rv_damp".
  *
- * Cue keys (engine -2): `lowpass=1;lpblocs=12,15;lpcutoff=1200;lpq=2;`
- * `reverb=1;rvwet=0.25;rvdecay=1.2;rvdamp=0.35`. A cue without `lowpass` or
- * `reverb` turns that effect off. Live: POST /api/audio/fx (the same keys), and
- * a learnt CC (CcMap, §228), as an instrument's parameter: its target is the name
- * setParam takes — "lp_cutoff", "rv_decay"… — and its group the FX block's. The
- * pressure of a pad, made a CC by a script (ctl.out), opens the filter. The system
- * names (s("sys.lp_cutoff")…) are gone: they are for the card, not for a block.
+ * Writers (the cue, the route, a CC) post a chain; the audio task adopts it at the start of a
+ * block. An effect that stays the same block keeps its state — removing a neighbour does not
+ * cut its tail; another block in its place starts from silence.
  *
- * Memory: the low-pass is 144 B (internal RAM); the reverb 18 KB, in PSRAM,
- * allocated the first time a cue asks for it — one of each per cue slot (§212) — it costs the same there as in
- * internal RAM (it fits in the cache, §209). Measured on core 1: reverb 360-730
- * cycles/sample (7-15 % of the budget); the low-pass was 150-330 (3-6 %) as a
- * biquad, which went unstable near 20 Hz and killed the cue's sound (§229). It is a
- * state-variable filter now, the same response and the same cost: 230-310
- * cycles/sample (5-6 %), measured on the card with a cue playing, the filter
- * turned off and on. */
+ * Memory: each effect's DSP in PSRAM, allocated the first time a chain needs it and kept — a
+ * low-pass ~100 B, a reverb 18 KB; it costs the same there as in internal RAM (it fits in the
+ * cache, §209). Measured on core 1: reverb 360-730 cycles/sample (7-15 % of the budget); the
+ * low-pass 230-310 (5-6 %) — a state-variable filter since §229 (the biquad went unstable near
+ * 20 Hz and killed the cue's sound). Four reverbs in a cue: up to 60 % of core 1 — the guard
+ * (shed) drops the reverbs, then the low-passes, until the next cue. */
 #include <Arduino.h>
 
 namespace Effects {
 
-constexpr uint8_t LOWPASS_BLOCKS_MAX = 8;
-/* ONE SET PER CUE SLOT (§212): during a cross-fade the leaving cue keeps its low-pass and its
- * reverb while the arriving cue has its own — AudioEngine::CUE_SLOTS of them. */
+/* ONE CHAIN PER CUE SLOT (§212): during a cross-fade the leaving cue keeps its effects while
+ * the arriving cue has its own — AudioEngine::CUE_SLOTS of them. */
 constexpr uint8_t SLOTS = 2;
+/* AT MOST FOUR EFFECTS PER CUE (§230): a fifth is refused, and said. */
+constexpr uint8_t PER_SLOT = 4;
 
 // ── Any task: the cue, the route, the scripts ────────────────────────────────
-/* The cue's effects in `slot`, from its parameter string (the keys above). Allocates that
- * slot's reverb in PSRAM the first time; false + reason if it cannot. */
+/* The cue's chain in `slot`, from its parameter string (the keys above). Allocates the PSRAM
+ * its effects need the first time; false + reason if one of them was refused (the others run). */
 bool configureFromCue(uint8_t slot, const String& params, String& reason);
 void off(uint8_t slot);                      // no effect in that slot
-/* One parameter, live, in the slots of `slots` (a bit each): "lp_cutoff" (Hz), "lp_q", "rv_wet"
- * (0..1), "rv_decay" (s), "rv_damp" (0..1) — a learnt CC moves the effects of the cue whose
- * branch it came out of (§212, §228). False: unknown name. */
-bool setParam(const char* name, float value, uint8_t slots = 0xFF);
+/* One parameter, live, in the slots of `slots` (a bit each), on the effects of its kind in
+ * `group` (0: every group): "lp_cutoff" (Hz), "lp_q", "rv_wet" (0..1), "rv_decay" (s),
+ * "rv_damp" (0..1) — a learnt CC moves the effects of the cue whose branch it came out of
+ * (§212, §228). False: unknown name. */
+bool setParam(const char* name, float value, uint8_t slots = 0xFF, uint8_t group = 0);
 /* Is `name` one of setParam's? The CC table asks (§228): such a target is an effect's. */
 bool isParam(const char* name);
 /* Does that parameter move by octaves? The cutoff does — the app's slider is `log` (§228): a
  * CC spread linearly put the whole useful register in the first tenth of the knob. */
 bool inOctaves(const char* name);
-/* The cue keys, live (POST /api/audio/fx), in `slot`: only those present change. */
+/* The chain of the cue that plays, live (POST /api/audio/fx): `fx` and `fxmix`, as a cue says them. */
 bool applyKeys(uint8_t slot, const String& params, String& reason);
 String status(uint8_t slot);                 // JSON for /api/audio/status and the route
-uint32_t psramBytes();                       // the reverbs allocated, kept once allocated (§217)
+uint32_t psramBytes();                       // the effects allocated, kept once allocated (§217)
 
 // ── Audio task ───────────────────────────────────────────────────────────────
-/* Does the instrument of this block go through the slot's low-pass? (Read once per
- * block per voice: a word compare, no lock — the list is swapped whole.) */
-bool filters(uint8_t slot, uint32_t bloc);
-/* `mainL/R`: the slot's mix; `busL/R`: what its low-pass takes (cleared by the caller,
- * filled by the instruments it filters). Result in mainL/R. */
-void process(uint8_t slot, float* mainL, float* mainR, float* busL, float* busR, size_t frames);
-/* The slot is emptied (its Release over, or cut): what its filter and its reverb still hold
- * goes — the next cue in that slot starts from silence. */
+/* At the start of the slot's block: the chain a writer posted is adopted, whole. */
+void beginBlock(uint8_t slot);
+/* The groups (bit g) whose sum goes through effects of their own — the MIX zone's not among
+ * them: their instruments are summed apart, then processGroup. */
+uint32_t groupMask(uint8_t slot);
+/* That group's effects, in their order, on its sum — in place. */
+void processGroup(uint8_t slot, uint8_t group, float* l, float* r, size_t frames);
+/* The MIX zone's effects on the slot's mix (every group summed) — in place. */
+void processMix(uint8_t slot, float* l, float* r, size_t frames);
+/* The slot is emptied (its Release over, or cut): what its effects still hold goes — the next
+ * cue in that slot starts from silence. */
 void clear(uint8_t slot);
 /* The guard (AudioEngine): core 1 is over budget — drop the reverbs, then the low-passes,
  * until the next cue. Says so once. */

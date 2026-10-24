@@ -150,8 +150,8 @@ volatile uint32_t bipBlocsRestants = 0;
 float             bipPhase = 0.0f;
 
 int16_t entrelace[FRAMES * 2];
-/* THE MIX, IN FLOAT (§210): `mix` what goes straight on, `bus` what the low-pass
- * takes (Effects.h) — the instruments of its group. Full scale = 1.0. */
+/* THE MIX, IN FLOAT (§210, §230): `mix` the slot's, `bus` the sum of one group whose FX are its
+ * own, the groups in turn (Effects.h). Full scale = 1.0. */
 float mixL[FRAMES], mixR[FRAMES], busL[FRAMES], busR[FRAMES], synthMono[FRAMES];
 /* THE CAPTURE OF WHAT GOES TO THE DAC (§210, diagnostics): a PSRAM buffer the web
  * arms, the audio task fills block by block just before i2s.write — the samples
@@ -896,9 +896,89 @@ void _notePeak(PeakBlock& p, uint32_t bloc, const float* l, const float* r, floa
   if (ad > p.d) p.d = (uint16_t)ad;
 }
 
-/* ONE CUE SLOT'S BLOCK (§212): its voices, its kit, its synth voice — `mix` what goes straight
- * on, `bus` what its low-pass takes — then its effects, then its envelope (and a cut's fade)
- * into the master. A slot whose envelope fell to silence, or whose cut ended, is drained. */
+/* ONE VOICE OF A SLOT, its whole block, added into `l`/`r` — the sum it belongs to (§230: a
+ * voice renders once, into its group's sum or straight into the slot's mix). What it read past
+ * its data marks `underruns`. */
+static void _mixVoice(uint8_t v, float* l, float* r, uint8_t& underruns, bool mesurer) {
+  constexpr float IN = 1.0f / 32768.0f;
+  VoixEch& vo = voixEch[v];
+  /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
+   * somme en float avant de borner : additionner en int16 replierait au lieu
+   * de saturer, ce qui s'entend comme un craquement franc. */
+  for (size_t i = 0; i < FRAMES; i++) {
+    /* A STREAMED VOICE has no PCM in memory: it reads its head, then the stream's
+     * buffer (_readHead). The others read the store, as always. */
+    const int16_t* pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
+    size_t         n   = SampleStore::trames(vo.iEch);
+    if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; return; }
+    /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
+     * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
+     * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
+     * selection d'un clip de play list (§196), qui reboucle sur son debut —
+     * et a la fin d'un clip, la liste peut enchainer sur la meme voix. */
+    size_t fin = (vo.finT > 1 && vo.finT < n) ? vo.finT : n;
+    if (vo.pos >= double(fin - 1)) {
+      if (vo.boucle) {
+        vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
+        if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
+        if (vo.stream >= 0) SdStream::restart(vo.stream);   // the voice restarts from the head: the stream repositions
+      } else if (vo.liste >= 0 && _clipSuivant(vo)) {
+        pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
+        n   = SampleStore::trames(vo.iEch);
+        if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; return; }
+      } else { vo.actif = false; return; }
+    }
+    if (vo.fondu > 0.0f) {
+      /* SE TAIRE EN 5 MS (§196) : un clip coupe par un autre. */
+      vo.gain -= vo.fondu;
+      if (vo.gain <= 0.0f) { vo.actif = false; vo.fondu = 0.0f; return; }
+    } else {
+      /* Le gain rejoint sa cible — `fixerGainBloc` la deplace pendant que la
+       * voix joue. Arrive a moins de 1e-4, on pose la cible : pas de traine
+       * sans fin vers zero, donc pas de nombres denormaux dans la boucle. */
+      const float ecart = vo.cible - vo.gain;
+      if (ecart != 0.0f)
+        vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
+    }
+    const size_t k = (size_t)vo.pos;
+    const float  f = float(vo.pos - double(k));
+    const bool  st = SampleStore::stereo(vo.iEch);
+    int32_t eg, ed;
+    if (vo.head >= 0) {
+      /* The head, then the buffer; what is missing is SILENCE — never a wait. */
+      int16_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
+      const bool ok0 = _readHead(vo, (uint32_t)k, l0, r0);
+      const bool ok1 = ok0 && _readHead(vo, (uint32_t)k + 1, l1, r1);
+      if (!ok0)      underruns |= (uint8_t)(1u << v);
+      else if (!ok1) { l1 = l0; r1 = r0; }
+      eg = (int32_t)(l0 + f * (l1 - l0));
+      ed = (int32_t)(r0 + f * (r1 - r0));
+    } else if (st) {
+      eg = (int32_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
+      ed = (int32_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
+    } else {
+      eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
+    }
+    const float   gv = vo.gain;
+    const int32_t sg = (int32_t)(eg * gv), sd = (int32_t)(ed * gv);
+    l[i] += sg * IN; r[i] += sd * IN;
+    if (mesurer) {
+      /* La crete de la voix, APRES son gain : ce qu'elle apporte au melange.
+       * Au-dela de 32 767 (gain de fader > 1), elle sature : le vu-metre
+       * l'affichera plein, en rouge. */
+      const int32_t ag = (sg < 0) ? -sg : sg, ad = (sd < 0) ? -sd : sd;
+      if (ag > vo.picG) vo.picG = (uint16_t)((ag > 65535) ? 65535 : ag);
+      if (ad > vo.picD) vo.picD = (uint16_t)((ad > 65535) ? 65535 : ad);
+    }
+    vo.pos += vo.pas;
+  }
+}
+
+/* ONE CUE SLOT'S BLOCK (§212): its voices, its kit, its synth voice, summed as in the web version
+ * (§230) — each group whose FX tracks are its own apart, through them, then into the slot's mix
+ * with the instruments of the other groups; the MIX zone's FX on that mix — then its envelope
+ * (and a cut's fade) into the master. A slot whose envelope fell to silence, or whose cut ended,
+ * is drained. */
 void rendreSlot(uint8_t s, uint8_t& underruns) {
   CueSlot& c = slots[s];
   if (c.state == SLOT_DRAINED) return;
@@ -906,101 +986,26 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
   for (uint8_t v = 0; v < VOIX_MAX; v++) voix = voix || (voixEch[v].actif && voixEch[v].slot == s);
   /* A free slot has nothing armed: only what the inspector plays in it. */
   if (c.state == SLOT_FREE && !voix) return;
+  Effects::beginBlock(s);                     // the chain a writer posted, adopted whole
+  /* WHICH SUM EACH INSTRUMENT GOES INTO (§230): its group's, when that group has FX of its own;
+   * else straight into the slot's mix. Asked once per block. */
+  constexpr uint8_t DIRECT = 0xFF;
+  const uint32_t fxGroups = Effects::groupMask(s);
+  auto laneOf = [&](uint32_t bloc) -> uint8_t {
+    const uint8_t g = _groupOf(c, bloc);
+    return (g <= GROUP_MAX && (fxGroups & (1u << g))) ? g : DIRECT;
+  };
+  uint8_t lane[VOIX_MAX];
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    lane[v] = (voixEch[v].actif && voixEch[v].slot == s) ? laneOf(voixEch[v].bloc) : DIRECT;
+  const bool mesurer = mesureVu && !gSilence;
   /* THE SFZ ENGINE of the slot (§207): the kernel renders float into two scratch buffers.
    * False when nothing plays. */
   static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state (the slots in turn)
   const int8_t kit = c.kit;
   const bool sfz = kit >= 0 && SfzStore::rendreBloc((uint8_t)kit, sfzG, sfzD, FRAMES);
   const float sfzK = (kit >= 0) ? SfzStore::gainLisse((uint8_t)kit) : 0.0f;   // the block's fader, glided (§208)
-  /* WHO GOES THROUGH THE SLOT'S LOW-PASS (§210): asked once per block and per voice. */
-  const bool sfzFiltre = sfz && Effects::filters(s, SfzStore::blocId((uint8_t)kit));
-  bool filtre[VOIX_MAX];
-  for (uint8_t v = 0; v < VOIX_MAX; v++)
-    filtre[v] = voixEch[v].actif && voixEch[v].slot == s && Effects::filters(s, voixEch[v].bloc);
-  constexpr float IN = 1.0f / 32768.0f;
-  /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
-   * somme en 32 bits avant de borner : additionner en int16 replierait au lieu
-   * de saturer, ce qui s'entend comme un craquement franc. */
-  const bool mesurer = mesureVu && !gSilence;
-  for (size_t i = 0; i < FRAMES; i++) {
-    int32_t g = 0, d = 0, gf = 0, df = 0;
-    for (uint8_t v = 0; v < VOIX_MAX; v++) {
-      VoixEch& vo = voixEch[v];
-      if (!vo.actif || vo.slot != s) continue;
-      /* A STREAMED VOICE has no PCM in memory: it reads its head, then the stream's
-       * buffer (_readHead). The others read the store, as always. */
-      const int16_t* pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
-      size_t         n   = SampleStore::trames(vo.iEch);
-      if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
-      /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
-       * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
-       * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
-       * selection d'un clip de play list (§196), qui reboucle sur son debut —
-       * et a la fin d'un clip, la liste peut enchainer sur la meme voix. */
-      size_t fin = (vo.finT > 1 && vo.finT < n) ? vo.finT : n;
-      if (vo.pos >= double(fin - 1)) {
-        if (vo.boucle) {
-          vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
-          if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
-          if (vo.stream >= 0) SdStream::restart(vo.stream);   // the voice restarts from the head: the stream repositions
-        } else if (vo.liste >= 0 && _clipSuivant(vo)) {
-          pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
-          n   = SampleStore::trames(vo.iEch);
-          if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; continue; }
-        } else { vo.actif = false; continue; }
-      }
-      if (vo.fondu > 0.0f) {
-        /* SE TAIRE EN 5 MS (§196) : un clip coupe par un autre. */
-        vo.gain -= vo.fondu;
-        if (vo.gain <= 0.0f) { vo.actif = false; vo.fondu = 0.0f; continue; }
-      } else {
-        /* Le gain rejoint sa cible — `fixerGainBloc` la deplace pendant que la
-         * voix joue. Arrive a moins de 1e-4, on pose la cible : pas de traine
-         * sans fin vers zero, donc pas de nombres denormaux dans la boucle. */
-        const float ecart = vo.cible - vo.gain;
-        if (ecart != 0.0f)
-          vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
-      }
-      const size_t k = (size_t)vo.pos;
-      const float  f = float(vo.pos - double(k));
-      const bool  st = SampleStore::stereo(vo.iEch);
-      int32_t eg, ed;
-      if (vo.head >= 0) {
-        /* The head, then the buffer; what is missing is SILENCE — never a wait. */
-        int16_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
-        const bool ok0 = _readHead(vo, (uint32_t)k, l0, r0);
-        const bool ok1 = ok0 && _readHead(vo, (uint32_t)k + 1, l1, r1);
-        if (!ok0)      underruns |= (uint8_t)(1u << v);
-        else if (!ok1) { l1 = l0; r1 = r0; }
-        eg = (int32_t)(l0 + f * (l1 - l0));
-        ed = (int32_t)(r0 + f * (r1 - r0));
-      } else if (st) {
-        eg = (int32_t)(pcm[k*2]     + f * (pcm[(k+1)*2]     - pcm[k*2]));
-        ed = (int32_t)(pcm[k*2 + 1] + f * (pcm[(k+1)*2 + 1] - pcm[k*2 + 1]));
-      } else {
-        eg = ed = (int32_t)(pcm[k] + f * (pcm[k+1] - pcm[k]));
-      }
-      const float   gv = vo.gain;
-      const int32_t sg = (int32_t)(eg * gv), sd = (int32_t)(ed * gv);
-      if (filtre[v]) { gf += sg; df += sd; } else { g += sg; d += sd; }
-      if (mesurer) {
-        /* La crete de la voix, APRES son gain : ce qu'elle apporte au melange.
-         * Au-dela de 32 767 (gain de fader > 1), elle sature : le vu-metre
-         * l'affichera plein, en rouge. */
-        const int32_t ag = (sg < 0) ? -sg : sg, ad = (sd < 0) ? -sd : sd;
-        if (ag > vo.picG) vo.picG = (uint16_t)((ag > 65535) ? 65535 : ag);
-        if (ad > vo.picD) vo.picD = (uint16_t)((ad > 65535) ? 65535 : ad);
-      }
-      vo.pos += vo.pas;
-    }
-    /* Float from here: the sum saturates once, at the end (_finirLeMelange). */
-    mixL[i] = g * IN;  mixR[i] = d * IN;
-    busL[i] = gf * IN; busR[i] = df * IN;
-    if (sfz) {
-      if (sfzFiltre) { busL[i] += sfzG[i] * sfzK; busR[i] += sfzD[i] * sfzK; }
-      else           { mixL[i] += sfzG[i] * sfzK; mixR[i] += sfzD[i] * sfzK; }
-    }
-  }
+  const uint8_t sfzLane = sfz ? laneOf(SfzStore::blocId((uint8_t)kit)) : DIRECT;
   if (sfz && mesurer) _notePeak(kitPeak[s], SfzStore::blocId((uint8_t)kit), sfzG, sfzD, sfzK);   // §220
   /* THE SLOT'S SYNTH VOICE, or its two (rendered ahead on core 0; the same block, the same
    * routing — §214). */
@@ -1009,14 +1014,31 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
   bool synthSonne = false;
   if (sv >= 0)  synthSonne |= SynthVoice::take((uint8_t)sv, synthMono, FRAMES);
   if (sv2 >= 0) synthSonne |= SynthVoice::take((uint8_t)sv2, synthMono, FRAMES);
+  uint8_t synthLane = DIRECT;
   if (synthSonne) {
     const uint32_t sb = SynthVoice::bloc((uint8_t)(sv >= 0 ? sv : sv2));
-    float* l = Effects::filters(s, sb) ? busL : mixL;
-    float* r = (l == busL) ? busR : mixR;
-    for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
+    synthLane = laneOf(sb);
     if (mesurer) _notePeak(synthPeak[s], sb, synthMono, synthMono, 1.0f);   // its meter (§220)
   }
-  Effects::process(s, mixL, mixR, busL, busR, FRAMES);
+  /* One sum: the voices of that lane, and the kit and the synth voice when they are in it. */
+  auto sum = [&](uint8_t want, float* l, float* r) {
+    memset(l, 0, FRAMES * sizeof(float));
+    memset(r, 0, FRAMES * sizeof(float));
+    for (uint8_t v = 0; v < VOIX_MAX; v++)
+      if (lane[v] == want && voixEch[v].actif && voixEch[v].slot == s) _mixVoice(v, l, r, underruns, mesurer);
+    if (sfz && sfzLane == want)
+      for (size_t i = 0; i < FRAMES; i++) { l[i] += sfzG[i] * sfzK; r[i] += sfzD[i] * sfzK; }
+    if (synthSonne && synthLane == want)
+      for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
+  };
+  sum(DIRECT, mixL, mixR);
+  for (uint32_t m = fxGroups; m; m &= m - 1) {
+    const uint8_t g = (uint8_t)__builtin_ctz(m);
+    sum(g, busL, busR);
+    Effects::processGroup(s, g, busL, busR, FRAMES);
+    for (size_t i = 0; i < FRAMES; i++) { mixL[i] += busL[i]; mixR[i] += busR[i]; }
+  }
+  Effects::processMix(s, mixL, mixR, FRAMES);
   /* ITS ENVELOPE, on its output — after the effects: a reverb tail falls with the Release
    * (§211-212); and a cut's 10 ms fade. */
   const float pasCoupe = 1.0f / (SLOT_CUT_S * float(srReel));

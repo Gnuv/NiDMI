@@ -351,10 +351,10 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(r);
     });
 
-    /* THE EFFECTS, LIVE (§210): the low-pass of the chosen instruments and the
-     * reverb — the cue's keys (lowpass, lpblocs, lpcutoff, lpq, reverb, rvwet,
-     * rvdecay, rvdamp), only those sent change. A game gesture: allowed under
-     * the concert lock. GET: their state. */
+    /* THE EFFECTS, LIVE (§210, §230): the chain of the cue that plays, whole — the cue's keys
+     * `fx` (the effects in signal order, each with its block, its group and its settings) and
+     * `fxmix` (the MIX zone's group); `fx` empty: none. An effect that stays the same block keeps
+     * its state. A game gesture: allowed under the concert lock. GET: their state. */
     /* The cue that plays (§212): its effects — or those of the slot `?slot=N`. */
     server.on("/api/audio/fx", HTTP_GET, [](AsyncWebServerRequest *request){
         const int8_t sc = AudioEngine::slotCourant();
@@ -363,17 +363,17 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json", Effects::status(ici));
     });
     server.on("/api/audio/fx", HTTP_POST, [](AsyncWebServerRequest *request){
-        static const char* const KEYS[] = {"lowpass", "lpblocs", "lpcutoff", "lpq",
-                                           "reverb", "rvwet", "rvdecay", "rvdamp"};
-        String keys;
-        for (const char* k : KEYS)
-            if (request->hasParam(k, true))
-                keys += String(k) + "=" + request->getParam(k, true)->value() + ";";
+        if (!request->hasParam("fx", true)) {
+            request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"fx manquant : la chaine entiere de la cue\"}");
+            return;
+        }
+        String keys = "fx=" + request->getParam("fx", true)->value() + ";";
+        if (request->hasParam("fxmix", true)) keys += "fxmix=" + request->getParam("fxmix", true)->value() + ";";
         String reason;
         const int8_t sc = AudioEngine::slotCourant();
         const uint8_t ici = (sc >= 0) ? (uint8_t)sc : 0;
-        if (!Effects::applyKeys(ici, keys, reason)) {
-            request->send(507, "application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");
+        if (!Effects::applyKeys(ici, keys, reason)) {   // the others run: the chain says which
+            request->send(422,"application/json", "{\"status\":\"error\",\"message\":\"" + reason + "\"}");
             return;
         }
         request->send(200, "application/json", Effects::status(ici));

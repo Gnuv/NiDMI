@@ -92,11 +92,12 @@ bool estParamAudio(const char* nom) {
 // toucher le potentiometre une seconde fois.
 static void poser(const Entree& e, uint8_t valeur, AudioEngine::Pour pour = AudioEngine::Pour::TOUS) {
     /* An effect's parameter (§228): the effects of the cue the CC is for, as the synth voice
-     * below. The group was settled by appliquer(): the FX block's. */
+     * below — those of its kind in the FX block's group, the affectation's (§230: a cue holds an
+     * effect per group, and the MIX zone's). */
     if (Effects::isParam(e.cible)) {
         const float v = Effects::inOctaves(e.cible) ? spreadOctaves(valeur, e.min, e.max)
                                                     : etaler(valeur, e.min, e.max);
-        Effects::setParam(e.cible, v, AudioEngine::masqueSlots(pour));
+        Effects::setParam(e.cible, v, AudioEngine::masqueSlots(pour), e.groupe);
         return;
     }
     const float v = etaler(valeur, e.min, e.max);
