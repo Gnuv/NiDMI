@@ -15,7 +15,7 @@ namespace {
   uint32_t g_dernierePublication = 0;
   uint32_t g_genListesPubliee = 0;        // l'etat des play list deja annonce (§196)
   constexpr uint32_t PERIODE_MS = 100;    // 10 Hz : l'oeil suit un vu-metre
-  constexpr uint8_t  BLOCS_VU   = 8;      // autant que de voix d'echantillon
+  constexpr uint8_t  BLOCS_VU   = 12;     // the 8 sample voices, the 2 kits and 2 synth voices (§220)
 }
 
 namespace Activite {

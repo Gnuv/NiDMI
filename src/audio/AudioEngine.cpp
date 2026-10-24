@@ -371,6 +371,12 @@ struct CueSlot {
   volatile uint8_t  voixVoulues = 1;        // what its cue asks: 1, or 2 voices (§214)
 };
 CueSlot           slots[CUE_SLOTS];
+/* THE METERS OF THE OTHER INSTRUMENTS (MESURES §220): the SFZ kit and the synth voice of each slot,
+ * their peak since the last reading, after their gain — as a sample voice's (picG/picD), in int16
+ * units. Written by the audio task, read and reset by releverCretes, without a lock: a peak can be
+ * lost there, a meter does not notice. */
+struct PeakBlock { uint32_t bloc = 0; uint16_t g = 0, d = 0; };
+PeakBlock kitPeak[CUE_SLOTS], synthPeak[CUE_SLOTS];
 volatile int8_t   slotCurrent = -1;         // the cue that plays (loopTask writes, anyone reads)
 volatile int8_t   slotLeaving = -1;         // the one in its Release, -1 none
 
@@ -860,6 +866,21 @@ void _sweepStreams() {
  * here; saturated once, at the end (_finirLeMelange). */
 float masterL[FRAMES], masterR[FRAMES];
 
+/* A block's peak over one audio block, after its gain `k` (§220): the meter of a kit or a synth
+ * voice. Float in, full scale 1.0; kept in int16 units, as a sample voice's, up to 65 535. */
+void _notePeak(PeakBlock& p, uint32_t bloc, const float* l, const float* r, float k) {
+  float mg = 0.0f, md = 0.0f;
+  for (size_t i = 0; i < FRAMES; i++) {
+    const float a = fabsf(l[i]), b = fabsf(r[i]);
+    if (a > mg) mg = a;
+    if (b > md) md = b;
+  }
+  const float ag = fminf(65535.0f, mg * fabsf(k) * 32767.0f), ad = fminf(65535.0f, md * fabsf(k) * 32767.0f);
+  p.bloc = bloc;
+  if (ag > p.g) p.g = (uint16_t)ag;
+  if (ad > p.d) p.d = (uint16_t)ad;
+}
+
 /* ONE CUE SLOT'S BLOCK (§212): its voices, its kit, its synth voice — `mix` what goes straight
  * on, `bus` what its low-pass takes — then its effects, then its envelope (and a cut's fade)
  * into the master. A slot whose envelope fell to silence, or whose cut ended, is drained. */
@@ -965,6 +986,7 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
       else           { mixL[i] += sfzG[i] * sfzK; mixR[i] += sfzD[i] * sfzK; }
     }
   }
+  if (sfz && mesurer) _notePeak(kitPeak[s], SfzStore::blocId((uint8_t)kit), sfzG, sfzD, sfzK);   // §220
   /* THE SLOT'S SYNTH VOICE, or its two (rendered ahead on core 0; the same block, the same
    * routing — §214). */
   const int8_t sv = c.synth, sv2 = c.synth2;
@@ -973,9 +995,11 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
   if (sv >= 0)  synthSonne |= SynthVoice::take((uint8_t)sv, synthMono, FRAMES);
   if (sv2 >= 0) synthSonne |= SynthVoice::take((uint8_t)sv2, synthMono, FRAMES);
   if (synthSonne) {
-    float* l = Effects::filters(s, SynthVoice::bloc((uint8_t)(sv >= 0 ? sv : sv2))) ? busL : mixL;
+    const uint32_t sb = SynthVoice::bloc((uint8_t)(sv >= 0 ? sv : sv2));
+    float* l = Effects::filters(s, sb) ? busL : mixL;
     float* r = (l == busL) ? busR : mixR;
     for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
+    if (mesurer) _notePeak(synthPeak[s], sb, synthMono, synthMono, 1.0f);   // its meter (§220)
   }
   Effects::process(s, mixL, mixR, busL, busR, FRAMES);
   /* ITS ENVELOPE, on its output — after the effects: a reverb tail falls with the Release
@@ -2048,6 +2072,25 @@ uint8_t releverCretes(uint32_t* blocs, uint16_t* cretesG, uint16_t* cretesD, uin
     if (g > cretesG[k]) cretesG[k] = g;
     if (d > cretesD[k]) cretesD[k] = d;
   }
+  /* The kits and the synth voices (§220): each its block, beside the sample voices. */
+  for (PeakBlock* tab : {kitPeak, synthPeak})
+    for (uint8_t s = 0; s < CUE_SLOTS; s++) {
+      PeakBlock& p = tab[s];
+      const uint16_t pg = p.g, pd = p.d;
+      if (!pg && !pd) continue;
+      p.g = 0; p.d = 0;
+      if (!p.bloc) continue;
+      const uint16_t g = (uint16_t)fminf(65535.f, pg * sortie);
+      const uint16_t d = (uint16_t)fminf(65535.f, pd * sortie);
+      uint8_t k = 0;
+      while (k < n && blocs[k] != p.bloc) k++;
+      if (k == n) {
+        if (n >= max) continue;
+        blocs[n] = p.bloc; cretesG[n] = 0; cretesD[n] = 0; n++;
+      }
+      if (g > cretesG[k]) cretesG[k] = g;
+      if (d > cretesD[k]) cretesD[k] = d;
+    }
   return n;
 }
 
