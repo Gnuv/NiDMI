@@ -845,6 +845,8 @@ struct ImpressionDeposee {
     uint8_t montre, pipe, seg;
     char    origine[12];
     char    etiquette[32];
+    int16_t assoc[2];     // what print() shows beside the value (§225)
+    uint8_t nAssoc;
 };
 constexpr UBaseType_t kImpressionsMax = 64;
 StaticQueue_t g_impressionsTcb;
@@ -861,10 +863,13 @@ static void impressionsInit() {
 }
 
 static void impressionDeposer(const char* origine, const char* etiquette, float valeur,
-                              uint8_t montre, uint8_t pipe, uint8_t seg) {
+                              uint8_t montre, uint8_t pipe, uint8_t seg,
+                              const int16_t* assoc, uint8_t nAssoc) {
     if (!g_impressions) return;
     ImpressionDeposee d;
     d.valeur = valeur; d.montre = montre; d.pipe = pipe; d.seg = seg;
+    d.nAssoc = 0;
+    for (uint8_t i = 0; assoc && i < nAssoc && i < 2; i++) d.assoc[d.nAssoc++] = assoc[i];
     strlcpy(d.origine, (origine && origine[0]) ? origine : "?", sizeof d.origine);
     strlcpy(d.etiquette, etiquette ? etiquette : "", sizeof d.etiquette);
     if (xQueueSend(g_impressions, &d, 0) != pdTRUE) g_impressionsJetees = g_impressionsJetees + 1;
@@ -892,9 +897,15 @@ static void impressionsDrainer() {
         } else {
             /* Le journal de bord, TOUJOURS : c'est l'historique qu'un client
              * rejouera en s'abonnant plus tard. */
-            NIDMI_WEB_LOG("[%s] %s : %.4f", d.origine, d.etiquette, d.valeur);
-            snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f",
-                     d.origine, d.etiquette, d.valeur);
+            /* AND WHAT GOES WITH IT (§225): a 4th field, the values the browser greys after the
+             * value — « 100 10 », space separated; empty when there are none. */
+            char assoc[16] = "";
+            if (d.nAssoc == 1) snprintf(assoc, sizeof assoc, "%d", (int)d.assoc[0]);
+            else if (d.nAssoc == 2) snprintf(assoc, sizeof assoc, "%d %d", (int)d.assoc[0], (int)d.assoc[1]);
+            if (d.nAssoc) NIDMI_WEB_LOG("[%s] %s : %.4f  %s", d.origine, d.etiquette, d.valeur, assoc);
+            else          NIDMI_WEB_LOG("[%s] %s : %.4f", d.origine, d.etiquette, d.valeur);
+            snprintf(trame, sizeof(trame), "NMS_PRINT:%s\x1f%s\x1f%.4f\x1f%s",
+                     d.origine, d.etiquette, d.valeur, assoc);
         }
         if (nidmi_ws_quelqu_un_ecoute()) nidmi_ws_pousser(trame);
     }
@@ -1542,14 +1553,15 @@ void nidmi_begin() {
     impressionsInit();
     MappingEngine::surImpression([](const char* origine, const char* etiquette,
                                    float valeur, uint8_t montre,
-                                   uint8_t pipe, uint8_t seg) {
+                                   uint8_t pipe, uint8_t seg,
+                                   const int16_t* assoc, uint8_t nAssoc) {
         /* Ce que coute une impression a la tache MIDI (§170), jusqu'au retour. */
         struct Chrono { const uint32_t t0 = micros(); ~Chrono() { Chronos::impression.noter(micros() - t0); } } chrono;
         /* NI COURBE NI NOMBRE N'ONT D'HISTORIQUE : s'ils ne partent pas, ils
          * n'existent pas. On sort donc AVANT meme de deposer — en headless ce
          * chemin ne coute rien du tout. Seul print() garde une trace. */
         if (montre != MappingEngine::MontreTexte && !nidmi_ws_quelqu_un_ecoute()) return;
-        impressionDeposer(origine, etiquette, valeur, montre, pipe, seg);
+        impressionDeposer(origine, etiquette, valeur, montre, pipe, seg, assoc, nAssoc);
     });
 
     /* MIDI USB ENTRANT -> moteur audio.

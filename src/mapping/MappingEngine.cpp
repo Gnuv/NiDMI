@@ -1121,9 +1121,21 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
         String etiquette = a; etiquette.trim();
         if (etiquette.length() >= 2 && etiquette[0] == '"')
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
+        /* WHAT IT PRINTS BESIDE THE VALUE (§225), as the browser's engine does: the other field
+         * of the event, then its channel (1-16; 0 is « any »). */
+        int16_t assoc[2]; uint8_t nAssoc = 0;
+        switch (e.type) {
+            case MappingEngine::Evenement::NoteOn: case MappingEngine::Evenement::NoteOff:
+                assoc[nAssoc++] = (courant == (float)e.b) ? e.a : e.b; break;   // vel.in: its note
+            case MappingEngine::Evenement::Cc: case MappingEngine::Evenement::PolyTouch:
+                assoc[nAssoc++] = e.a; break;
+            default: break;
+        }
+        if (e.canal >= 1 && e.canal <= 16) assoc[nAssoc++] = e.canal;
         if (g_impression)
             g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
-                         courant, MappingEngine::MontreTexte, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
+                         courant, MappingEngine::MontreTexte, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0,
+                         assoc, nAssoc);
         return true;
     }
     /* graph([etiquette]) — la meme valeur, mais EN COURBE. Pendant exact de
@@ -1136,7 +1148,8 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
             etiquette = etiquette.substring(1, (int)etiquette.length() - 1);
         if (g_impression)
             g_impression(e.origine, etiquette.length() ? etiquette.c_str() : "out",
-                         courant, MappingEngine::MontreCourbe, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0);
+                         courant, MappingEngine::MontreCourbe, ctx ? ctx->pipe : 0, ctx ? ctx->seg : 0,
+                         nullptr, 0);
         return true;
     }
     /* num([etiquette]) — un afficheur VIVANT, pas une ligne de journal. Il
@@ -1158,7 +1171,7 @@ bool evaluerSegment(const String& seg, float& courant, Evt& e,
                           * designe rien : l'editeur cherchait « 0:0 » quand sa
                           * boite s'appelait « 0:1 », et num() paraissait muet
                           * alors que la trame arrivait. */
-                         ctx ? (uint8_t)(ctx->seg + 1) : 1);
+                         ctx ? (uint8_t)(ctx->seg + 1) : 1, nullptr, 0);
         return true;
     }
     if (verbe(seg, "bang", a) || verbe(seg, "b", a)) return true;

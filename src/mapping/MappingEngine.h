@@ -309,9 +309,13 @@ public:
      * verbe existait, son affichage n'existait pas — donc « num() ne marche
      * pas », et rien pour dire pourquoi. */
     enum Montre : uint8_t { MontreTexte = 0, MontreCourbe = 1, MontreNombre = 2 };
+    /* `assoc` (§225): what print() shows beside the value, as the browser does — the other
+     * field of the event (a note's velocity, or its note when the value is the velocity; a
+     * CC's number; a pad's note), then its channel. nullptr for graph() and num(). */
     typedef void (*Impression)(const char* origine, const char* etiquette,
                                float valeur, uint8_t montre,
-                               uint8_t pipe, uint8_t seg);
+                               uint8_t pipe, uint8_t seg,
+                               const int16_t* assoc, uint8_t nAssoc);
     static void surImpression(Impression fn);
 
     /* L'EMETTEUR OSC, pose de l'exterieur — comme l'impression. Le moteur ne
