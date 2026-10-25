@@ -138,6 +138,7 @@ uint32_t blocsRendus(); uint32_t evenementsVus();
 String  erreur();                     // the last refusal, "" if none
 String  echapper(const String& s);   // a text made safe inside a JSON string
 String  diagnostic();                 // the pool as JSON: held instruments, PCM bytes, last load time, the CC held
+String  memoryJson();                 // each kit held and its PSRAM: its samples' PCM and its regions (§235)
 String  cost();                       // what a note and a block cost, in cycles, measured on the audio task (§208)
 void    resetCost();                    // ... back to zero (the bench asks before each trial)
 void    costBlock(uint32_t cyclesTotal);  // the audio loop: the whole render of the block, to pair with the kernel's share

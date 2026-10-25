@@ -9,6 +9,7 @@
 #include <new>
 #include "AudioEngine.h"
 #include "ProcessCosts.h"
+#include "BlockLoads.h"
 #include "faust/FaustLowpass.h"
 #include "faust/FaustAmbience.h"
 
@@ -241,8 +242,9 @@ void run(Unit& u, uint8_t kind, float* l, float* r, size_t frames) {
   else return;
   memcpy(l, tmpL, frames * sizeof(float));
   memcpy(r, tmpR, frames * sizeof(float));
-  ProcessCosts::note(kind == LOWPASS ? ProcessCosts::LOW_PASS : ProcessCosts::AMBIENCE,
-                     ESP.getCycleCount() - t, (uint32_t)frames);
+  const uint32_t dt = ESP.getCycleCount() - t;
+  ProcessCosts::note(kind == LOWPASS ? ProcessCosts::LOW_PASS : ProcessCosts::AMBIENCE, dt, (uint32_t)frames);
+  BlockLoads::add(1, u.bloc, dt);        // its block's load, live (§235)
 }
 
 }  // namespace
@@ -376,6 +378,12 @@ void shed() {
     Serial.printf("[audio] core 1 over budget: %s dropped until the next cue\n",
                   shedLevel >= 2 ? "the reverbs and the low-passes" : "the reverbs");
   }
+}
+
+uint32_t bytesOf(const char* kind) {
+  if (!strcmp(kind, "low-pass")) return (uint32_t)sizeof(FaustLowpass);
+  if (!strcmp(kind, "ambience")) return (uint32_t)sizeof(FaustAmbience);
+  return 0;
 }
 
 uint32_t psramBytes() {

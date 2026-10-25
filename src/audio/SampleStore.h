@@ -138,5 +138,8 @@ size_t          trames(uint8_t i);
 bool            stereo(uint8_t i);
 uint32_t        frequence(uint8_t i);          // celle du fichier, pas celle de l'I2S
 size_t          octetsPsram();                 // total, tous échantillons
+/* Each readable sound and what it holds in PSRAM — 0 for one streamed from the SD (its clips'
+ * heads are SdStream's): JSON for GET /api/audio/memory (§235). */
+String          memoryJson();
 
 }  // namespace SampleStore

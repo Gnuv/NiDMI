@@ -572,4 +572,17 @@ int indexDe(const char* n) {
 }
 size_t         octetsPsram() { return _octets; }
 
+String memoryJson() {
+  Verrou verrou;
+  String j = "[";
+  for (int i = 0; i < SAMPLES_MAX; i++) {
+    const Echantillon& e = _ech[i];
+    if (!e.pret) continue;
+    if (j.length() > 1) j += ",";
+    j += String("{\"name\":\"") + e.nom + "\",\"bytes\":" + String((unsigned)e.octets)
+       + ",\"sd\":" + (e.sd ? "true" : "false") + ",\"stream\":" + (e.streamed ? "true" : "false") + "}";
+  }
+  return j + "]";
+}
+
 }  // namespace SampleStore

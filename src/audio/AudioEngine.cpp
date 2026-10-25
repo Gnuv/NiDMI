@@ -22,6 +22,7 @@
 #include "SynthVoice.h"
 #include "Effects.h"
 #include "ProcessCosts.h"
+#include "BlockLoads.h"
 #include "../server/WebDebugConsole.h"
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
@@ -1031,14 +1032,17 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
     memset(r, 0, FRAMES * sizeof(float));
     for (uint8_t v = 0; v < VOIX_MAX; v++) {
       if (!(lane[v] == want && voixEch[v].actif && voixEch[v].slot == s)) continue;
+      const uint32_t bloc = voixEch[v].bloc;
       const uint32_t t = ESP.getCycleCount();
       _mixVoice(v, l, r, underruns, mesurer);
+      const uint32_t dt = ESP.getCycleCount() - t;
+      BlockLoads::add(1, bloc, dt);                  // its block's load, live (§235)
       /* What a voice costs (§231), a whole block only: one that ended during it rendered less. */
       const VoixEch& vo = voixEch[v];
       if (vo.actif)
         ProcessCosts::note(vo.liste < 0 ? ProcessCosts::PLAY_SF
                            : vo.head >= 0 ? ProcessCosts::PLAY_LIST_STREAM : ProcessCosts::PLAY_LIST,
-                           ESP.getCycleCount() - t, FRAMES);
+                           dt, FRAMES);
     }
     for (uint8_t k = 0; k < KITS_PER_SLOT; k++) {
       const int8_t m = kitM[k];
@@ -1699,6 +1703,7 @@ bool ensureStarted() {
   // Cœur 1, priorité 11 : au-dessus d'async_tcp (10), et loin de la pile WiFi
   // qui vit sur le cœur 0. Voir l'en-tête.
   ProcessCosts::begin();                 // the meters, and what this firmware measured before (§231)
+  BlockLoads::begin();                   // each block's load, live (§235)
   if (xTaskCreatePinnedToCore(boucleAudio, "audio", 4096, nullptr, 11, &tache, 1) != pdPASS) {
     Serial.println("[audio] tache impossible");
     i2s.end(); vQueueDelete(evenements); evenements = nullptr;

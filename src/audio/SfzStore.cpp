@@ -16,6 +16,7 @@
 #include <strings.h>                    // strcasecmp
 #include "SampleStore.h"
 #include "ProcessCosts.h"
+#include "BlockLoads.h"
 #include "../config/SdCard.h"
 #include "../server/ServerCore.h"       // nidmi_ws_pousser: the board ANNOUNCES what it loads
 #include "../server/WebDebugConsole.h"
@@ -35,7 +36,8 @@ constexpr uint32_t RETRAIT_MARGIN_MS = 150; // drain margin before PSRAM is free
 struct SonSfz   { char chemin[5 + CHEMIN_MAX + 1 + 160 + 1]; int16_t* pcm; uint32_t octets;
                   uint32_t trames; uint8_t canaux; uint32_t freq; bool pris; };
 struct InstrSfz { char chemin[CHEMIN_MAX]; sfz16_instrument* inst; bool pris;
-                  uint32_t libererApres; };  // 0: kept; else the free deadline (millis)
+                  uint32_t libererApres;     // 0: kept; else the free deadline (millis)
+                  uint32_t octets; };        // its samples' PCM (shared ones counted in each kit) and its regions
 
 static SonSfz*  _sons = nullptr;            // SONS_MAX entries, in PSRAM: ~19 ko that must not be .bss
 static InstrSfz _instrs[SIMULTANES];
@@ -265,8 +267,12 @@ static int _charger(const char* chemin, String& raison, Manque& manque) {
     return -1;
   }
 
+  uint32_t octets = sizeof(sfz16_instrument);
+  for (int i = 0; i < inst->sample_count; i++)
+    octets += (uint32_t)inst->samples[i].frames * inst->samples[i].channels * sizeof(int16_t);
   strlcpy(_instrs[j].chemin, chemin, sizeof(_instrs[j].chemin));
   _instrs[j].inst = inst;
+  _instrs[j].octets = octets;
   _instrs[j].libererApres = 0;
   _instrs[j].pris = true;
   _compterPris();
@@ -661,6 +667,7 @@ void noteOn(uint8_t m, uint8_t note, uint8_t velo) {
   const uint32_t c0 = ESP.getCycleCount();
   sfz16_note_on(eng, note, velo);
   const uint32_t dc = ESP.getCycleCount() - c0;
+  BlockLoads::add(1, _blocId[m], dc);     // its block's load, live (§235): the audio task plays the notes
   _costOnN++; _costOnKcyc += dc >> 10; if (dc > _costOnMax) _costOnMax = dc;
   _costBlockOn += dc; if (_costBlockNotes < 255) _costBlockNotes++;
 }
@@ -695,6 +702,7 @@ bool rendreBloc(uint8_t m, float* g, float* d, uint32_t trames) {
   sfz16_render(eng, g, d, trames);
   const uint32_t dc = ESP.getCycleCount() - c0;
   if (voices) ProcessCosts::note(ProcessCosts::PLAY_SFZ, dc / voices, trames);
+  BlockLoads::add(1, _blocId[m], dc);     // its block's load, live (§235)
   const uint32_t budget = trames * 5000u;
   CostClass& c = _costClass[recents == 0 ? 0 : recents < 5 ? 1 : recents < 16 ? 2 : 3];
   c.n++; c.kcyc += dc >> 10; if (dc > c.max) c.max = dc;
@@ -759,6 +767,19 @@ String lister(const char* dossier) {
     j += String("{\"nom\":\"") + echapper(f.name()) + "\",\"octets\":" + String((unsigned)f.size())
        + ",\"dossier\":" + (f.isDirectory() ? "true" : "false") + "}";
     if (n >= 48) break;
+  }
+  return j + "]";
+}
+
+/* Each kit held and what it holds, for the blocks of the grid (§235): single words, as below.
+ * A kit leaving (its free deadline set) is said: it still holds its memory. */
+String memoryJson() {
+  String j = "[";
+  for (int i = 0; i < SIMULTANES; i++) {
+    if (!_instrs[i].pris) continue;
+    if (j.length() > 1) j += ",";
+    j += String("{\"path\":\"") + echapper(_instrs[i].chemin) + "\",\"bytes\":" + String((unsigned)_instrs[i].octets)
+       + ",\"leaving\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
   }
   return j + "]";
 }

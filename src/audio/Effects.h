@@ -55,6 +55,7 @@ bool inOctaves(const char* name);
 bool applyKeys(uint8_t slot, const String& params, String& reason);
 String status(uint8_t slot);                 // JSON for /api/audio/status and the route
 uint32_t psramBytes();                       // the effects allocated, kept once allocated (§217)
+uint32_t bytesOf(const char* kind);          // what one effect of `kind` holds in PSRAM, 0 unknown (§235)
 
 // ── Audio task ───────────────────────────────────────────────────────────────
 /* At the start of the slot's block: the chain a writer posted is adopted, whole. */

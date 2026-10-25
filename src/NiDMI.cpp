@@ -23,6 +23,7 @@
 #include "audio/SampleStore.h"
 #include "audio/SynthVoice.h"   // with the kits and the sounds: who holds the memory (§217)
 #include "audio/ProcessCosts.h"
+#include "audio/BlockLoads.h"  // each block's load, with the cores' (§235)
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
@@ -234,9 +235,17 @@ extern "C" void nidmi_santeTexte(unsigned short f, char* out, unsigned n) {
 
 /* THE LOAD OF THE TWO CORES (§210), for the app's menu bar: once a second, from the
  * idle task's run-time counter of each core (a read, not a walk of the tasks — no
- * scheduler suspended), sent ONLY to the tabs that asked (CPU_LOAD:1). Never polled. */
+ * scheduler suspended), sent ONLY to the tabs that asked (CPU_LOAD:1). Never polled.
+ * And EACH BLOCK's share of its core (§235), for the blocks of the grid, after a ';':
+ * "NIDMI_CPU:<c0>,<c1>;<block>:<core>:<tenths>,…" — measured only while a tab asks. A
+ * second the flash stopped the cores for more than 5 ms sends the second before: the stop
+ * falls into whatever block was rendering, and would show as its load. */
 static void announceLoad() {
-    static uint32_t next = 0, lastUs = 0, lastIdle[2] = {0, 0};
+    static uint32_t next = 0, lastUs = 0, lastIdle[2] = {0, 0}, lastFlash = 0;
+    constexpr size_t BLOCKS_LEN = BlockLoads::MAX * 18 + 1;   // "4294967295:1:1000," each
+    static char* lastBlocks = nullptr;                         // PSRAM: not .bss
+    if (!lastBlocks) lastBlocks = (char*)heap_caps_calloc(1, BLOCKS_LEN, MALLOC_CAP_SPIRAM);
+    if (!lastBlocks) return;
     const uint32_t now = millis();
     if ((long)(now - next) < 0) return;
     next = now + 1000;
@@ -253,9 +262,28 @@ static void announceLoad() {
     }
     const bool first = (lastUs == 0);
     lastUs = us;
-    if (first || !nidmi_ws_abonne(NIDMI_ABO_CHARGE)) return;
-    char frame[40];
-    snprintf(frame, sizeof frame, "NIDMI_CPU:%d,%d", load[0], load[1]);
+    const uint32_t flash = SurveillantFlash::cyclesSinceBoot();
+    const uint32_t stopped = flash - lastFlash;
+    lastFlash = flash;
+    const bool followed = nidmi_ws_abonne(NIDMI_ABO_CHARGE);
+    const bool was = BlockLoads::enabled();
+    BlockLoads::setEnabled(followed);
+    if (first || !followed) return;
+    if (!was) lastBlocks[0] = '\0';           // switched on now: nothing measured yet
+    else if ((uint64_t)stopped * 200u < (uint64_t)dt * getCpuFrequencyMhz()) {
+        BlockLoads::Load l[BlockLoads::MAX];
+        const uint8_t n = BlockLoads::take(l, BlockLoads::MAX, dt);
+        size_t at = 0;
+        lastBlocks[0] = '\0';
+        for (uint8_t i = 0; i < n && at < BLOCKS_LEN; i++)
+            at += snprintf(lastBlocks + at, BLOCKS_LEN - at, "%s%lu:%u:%u", i ? "," : "",
+                           (unsigned long)l[i].block, (unsigned)l[i].core, (unsigned)l[i].tenths);
+    } else {
+        BlockLoads::Load l[BlockLoads::MAX];
+        BlockLoads::take(l, BlockLoads::MAX, dt);  // the counts move on; the second before is sent
+    }
+    char frame[24 + BLOCKS_LEN];
+    snprintf(frame, sizeof frame, "NIDMI_CPU:%d,%d;%s", load[0], load[1], lastBlocks);
     nidmi_ws_envoyer_aux_abonnes(NIDMI_ABO_CHARGE, frame);
 }
 

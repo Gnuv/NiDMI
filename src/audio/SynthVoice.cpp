@@ -2,6 +2,7 @@
 #include "SynthVoice.h"
 #include "../diag/SurveillantFlash.h"   // the flash's stops, out of what a voice costs (§214)
 #include "ProcessCosts.h"
+#include "BlockLoads.h"
 
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -124,6 +125,7 @@ void taskLoop(void*) {
         /* What its engine costs, declared to the app (§231) — only a render the flash did not
          * stop: what the stop leaves (the cache to fill again) is not the engine's. */
         if (!f) ProcessCosts::noteSynth(s.engineNow, elapsed, FRAMES);
+        BlockLoads::add(0, s.blockId, c);       // its block's load, live, the flash taken out (§235)
         const bool deux = voices[0].enabled && !voices[0].overloaded && voices[0].voice
                        && voices[1].enabled && !voices[1].overloaded && voices[1].voice;
         if (deux) {
@@ -314,10 +316,12 @@ bool take(uint8_t v, float* out, size_t frameCount) {
   return true;
 }
 
+uint32_t bytesPerVoice() { return (uint32_t)(sizeof(plaits::Voice) + POOL + RING * FRAMES * sizeof(float)); }
+
 uint32_t psramBytes() {
   uint32_t n = 0;
   for (const Voice& s : voices)
-    if (s.voice) n += (uint32_t)(sizeof(plaits::Voice) + POOL + RING * FRAMES * sizeof(float));
+    if (s.voice) n += bytesPerVoice();
   return n;
 }
 

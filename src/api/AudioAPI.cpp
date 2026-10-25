@@ -378,6 +378,19 @@ void setupAudioAPI(AsyncWebServer& server) {
         request->send(200, "application/json", ProcessCosts::json());
     });
 
+    /* WHAT EACH BLOCK HOLDS IN MEMORY (§235), for the blocks of the grid: each sound in PSRAM
+     * (a streamed one holds 0: its clips' heads are counted apart, `heads`), each kit held, what
+     * one effect and one synth voice hold once allocated. The app reads it when it connects and
+     * when NIDMI_MEM changes — never polled. Single words of the stores: nothing walked on the SD. */
+    server.on("/api/audio/memory", HTTP_GET, [](AsyncWebServerRequest *request){
+        String j = String("{\"sounds\":") + SampleStore::memoryJson() + ",\"kits\":" + SfzStore::memoryJson()
+                 + ",\"effects\":{\"low-pass\":" + String((unsigned)Effects::bytesOf("low-pass"))
+                 + ",\"ambience\":" + String((unsigned)Effects::bytesOf("ambience"))
+                 + "},\"synth_voice\":" + String((unsigned)SynthVoice::bytesPerVoice())
+                 + ",\"heads\":" + String((unsigned)SdStream::headsBytes()) + "}";
+        request->send(200, "application/json", j);
+    });
+
     /* THE EFFECTS, LIVE (§210, §230): the chain of the cue that plays, whole — the cue's keys
      * `fx` (the effects in signal order, each with its block, its group and its settings) and
      * `fxmix` (the MIX zone's group); `fx` empty: none. An effect that stays the same block keeps

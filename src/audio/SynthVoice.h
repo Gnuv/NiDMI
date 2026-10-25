@@ -58,6 +58,7 @@ bool active(uint8_t v);              // a cue names it, and the guard has not st
 uint32_t bloc(uint8_t v);
 String status(uint8_t v);            // JSON
 uint32_t psramBytes();               // what the voices allocated hold in PSRAM, kept once allocated (§217)
+uint32_t bytesPerVoice();            // what one voice holds in PSRAM once allocated (§235)
 
 // ── Audio task only ──────────────────────────────────────────────────────────
 void noteOn(uint8_t v, uint8_t channel, uint8_t note, uint8_t velocity);
