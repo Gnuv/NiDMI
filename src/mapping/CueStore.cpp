@@ -317,7 +317,12 @@ void _appliquer(const Cue& c) {
    * kit that is leaving frees room: the wish waits; one the cue keeps does not). */
   {
     const String tenus = _valeurDe(c.params, "sfzpre");
-    _kitsCue = _valeurDe(c.params, "sfz");
+    const String joues = _valeurDe(c.params, "sfz");
+    _kitsCue = "";
+    for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {   // the ones it plays: a third is not loaded (§234)
+      const String k = _field(joues, i);
+      if (k.length()) _kitsCue += (_kitsCue.length() ? "," : "") + k;
+    }
     if (tenus.length()) _kitsCue += (_kitsCue.length() ? "," : "") + tenus;
     if (_kitsCue.length() || SfzStore::enMemoire()) SfzStore::entretenir(_kitsCue);
   }
