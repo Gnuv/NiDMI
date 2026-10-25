@@ -514,10 +514,14 @@ void sfz16_note_on(sfz16_engine *eng, uint8_t note, uint8_t velocity) {
     sfz16_instrument *inst = eng->inst;
     if (!inst) return;
 
-    /* retrigger: quick-release existing held voices on the same note */
+    /* retrigger: quick-release existing held voices on the same note, unless
+       the new hit is weaker - then both sound (SFZ's note_selfmask=on). A
+       drum pad behind stripnote() never sends a note-off, so every voice
+       stays held: a pad's weak double trigger, 10 ms after the hit, cut the
+       hit in 5 ms and left only itself ("the sounds get sucked away") */
     for (int i = 0; i < SFZ16_MAX_VOICES; i++) {
         sfz16_voice_state *v = &eng->voices[i];
-        if (v->active && v->note == note && v->held) {
+        if (v->active && v->note == note && v->held && velocity >= v->velocity) {
             v->held = 0;
             v->releasing = 1;
             v->env_stage = S16_ENV_RELEASE;
