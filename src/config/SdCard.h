@@ -69,6 +69,10 @@ const char* state();
 
 /* SampleStore has finished reading storage: the card's sounds may follow. */
 void loadSounds();
+/* The card's sounds are in the store, or will not come: no card declared, a card absent or lost
+ * (once a mount was tried), or no load asked nor running. The cue the board plays by itself at
+ * boot waits for it — its sounds of the SD were not loaded yet (MESURES §236). Any task. */
+bool soundsSettled();
 /* HEADS of streamed clips were requested (SdStream.h): the task reads them, one by one. */
 void loadHeads();
 /* The SFZ store has a wish or housekeeping waiting (SfzStore.h): the task serves it —

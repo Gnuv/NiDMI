@@ -935,6 +935,40 @@ static void publierEtatsTransport(const Cues::Etat& e){
     FluxRegistry::update("sys.autoplay", e.auDemarrage ? 1 : 0);
 }
 
+/* THE CUE THE BOARD PLAYS BY ITSELF — at boot, or when a composition opens — WAITS FOR THE SD'S
+ * SOUNDS (MESURES §236). They load in the sd-card task AFTER the sounds of storage, a few seconds
+ * after the cue was played: its looping sounds of the SD (oncue) found nothing to start, and nothing
+ * started them before the next cue — a board switched on alone played its first cue without them.
+ * The loop starts it once SdCard::soundsSettled() — at most BOOT_PLAY_WAIT_MS later, the card's task
+ * stuck or not. A transport gesture meanwhile (a pedal, the app) has decided: nothing more is done. */
+constexpr uint32_t BOOT_PLAY_WAIT_MS = 30000;
+static bool     bootPlayPending = false;
+static uint32_t bootPlayAskedAt = 0;
+static int      bootPlayIndex   = 0;
+
+static void askBootPlay(){
+    bootPlayPending = true;
+    bootPlayAskedAt = millis();
+    bootPlayIndex = Cues::indexCourant();
+}
+
+static void serveBootPlay(){
+    if (!bootPlayPending) return;
+    const uint32_t waited = millis() - bootPlayAskedAt;
+    const bool settled = SdCard::soundsSettled();
+    if (!settled && waited < BOOT_PLAY_WAIT_MS) return;
+    bootPlayPending = false;
+    if (Cues::enLecture() || Cues::enPause() || Cues::indexCourant() != bootPlayIndex) {
+        NIDMI_WEB_LOG("[cues] lecture au demarrage laissee : le transport a ete touche pendant l'attente des sons");
+        return;
+    }
+    Cues::demarrer();
+    if (settled) NIDMI_WEB_LOG("[cues] lecture au demarrage : cue %d, apres %lu ms d'attente des sons de la SD",
+                               bootPlayIndex + 1, (unsigned long)waited);
+    else NIDMI_WEB_LOG("[cues] lecture au demarrage : cue %d, SANS les sons de la SD — encore en chargement apres %lu s",
+                       bootPlayIndex + 1, (unsigned long)(BOOT_PLAY_WAIT_MS / 1000));
+}
+
 /* CHANGER DE COMPOSITION, C'EST COMME REDEMARRER DESSUS (CONVERGENCE §9.7,
  * MESURES §186) : ce qui joue s'arrete, la source, la chaine et la liste de la
  * nouvelle se relisent, la tete va sur la cue 1, et la lecture part si
@@ -952,7 +986,7 @@ static void rechargerComposition(){
     String son;
     const int moteur = Cues::moteurEmploye(son);
     AudioEngine::preparer(moteur, son.c_str());
-    if (Cues::lectureAuDemarrage()) Cues::demarrer();
+    if (Cues::lectureAuDemarrage()) askBootPlay();     // the loop plays it once the SD's sounds are in (§236)
 }
 
 /* Les demandes de composition des scripts, AVANT le transport : « ouvre la 2 »
@@ -1749,12 +1783,11 @@ void nidmi_loop() {
                 NIDMI_WEB_LOG("[cues] lecture au demarrage SAUTEE : le garde-fou a coupe la restauration");
             else if (nidmi_demarreAVide())
                 NIDMI_WEB_LOG("[cues] lecture au demarrage sautee : demarrage a vide");
-            else {
-                Cues::demarrer();       // la tête est sur la première cue au démarrage
-                NIDMI_WEB_LOG("[cues] lecture au demarrage : cue 1");
-            }
+            else
+                askBootPlay();
         }
     }
+    serveBootPlay();
 
     uint32_t tc = nidmi_section("cues");
     executerRepertoire();           // s("sys.compo")…, avant le transport (§186)

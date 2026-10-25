@@ -29,6 +29,7 @@ uint32_t          _hz       = DEFAULT_FREQUENCY_HZ;
 volatile bool     _wantUnmount = false;
 volatile bool     _wantMount   = false;
 volatile bool     _wantLoad    = false;
+volatile bool     _soundsPending = false;   // a load of the card's sounds is asked or running (§236)
 volatile bool     _wantMeasure = false;
 volatile bool     _wantWiring  = false;
 volatile bool     _wantHeads   = false;
@@ -331,6 +332,7 @@ void _mount() {
   NIDMI_WEB_LOG("[SD] montee : %s, %lu Mo, a %lu MHz (CMD8 : 0x%lX)",
                 SdSpiDisk::type(), (unsigned long)(_capacity / (1024ULL * 1024ULL)),
                 (unsigned long)(_hz / 1000000UL), (unsigned long)SdSpiDisk::cmd8Echo());
+  _soundsPending = true;
   _wantLoad = true;
   _wantHeads = true;                                    // clip heads may have been waiting for the card
   _wantSfz = true;                                      // so may an SFZ kit that was asked for (SfzStore::servir)
@@ -341,7 +343,9 @@ void _mount() {
  * find it. Nothing if the store was never loaded: chargerTout() will call us back
  * when a sound engine needs it. */
 void _loadSounds() {
-  if (!_mounted || !SampleStore::charge()) return;
+  /* The store not loaded yet: no sound engine wants sounds — nothing to wait for. It calls
+   * loadSounds() when one does. */
+  if (!_mounted || !SampleStore::charge()) { _soundsPending = false; return; }
   char names[SAMPLES_MAX][SampleStore::NOM_MAX];
   const uint8_t n = SampleStore::sdSoundNames(names, SAMPLES_MAX);
   uint8_t good = 0;
@@ -351,6 +355,7 @@ void _loadSounds() {
     else { SampleStore::noteRefused(names[i], reason.c_str()); NIDMI_WEB_LOG("[SD] %s ignore : %s", names[i], reason.c_str()); }
   }
   NIDMI_WEB_LOG("[SD] %u son(s) precharge(s) sur %u dans %s", (unsigned)good, (unsigned)n, FOLDER);
+  _soundsPending = false;
 }
 
 /* THE MEASUREMENT: read a .wav end to end, as the streamed reading would — in
@@ -603,8 +608,15 @@ void requestSfz() {
 
 void loadSounds() {
   if (!_mounted) return;
+  _soundsPending = true;
   _wantLoad = true;
   _startTask();
+}
+
+bool soundsSettled() {
+  if (!_declared) return true;
+  if (!_mounted) return _attempts > 0 && !_taskAlive;    // absent or lost (a mount tried, none running): never waited for
+  return !_soundsPending && !_wantLoad;
 }
 
 void simulateStale() {
