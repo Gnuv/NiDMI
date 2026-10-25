@@ -284,8 +284,12 @@ struct EnvCue { float now = 1.0f, target = 1.0f, step = 0.0f; uint32_t wait = 0;
 struct VoixEch {
   bool     actif  = false;
   uint8_t  iEch   = 0;        // index dans SampleStore
-  double   pos    = 0.0;
-  double   pas    = 1.0;
+  /* WHERE IT READS, AND HOW FAST: fixed point 32.32 — the frame in the high word, the fraction
+   * in the low one (MESURES §236). They were doubles: the S3 computes only floats in hardware,
+   * and the seven soft-float routines a sample took made a voice cost 505 cycles per sample, 10 %
+   * of core 1. A 32-bit fraction is as fine as the double's over a sound's length. */
+  uint64_t pos    = 0;
+  uint64_t pas    = 1ull << 32;
   float    gain   = 0.0f;     // gain COURANT, qui glisse vers `cible`
   float    cible  = 0.0f;     // velo x gain du bloc (MESURES §165)
   float    velo   = 1.0f;     // part de la velocite : 1 sur cue
@@ -317,6 +321,9 @@ struct VoixEch {
  * gain en plein son s'entend comme un claquement ; 63 % en 10 ms, le reste en
  * quelques dizaines, c'est sous l'oreille pour un geste de potentiometre. */
 constexpr float LISSAGE_GAIN = 1.0f / 480.0f;
+/* A rate (frames of the sound per output sample) in 32.32 fixed point — at a voice's start only. */
+static inline uint64_t _fixedStep(double rate) { return (uint64_t)(rate * 4294967296.0 + 0.5); }
+static inline uint64_t _fixedFrame(uint32_t frame) { return (uint64_t)frame << 32; }
 /* LE PLAFOND D'UNE VOIX : +12 dB, celui des faders de l'app (VOL_GAIN_MAX,
  * 3,981). On bornait a 1 : un fader pousse au-dessus de 0 dB ne changeait rien
  * sur la carte (MESURES §166). Au-dela de 1, la somme peut saturer — comme
@@ -632,8 +639,8 @@ bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   vo.head = SampleStore::isStreamed((uint8_t)c.iEch) ? c.head : (int8_t)-1;
   vo.headPcm = hv.pcm; vo.headStart = hv.start; vo.headFrames = hv.frames;
   vo.iEch   = (uint8_t)c.iEch;
-  vo.pas    = double(SampleStore::frequence(vo.iEch)) / double(srReel);
-  vo.pos    = double(c.debut);
+  vo.pas    = _fixedStep(double(SampleStore::frequence(vo.iEch)) / double(srReel));
+  vo.pos    = _fixedFrame(c.debut);
   vo.debutT = c.debut;
   vo.finT   = (c.fin > c.debut && c.fin < n) ? c.fin : 0;
   vo.boucle = c.boucle;
@@ -859,11 +866,11 @@ void _suivreLesListes() {
 
 /* A frame of a streamed voice: its head first ([headStart, headStart + headFrames), in PSRAM),
  * then the stream's buffer. False: not (or no longer) there — the caller yields silence. */
-static inline bool _readHead(const VoixEch& vo, uint32_t t, int16_t& g, int16_t& d) {
+static inline bool _readHead(const VoixEch& vo, bool st, uint32_t t, int16_t& g, int16_t& d) {
   if (t >= vo.headStart && t - vo.headStart < vo.headFrames) {
     const uint32_t j = t - vo.headStart;
-    if (SampleStore::stereo(vo.iEch)) { g = vo.headPcm[j * 2]; d = vo.headPcm[j * 2 + 1]; }
-    else                              { g = d = vo.headPcm[j]; }
+    if (st) { g = vo.headPcm[j * 2]; d = vo.headPcm[j * 2 + 1]; }
+    else    { g = d = vo.headPcm[j]; }
     return true;
   }
   return vo.stream >= 0 && SdStream::read(vo.stream, t, g, d);
@@ -879,7 +886,7 @@ void _sweepStreams() {
     if (!(vo.actif && vo.stream == f)) SdStream::release(f);
   }
   for (uint8_t v = 0; v < VOIX_MAX; v++)
-    if (voixEch[v].actif && voixEch[v].stream >= 0) SdStream::position(voixEch[v].stream, (uint32_t)voixEch[v].pos);
+    if (voixEch[v].actif && voixEch[v].stream >= 0) SdStream::position(voixEch[v].stream, (uint32_t)(voixEch[v].pos >> 32));
 }
 
 /* THE MASTER (§212): the two cue slots, each through its effects and at its envelope, add up
@@ -906,30 +913,37 @@ void _notePeak(PeakBlock& p, uint32_t bloc, const float* l, const float* r, floa
  * its data marks `underruns`. */
 static void _mixVoice(uint8_t v, float* l, float* r, uint8_t& underruns, bool mesurer) {
   constexpr float IN = 1.0f / 32768.0f;
+  constexpr float FRACTION = 1.0f / 4294967296.0f;
   VoixEch& vo = voixEch[v];
+  /* WHAT IT READS, asked once a block — and again when a list chains to another clip. A
+   * STREAMED VOICE has no PCM in memory: it reads its head, then the stream's buffer
+   * (_readHead). The others read the store, as always. A sound retired meanwhile: only the
+   * block under way may still read it, its memory is given back two blocks later
+   * (rendreApresLecture) — the next block finds it gone. */
+  const int16_t* pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
+  size_t         n   = SampleStore::trames(vo.iEch);
+  bool           st  = SampleStore::stereo(vo.iEch);
   /* MELANGE. Chaque voix lit son propre echantillon a son propre pas, et on
    * somme en float avant de borner : additionner en int16 replierait au lieu
    * de saturer, ce qui s'entend comme un craquement franc. */
   for (size_t i = 0; i < FRAMES; i++) {
-    /* A STREAMED VOICE has no PCM in memory: it reads its head, then the stream's
-     * buffer (_readHead). The others read the store, as always. */
-    const int16_t* pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
-    size_t         n   = SampleStore::trames(vo.iEch);
     if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; return; }
     /* Fin atteinte : on reboucle, ou la voix s'eteint. Le test precede la
      * lecture pour que le reenroulement ne rejoue pas deux fois la derniere
      * trame a chaque tour. LA FIN est celle du fichier, ou celle de la
      * selection d'un clip de play list (§196), qui reboucle sur son debut —
      * et a la fin d'un clip, la liste peut enchainer sur la meme voix. */
-    size_t fin = (vo.finT > 1 && vo.finT < n) ? vo.finT : n;
-    if (vo.pos >= double(fin - 1)) {
+    const size_t   fin  = (vo.finT > 1 && vo.finT < n) ? vo.finT : n;
+    const uint64_t last = _fixedFrame((uint32_t)(fin - 1));
+    if (vo.pos >= last) {
       if (vo.boucle) {
-        vo.pos = double(vo.debutT) + (vo.pos - double(fin - 1));
-        if (vo.pos >= double(fin - 1)) vo.pos = double(vo.debutT);
+        vo.pos = _fixedFrame(vo.debutT) + (vo.pos - last);
+        if (vo.pos >= last) vo.pos = _fixedFrame(vo.debutT);
         if (vo.stream >= 0) SdStream::restart(vo.stream);   // the voice restarts from the head: the stream repositions
       } else if (vo.liste >= 0 && _clipSuivant(vo)) {
         pcm = (vo.head >= 0) ? nullptr : SampleStore::donnees(vo.iEch);
         n   = SampleStore::trames(vo.iEch);
+        st  = SampleStore::stereo(vo.iEch);
         if ((vo.head < 0 && !pcm) || n < 2) { vo.actif = false; return; }
       } else { vo.actif = false; return; }
     }
@@ -945,15 +959,14 @@ static void _mixVoice(uint8_t v, float* l, float* r, uint8_t& underruns, bool me
       if (ecart != 0.0f)
         vo.gain = (fabsf(ecart) < 1e-4f) ? vo.cible : vo.gain + ecart * LISSAGE_GAIN;
     }
-    const size_t k = (size_t)vo.pos;
-    const float  f = float(vo.pos - double(k));
-    const bool  st = SampleStore::stereo(vo.iEch);
+    const size_t k = (size_t)(vo.pos >> 32);
+    const float  f = float((uint32_t)vo.pos) * FRACTION;
     int32_t eg, ed;
     if (vo.head >= 0) {
       /* The head, then the buffer; what is missing is SILENCE — never a wait. */
       int16_t l0 = 0, r0 = 0, l1 = 0, r1 = 0;
-      const bool ok0 = _readHead(vo, (uint32_t)k, l0, r0);
-      const bool ok1 = ok0 && _readHead(vo, (uint32_t)k + 1, l1, r1);
+      const bool ok0 = _readHead(vo, st, (uint32_t)k, l0, r0);
+      const bool ok1 = ok0 && _readHead(vo, st, (uint32_t)k + 1, l1, r1);
       if (!ok0)      underruns |= (uint8_t)(1u << v);
       else if (!ok1) { l1 = l0; r1 = r0; }
       eg = (int32_t)(l0 + f * (l1 - l0));
@@ -2115,9 +2128,9 @@ bool declencherEchantillon(const char* nom, bool boucle, float gain, float demiT
   __sync_synchronize();
   vo->stream = -1; vo->head = -1;      // a voice stolen from a streamed clip keeps neither its stream nor its head
   vo->iEch   = (uint8_t)i;
-  vo->pas    = (double(SampleStore::frequence((uint8_t)i)) / double(srReel))
-             * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0));
-  vo->pos    = 0.0;
+  vo->pas    = _fixedStep((double(SampleStore::frequence((uint8_t)i)) / double(srReel))
+                          * ((demiTons == 0.0f) ? 1.0 : pow(2.0, double(demiTons) / 12.0)));
+  vo->pos    = 0;
   vo->velo   = !(velo >= 0.f) ? 0.0f : ((velo > 1.f) ? 1.0f : velo);
   vo->cible  = vo->velo * ((gain < 0.f) ? 1.0f : _borneGain(gain));
   vo->gain   = vo->cible;              // l'attaque part a son niveau : pas de fondu
