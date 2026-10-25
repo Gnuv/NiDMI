@@ -326,7 +326,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
     if (request->hasParam("decharger")) {
       if (Concert::refuse(request, "dechargement des instruments SFZ refuse : la carte est verrouillee pour le concert")) return;
       String raison;
-      for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) SfzStore::proposer(m, "", raison);   // both engines (§212)
+      for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) SfzStore::proposer(m, "", raison);   // every engine (§212, §234)
       SfzStore::entretenir("");
     }
     if (request->hasParam("reset_cost")) SfzStore::resetCost();                  // counters back to zero: a trial starts

@@ -161,7 +161,8 @@ void setupAudioAPI(AsyncWebServer& server) {
            l'app le dise AVANT le concert. gen bouge a chaque changement. */
         /* THE SYNTH VOICE AND THE EFFECTS (§210): what plays, what the guard
            stopped, how late the core 0 task was. */
-        /* THE CUE THAT PLAYS (§212): its synth voice, its effects, its kit — and the two
+        /* THE CUE THAT PLAYS (§212): its synth voice, its effects, its kits (the first under `sfz`,
+           whose `voix` counts every engine's; the second under `sfz2`, §234) — and the two
            slots, with what each one plays (`slots`, `current`, `leaving`). */
         const uint8_t ici = (AudioEngine::slotCourant() >= 0) ? (uint8_t)AudioEngine::slotCourant() : 0;
         const int8_t voixIci = AudioEngine::synthDuSlot(ici);
@@ -181,7 +182,9 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"regions\":" + String(SfzStore::regions(kitIci)) + ",";
         json += "\"samples\":" + String(SfzStore::samples(kitIci)) + ",";
         json += "\"octets\":" + String((unsigned)SfzStore::octets()) + ",";
-        json += "\"voix\":" + String(SfzStore::voixActives(0) + SfzStore::voixActives(1)) + ",";
+        int voixKits = 0;                                  // every engine's (§234: two kits a cue, two cues)
+        for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) voixKits += SfzStore::voixActives(m);
+        json += "\"voix\":" + String(voixKits) + ",";
         json += "\"voices_max\":" + String(SfzStore::maxVoices(kitIci)) + ",";   // §220, 0 = all
         json += "\"gen\":" + String((unsigned)SfzStore::generation()) + ",";
         json += "\"arme\":" + String(SfzStore::notesArmees(kitIci) ? "true" : "false") + ",";
@@ -192,6 +195,21 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"inst\":" + String(SfzStore::moteurInstValide(kitIci) ? "true" : "false") + ",";
         json += "\"region0\":" + SfzStore::regionPremiere(kitIci) + ",";
         json += "\"erreur\":\"" + SfzStore::echapper(SfzStore::erreur()) + "\"},";
+        /* ITS SECOND KIT (§234), or null: what is the engine's own — its "voix" are its own. */
+        const int8_t kit2Ici = AudioEngine::kitDuSlot(ici, 1);
+        if (kit2Ici < 0) json += "\"sfz2\":null,";
+        else {
+            const uint8_t m = (uint8_t)kit2Ici;
+            json += "\"sfz2\":{\"chemin\":\"" + SfzStore::echapper(SfzStore::chemin(m)) + "\",";
+            json += "\"demande\":\"" + SfzStore::echapper(SfzStore::demande(m)) + "\",";
+            json += "\"bloc\":" + String((unsigned)SfzStore::blocId(m)) + ",";
+            json += "\"gain\":" + String(SfzStore::gainCible(m), 3) + ",";
+            json += "\"regions\":" + String(SfzStore::regions(m)) + ",";
+            json += "\"samples\":" + String(SfzStore::samples(m)) + ",";
+            json += "\"voix\":" + String(SfzStore::voixActives(m)) + ",";
+            json += "\"voices_max\":" + String(SfzStore::maxVoices(m)) + ",";
+            json += "\"arme\":" + String(SfzStore::notesArmees(m) ? "true" : "false") + "},";
+        }
         json += "\"engines_substitues\":\"" + String(AudioEngine::moteursSubstitues()) + "\",";
         // Le firmware expose SON seuil : l'UI ne doit pas en coder un en dur,
         // sinon le bouton promet ce que la carte refuse (le seuil dépend de la
@@ -599,12 +617,32 @@ void setupAudioAPI(AsyncWebServer& server) {
                 return;
             }
         }
-        /* The engine of the cue that plays (§212): its own, or the one the other slot does not
-         * hold. */
+        /* The engine of the cue that plays (§212): the one of its kits that `bloc` plays (§234: two),
+         * else a kit of its own it does not play yet, else its first; without `bloc`, its first. A
+         * kit it does not hold yet takes an engine no slot holds. */
         const int8_t sc = AudioEngine::slotCourant();
         const uint8_t ici = (sc >= 0) ? (uint8_t)sc : 0;
-        int8_t k = AudioEngine::kitDuSlot(ici);
-        if (k < 0) { k = (AudioEngine::kitDuSlot(ici ^ 1) == 0) ? 1 : 0; AudioEngine::fixerKitSlot(ici, k); }
+        const uint32_t blocDemande = request->hasParam("bloc", true)
+                                   ? (uint32_t)request->getParam("bloc", true)->value().toInt() : 0;
+        uint8_t i = 0;
+        if (blocDemande) {
+            int8_t sien = -1, libre = -1;
+            for (uint8_t j = 0; j < AudioEngine::KITS_PER_SLOT; j++) {
+                const int8_t m = AudioEngine::kitDuSlot(ici, j);
+                if (m >= 0 && sien < 0 && SfzStore::blocId((uint8_t)m) == blocDemande) sien = (int8_t)j;
+                if (m < 0 && libre < 0) libre = (int8_t)j;
+            }
+            i = (uint8_t)(sien >= 0 ? sien : (libre >= 0 ? libre : 0));
+        }
+        int8_t k = AudioEngine::kitDuSlot(ici, i);
+        if (k < 0) {
+            k = AudioEngine::moteurKitLibre();
+            if (k < 0) {
+                request->send(409, "application/json", "{\"status\":\"error\",\"message\":\"aucun moteur SFZ libre\"}");
+                return;
+            }
+            AudioEngine::fixerKitSlot(ici, i, k);
+        }
         /* Le bloc de l'app qui demande le kit, et son gain (faders compris) : la route vivante
          * du fader le retrouvera par cet identifiant, comme pour un son. */
         if (request->hasParam("bloc", true))

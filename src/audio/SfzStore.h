@@ -44,12 +44,13 @@ constexpr size_t BUDGET_PSRAM = 4 * 1024 * 1024;
 constexpr int SIMULTANES = 4;
 // A path (relative to /sfz) longer than this is refused, never cut.
 constexpr int CHEMIN_MAX = 96;
-/* TWO ENGINES (§212): during a cross-fade the leaving cue's kit and the arriving cue's both
- * play — the cue slots take one each (a kit that goes on from a cue to the next is handed
- * over with its ringing voices). The instruments themselves stay in the one pool: two
- * engines playing the same kit share its PCM. Engine 0 lives in internal RAM, engine 1 in
- * PSRAM, taken the first time a cue asks for it. */
-constexpr uint8_t MOTEURS = 2;
+/* FOUR ENGINES (§212, §234): a cue plays up to two kits on the same notes (AudioEngine::
+ * KITS_PER_SLOT), and during a cross-fade the leaving cue's kits and the arriving cue's all
+ * play — two per cue slot (a kit that goes on from a cue to the next is handed over with its
+ * ringing voices). The instruments themselves stay in the one pool: two engines playing the
+ * same kit share its PCM. Engine 0 lives in internal RAM, the others in PSRAM, each taken the
+ * first time a cue asks for it. */
+constexpr uint8_t MOTEURS = 4;
 
 // ── Any task: deposit, never wait ───────────────────────────────────────────
 /* Make `chemin` (relative to /sfz, e.g. "kit-test/kit.sfz") the playing
@@ -69,7 +70,7 @@ void entretenir(const String& employesCsv);
 void servir();
 
 // ── Audio task only ─────────────────────────────────────────────────────────
-void adopter();                       // block start: swap the proposed instruments, both engines
+void adopter();                       // block start: swap the proposed instruments, every engine
 bool notesArmees(uint8_t moteur);     // a cue routes notes to that engine
 void noteOn(uint8_t moteur, uint8_t note, uint8_t velo);
 void noteOff(uint8_t moteur, uint8_t note);

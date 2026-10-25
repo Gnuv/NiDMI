@@ -41,6 +41,9 @@ constexpr uint32_t SAMPLE_RATE = 48000;
 /* TWO CUE SLOTS (MESURES §212): the departure case and the arrival case play at the same time
  * during a cross-fade — no more. */
 constexpr uint8_t CUE_SLOTS = 2;
+/* TWO SFZ KITS PER CUE (MESURES §234): both play the notes their channel and group give them —
+ * two kits on the same pads, as in June. Each its own engine (SfzStore::MOTEURS = two per slot). */
+constexpr uint8_t KITS_PER_SLOT = 2;
 constexpr int      VOIX        = 4;
 
 // Démarre l'I2S et la tâche si ce n'est pas déjà fait. Sûr à appeler souvent.
@@ -127,8 +130,9 @@ void controleKits(uint8_t cc, uint8_t valeur, Pour pour, uint8_t group = GROUP_A
 /* One synth parameter (harmonics, timbre, morph, decay, lpg_colour, drone), for the voices of
  * the cue `pour` — the CC table (CcMap), §212. */
 void fixerParamSynth(const char* nom, float valeur, Pour pour);
-/* The channels of the play-sf keyboard and of the SFZ kit of the cue that plays (0 = all). */
-void fixerCanaux(uint8_t clavier, uint8_t sfz);
+/* The channels of the play-sf keyboard and of the SFZ kits of the cue that plays (0 = all):
+ * `kits` holds KITS_PER_SLOT of them, in the cue's order. */
+void fixerCanaux(uint8_t clavier, const uint8_t* kits);
 
 /* ── THE CUE SLOTS (MESURES §212) ────────────────────────────────────────────
  * The cue sequencer (CueStore, loopTask) moves the cues through the two slots; the audio
@@ -149,11 +153,14 @@ void arriverSlot(uint8_t slot, float delayS, float attackS, float sustain);
 void quitterSlot(uint8_t slot, float releaseS);
 void couperSlot(uint8_t slot);
 void libererSlot(uint8_t slot);
-/* The slot's SFZ engine and synth voice (-1: none) — the cue picks them (a kit or a voice
- * that goes on from the leaving cue is handed over). */
-int8_t kitDuSlot(uint8_t slot);
+/* The slot's SFZ engines (its kit `i` < KITS_PER_SLOT) and synth voice (-1: none) — the cue
+ * picks them (a kit or a voice that goes on from the leaving cue is handed over). */
+int8_t kitDuSlot(uint8_t slot, uint8_t i = 0);
 int8_t synthDuSlot(uint8_t slot);
-void   fixerKitSlot(uint8_t slot, int8_t moteur);
+void   fixerKitSlot(uint8_t slot, uint8_t i, int8_t moteur);
+/* An SFZ engine no slot holds, -1 if none (there are two per slot: never, unless the API asks
+ * for more). */
+int8_t moteurKitLibre();
 void   fixerSynthSlot(uint8_t slot, int8_t voix);
 /* THE SECOND VOICE of a cue in two voices (§214): the two take turns on the notes. */
 int8_t synth2DuSlot(uint8_t slot);

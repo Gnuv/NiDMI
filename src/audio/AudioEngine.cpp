@@ -364,8 +364,8 @@ struct CueSlot {
   volatile uint32_t gen = 0;                // bumps when a cue arrives in it (STOP spares a newer one)
   /* Its instruments, written by the cue while the slot is free or just arrived. */
   Clavier           clavier;                // the play-sf keyboard (nom "": none)
-  volatile int8_t   kit = -1;               // its SfzStore engine, -1 none
-  volatile uint8_t  kitCanal = 0;           // the kit's channel, its track's (0: all) — §210
+  volatile int8_t   kit[KITS_PER_SLOT] = {-1, -1};   // its SfzStore engines, -1 none (§234: two kits)
+  volatile uint8_t  kitCanal[KITS_PER_SLOT] = {};    // each kit's channel, its track's (0: all) — §210
   volatile int8_t   synth = -1;             // its SynthVoice voice, -1 none
   volatile int8_t   synth2 = -1;            // its second voice, the cue in two voices (§214), -1 none
   uint8_t           prochaine = 0;          // audio task: which of the two takes the next note
@@ -376,6 +376,8 @@ struct CueSlot {
   volatile uint8_t  nGroups = 0;
 };
 CueSlot           slots[CUE_SLOTS];
+static_assert(KITS_PER_SLOT == 2, "CueSlot::kit's initializer is written out for two");
+static_assert(SfzStore::MOTEURS >= CUE_SLOTS * KITS_PER_SLOT, "an SFZ engine for every kit of both slots");
 
 /* The group of an instrument block in a slot (§221): 0 when its cue does not place it. */
 static uint8_t _groupOf(const CueSlot& c, uint32_t bloc) {
@@ -386,12 +388,13 @@ static uint8_t _groupOf(const CueSlot& c, uint32_t bloc) {
 static inline bool _forGroup(uint8_t group, const CueSlot& c, uint32_t bloc) {
   return group == GROUP_ALL || _groupOf(c, bloc) == group;
 }
-/* THE METERS OF THE OTHER INSTRUMENTS (MESURES §220): the SFZ kit and the synth voice of each slot,
+/* THE METERS OF THE OTHER INSTRUMENTS (MESURES §220): the SFZ kits (one meter per engine: one slot
+ * holds it at a time, §234) and the synth voice of each slot,
  * their peak since the last reading, after their gain — as a sample voice's (picG/picD), in int16
  * units. Written by the audio task, read and reset by releverCretes, without a lock: a peak can be
  * lost there, a meter does not notice. */
 struct PeakBlock { uint32_t bloc = 0; uint16_t g = 0, d = 0; };
-PeakBlock kitPeak[CUE_SLOTS], synthPeak[CUE_SLOTS];
+PeakBlock kitPeak[SfzStore::MOTEURS], synthPeak[CUE_SLOTS];
 volatile int8_t   slotCurrent = -1;         // the cue that plays (loopTask writes, anyone reads)
 volatile int8_t   slotLeaving = -1;         // the one in its Release, -1 none
 
@@ -455,7 +458,7 @@ static void _drainSlot(uint8_t s) {
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     if (voixEch[v].actif && voixEch[v].slot == s) voixEch[v].actif = false;
   _desarmerListes(s);
-  if (slots[s].kit >= 0) SfzStore::toutEteindre((uint8_t)slots[s].kit);
+  for (const int8_t k : slots[s].kit) if (k >= 0) SfzStore::toutEteindre((uint8_t)k);
   Effects::clear(s);
   slots[s].env = EnvCue{};
   slots[s].cut = 1.0f;
@@ -1000,14 +1003,15 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
   for (uint8_t v = 0; v < VOIX_MAX; v++)
     lane[v] = (voixEch[v].actif && voixEch[v].slot == s) ? laneOf(voixEch[v].bloc) : DIRECT;
   const bool mesurer = mesureVu && !gSilence;
-  /* THE SFZ ENGINE of the slot (§207): the kernel renders float into two scratch buffers.
-   * False when nothing plays. */
-  static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state (the slots in turn)
-  const int8_t kit = c.kit;
-  const bool sfz = kit >= 0 && SfzStore::rendreBloc((uint8_t)kit, sfzG, sfzD, FRAMES);
-  const float sfzK = (kit >= 0) ? SfzStore::gainLisse((uint8_t)kit) : 0.0f;   // the block's fader, glided (§208)
-  const uint8_t sfzLane = sfz ? laneOf(SfzStore::blocId((uint8_t)kit)) : DIRECT;
-  if (sfz && mesurer) _notePeak(kitPeak[s], SfzStore::blocId((uint8_t)kit), sfzG, sfzD, sfzK);   // §220
+  /* THE SFZ ENGINES of the slot (§207; two kits, §234): each renders float into the scratch
+   * buffers inside the sum of its lane — once a block, since every lane is summed once. */
+  static float sfzG[FRAMES], sfzD[FRAMES];   // ~1 ko, internal RAM: audio-path state (the kits in turn)
+  int8_t kitM[KITS_PER_SLOT]; float kitK[KITS_PER_SLOT]; uint8_t kitLane[KITS_PER_SLOT];
+  for (uint8_t k = 0; k < KITS_PER_SLOT; k++) {
+    kitM[k] = c.kit[k];
+    kitK[k] = (kitM[k] >= 0) ? SfzStore::gainLisse((uint8_t)kitM[k]) : 0.0f;   // the block's fader, glided (§208)
+    kitLane[k] = (kitM[k] >= 0) ? laneOf(SfzStore::blocId((uint8_t)kitM[k])) : DIRECT;
+  }
   /* THE SLOT'S SYNTH VOICE, or its two (rendered ahead on core 0; the same block, the same
    * routing — §214). */
   const int8_t sv = c.synth, sv2 = c.synth2;
@@ -1021,7 +1025,7 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
     synthLane = laneOf(sb);
     if (mesurer) _notePeak(synthPeak[s], sb, synthMono, synthMono, 1.0f);   // its meter (§220)
   }
-  /* One sum: the voices of that lane, and the kit and the synth voice when they are in it. */
+  /* One sum: the voices of that lane, and the kits and the synth voice when they are in it. */
   auto sum = [&](uint8_t want, float* l, float* r) {
     memset(l, 0, FRAMES * sizeof(float));
     memset(r, 0, FRAMES * sizeof(float));
@@ -1036,8 +1040,13 @@ void rendreSlot(uint8_t s, uint8_t& underruns) {
                            : vo.head >= 0 ? ProcessCosts::PLAY_LIST_STREAM : ProcessCosts::PLAY_LIST,
                            ESP.getCycleCount() - t, FRAMES);
     }
-    if (sfz && sfzLane == want)
-      for (size_t i = 0; i < FRAMES; i++) { l[i] += sfzG[i] * sfzK; r[i] += sfzD[i] * sfzK; }
+    for (uint8_t k = 0; k < KITS_PER_SLOT; k++) {
+      const int8_t m = kitM[k];
+      if (m < 0 || kitLane[k] != want || !SfzStore::rendreBloc((uint8_t)m, sfzG, sfzD, FRAMES)) continue;
+      const float g = kitK[k];
+      if (mesurer) _notePeak(kitPeak[m], SfzStore::blocId((uint8_t)m), sfzG, sfzD, g);   // §220
+      for (size_t i = 0; i < FRAMES; i++) { l[i] += sfzG[i] * g; r[i] += sfzD[i] * g; }
+    }
     if (synthSonne && synthLane == want)
       for (size_t i = 0; i < FRAMES; i++) { l[i] += synthMono[i]; r[i] += synthMono[i]; }
   };
@@ -1138,9 +1147,10 @@ void appliquer(const Evenement& e) {
         else if (b) sv = sv2;
       }
       if (synthIci && sv >= 0) SynthVoice::noteOn((uint8_t)sv, e.canal, e.note, e.velo);
-      const int8_t kit = c.kit;
-      if (kit >= 0 && SfzStore::notesArmees((uint8_t)kit) && _ecoute(c.kitCanal, e.canal)
-          && _forGroup(e.group, c, SfzStore::blocId((uint8_t)kit))) {
+      for (uint8_t k = 0; k < KITS_PER_SLOT; k++) {   // each kit of the slot (§234), on its channel and group
+        const int8_t kit = c.kit[k];
+        if (!(kit >= 0 && SfzStore::notesArmees((uint8_t)kit) && _ecoute(c.kitCanal[k], e.canal)
+              && _forGroup(e.group, c, SfzStore::blocId((uint8_t)kit)))) continue;
         if (e.velo == 0) SfzStore::noteOff((uint8_t)kit, e.note);
         else             SfzStore::noteOn((uint8_t)kit, e.note, e.velo);
       }
@@ -1798,15 +1808,14 @@ uint8_t masqueSlots(Pour pour) { return _masque(pour); }
 
 void controleKits(uint8_t cc, uint8_t valeur, Pour pour, uint8_t group) {
   const int8_t sl = slotLeaving;
-  const int8_t kl = (sl >= 0) ? slots[sl].kit : -1;
   for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) {
-    const bool sien = (kl >= 0 && m == (uint8_t)kl);
+    /* The slot that plays this kit, if one does: whose branch it is, and its group (§222). */
+    int8_t chez = -1;
+    for (uint8_t s = 0; s < CUE_SLOTS && chez < 0; s++)
+      for (const int8_t k : slots[s].kit) if (k == (int8_t)m) { chez = (int8_t)s; break; }
+    const bool sien = (sl >= 0 && chez == sl);
     if (!(pour == Pour::SORTANTE ? sien : (pour == Pour::COURANTE ? !sien : true))) continue;
-    /* The slot that plays this kit says its group (§222). */
-    bool ici = true;
-    if (group != GROUP_ALL)
-      for (uint8_t s = 0; s < CUE_SLOTS; s++)
-        if (slots[s].kit == (int8_t)m) { ici = _forGroup(group, slots[s], SfzStore::blocId(m)); break; }
+    const bool ici = group == GROUP_ALL || chez < 0 || _forGroup(group, slots[chez], SfzStore::blocId(m));
     if (ici) SfzStore::controle(m, cc, valeur);
   }
 }
@@ -1861,8 +1870,8 @@ uint32_t instrumentGroups() {
     if (!(vivants & (1u << s))) continue;
     const CueSlot& c = slots[s];
     if (c.clavier.nom[0]) m |= 1u << _groupOf(c, c.clavier.bloc);
-    const int8_t kit = c.kit, sv = c.synth;
-    if (kit >= 0) m |= 1u << _groupOf(c, SfzStore::blocId((uint8_t)kit));
+    const int8_t sv = c.synth;
+    for (const int8_t kit : c.kit) if (kit >= 0) m |= 1u << _groupOf(c, SfzStore::blocId((uint8_t)kit));
     if (sv >= 0)  m |= 1u << _groupOf(c, SynthVoice::bloc((uint8_t)sv));
     if (banques) {
       const Banque& b = banques[banqueActive];
@@ -1953,14 +1962,15 @@ void libererSlot(uint8_t slot) {
   if (slot >= CUE_SLOTS) return;
   CueSlot& c = slots[slot];
   c.clavier = Clavier{};
-  c.kit = -1; c.kitCanal = 0; c.synth = -1; c.synth2 = -1;
+  for (uint8_t k = 0; k < KITS_PER_SLOT; k++) { c.kit[k] = -1; c.kitCanal[k] = 0; }
+  c.synth = -1; c.synth2 = -1;
   c.nGroups = 0;
   __sync_synchronize();
   c.state = SLOT_FREE;
   if (slotLeaving == (int8_t)slot) slotLeaving = -1;
 }
 
-int8_t kitDuSlot(uint8_t slot)   { return slot < CUE_SLOTS ? slots[slot].kit : -1; }
+int8_t kitDuSlot(uint8_t slot, uint8_t i) { return (slot < CUE_SLOTS && i < KITS_PER_SLOT) ? slots[slot].kit[i] : -1; }
 int8_t synthDuSlot(uint8_t slot) { return slot < CUE_SLOTS ? slots[slot].synth : -1; }
 int8_t synth2DuSlot(uint8_t slot) { return slot < CUE_SLOTS ? slots[slot].synth2 : -1; }
 void   fixerSynth2Slot(uint8_t slot, int8_t voix) { if (slot < CUE_SLOTS) slots[slot].synth2 = voix; }
@@ -1995,7 +2005,15 @@ int8_t voixSynthLibre() {
   }
   return -1;
 }
-void   fixerKitSlot(uint8_t slot, int8_t moteur) { if (slot < CUE_SLOTS) slots[slot].kit = moteur; }
+void   fixerKitSlot(uint8_t slot, uint8_t i, int8_t moteur) { if (slot < CUE_SLOTS && i < KITS_PER_SLOT) slots[slot].kit[i] = moteur; }
+int8_t moteurKitLibre() {
+  for (uint8_t m = 0; m < SfzStore::MOTEURS; m++) {
+    bool tenu = false;
+    for (const CueSlot& c : slots) for (const int8_t k : c.kit) tenu = tenu || k == (int8_t)m;
+    if (!tenu) return (int8_t)m;
+  }
+  return -1;
+}
 void   fixerSynthSlot(uint8_t slot, int8_t voix) { if (slot < CUE_SLOTS) slots[slot].synth = voix; }
 
 String etatSlots() {
@@ -2009,11 +2027,11 @@ String etatSlots() {
     if (banques) for (uint8_t li = 0; li < banques[banqueActive].n; li++) listes += (banques[banqueActive].listes[li].slot == s) ? 1 : 0;
     char t[400];
     snprintf(t, sizeof t, "%s{\"slot\":%u,\"state\":\"%s\",\"level\":%.3f,\"target\":%.3f,\"cut\":%.3f,"
-                          "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"keyboard_poly\":%u,\"kit\":%d,"
+                          "\"voices\":%u,\"lists\":%u,\"keyboard\":\"%s\",\"keyboard_ch\":%u,\"keyboard_poly\":%u,\"kit\":%d,\"kit2\":%d,"
                           "\"synth\":%d,\"synth_on\":%s,\"synth2\":%d,\"gen\":%lu}",
              s ? "," : "", (unsigned)s, NOMS[c.state < 5 ? c.state : 0], c.env.now, c.env.target, c.cut,
              (unsigned)voix, (unsigned)listes, c.clavier.surCue ? "" : c.clavier.nom, (unsigned)c.clavier.canal,
-             (unsigned)c.clavier.poly, (int)c.kit, (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
+             (unsigned)c.clavier.poly, (int)c.kit[0], (int)c.kit[1], (int)c.synth, (c.synth >= 0 && SynthVoice::active((uint8_t)c.synth)) ? "true" : "false",
              (int)c.synth2, (unsigned long)c.gen);
     j += t;
     /* Its instrument blocks' groups (§221): "bloc:group,…". */
@@ -2026,10 +2044,10 @@ String etatSlots() {
   return j + String("],\"current\":") + (int)slotCurrent + ",\"leaving\":" + (int)slotLeaving;
 }
 
-void fixerCanaux(uint8_t clavier, uint8_t sfz) {
+void fixerCanaux(uint8_t clavier, const uint8_t* kits) {
   CueSlot& c = slots[_slotIci()];
   c.clavier.canal = clavier > 16 ? 0 : clavier;
-  c.kitCanal      = sfz > 16 ? 0 : sfz;
+  for (uint8_t k = 0; k < KITS_PER_SLOT; k++) c.kitCanal[k] = kits[k] > 16 ? 0 : kits[k];
 }
 
 uint32_t notesPerdues() { return notesPerduesCompte; }
@@ -2168,25 +2186,25 @@ uint8_t releverCretes(uint32_t* blocs, uint16_t* cretesG, uint16_t* cretesD, uin
     if (g > cretesG[k]) cretesG[k] = g;
     if (d > cretesD[k]) cretesD[k] = d;
   }
-  /* The kits and the synth voices (§220): each its block, beside the sample voices. */
-  for (PeakBlock* tab : {kitPeak, synthPeak})
-    for (uint8_t s = 0; s < CUE_SLOTS; s++) {
-      PeakBlock& p = tab[s];
-      const uint16_t pg = p.g, pd = p.d;
-      if (!pg && !pd) continue;
-      p.g = 0; p.d = 0;
-      if (!p.bloc) continue;
-      const uint16_t g = (uint16_t)fminf(65535.f, pg * sortie);
-      const uint16_t d = (uint16_t)fminf(65535.f, pd * sortie);
-      uint8_t k = 0;
-      while (k < n && blocs[k] != p.bloc) k++;
-      if (k == n) {
-        if (n >= max) continue;
-        blocs[n] = p.bloc; cretesG[n] = 0; cretesD[n] = 0; n++;
-      }
-      if (g > cretesG[k]) cretesG[k] = g;
-      if (d > cretesD[k]) cretesD[k] = d;
+  /* The kits (one per engine) and the synth voices (one per slot), §220: each its block, beside
+   * the sample voices. */
+  for (uint8_t t = 0; t < SfzStore::MOTEURS + CUE_SLOTS; t++) {
+    PeakBlock& p = (t < SfzStore::MOTEURS) ? kitPeak[t] : synthPeak[t - SfzStore::MOTEURS];
+    const uint16_t pg = p.g, pd = p.d;
+    if (!pg && !pd) continue;
+    p.g = 0; p.d = 0;
+    if (!p.bloc) continue;
+    const uint16_t g = (uint16_t)fminf(65535.f, pg * sortie);
+    const uint16_t d = (uint16_t)fminf(65535.f, pd * sortie);
+    uint8_t k = 0;
+    while (k < n && blocs[k] != p.bloc) k++;
+    if (k == n) {
+      if (n >= max) continue;
+      blocs[n] = p.bloc; cretesG[n] = 0; cretesD[n] = 0; n++;
     }
+    if (g > cretesG[k]) cretesG[k] = g;
+    if (d > cretesD[k]) cretesD[k] = d;
+  }
   return n;
 }
 

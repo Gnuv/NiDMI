@@ -10,7 +10,7 @@
 //     spinlock held for a few instructions, never around I/O);
 //   - the HANDOFF to the audio task is _proposition[engine] (-1 none, -2 silence,
 //     else an _instrs index), written under _mux and taken with an atomic exchange;
-//   - the ENGINES (_engs, two since §212) belong to the audio task.
+//   - the ENGINES (_engs, two since §212, four since §234) belong to the audio task.
 #include "SfzStore.h"
 #include "sfz16.h"
 #include <strings.h>                    // strcasecmp
@@ -51,24 +51,25 @@ struct Voeu {
   uint32_t servi;                            // the last ticket the task concluded
   bool     ok;                               // ... and it succeeded
 };
+static_assert(MOTEURS == 4, "the engines' initializers below are written out for four");
 static Voeu             _voeux[MOTEURS] = {};
 static char             _erreur[160] = "";   // the last refusal
 static char* volatile   _employes = nullptr; // the playing cue's kits (sfz=, sfzpre=), malloc'd, taken by the task
-static volatile int32_t _proposition[MOTEURS] = {-1, -1};   // -1 none, -2 silence, else an _instrs index
+static volatile int32_t _proposition[MOTEURS] = {-1, -1, -1, -1};   // -1 none, -2 silence, else an _instrs index
 static char*            _csvMemo = nullptr;  // the last employed list (sd-card task's own copy)
 
 // ── the engines, the audio task's alone ─────────────────────────────────────
 static sfz16_engine     _eng0;               // ~3 ko, voices inside: INTERNAL RAM
-static sfz16_engine* volatile _engs[MOTEURS] = {&_eng0, nullptr};   // [1] in PSRAM, the first time a cue asks
-static volatile bool    _notesArmees[MOTEURS] = {false, false};    // a cue routes notes to it
-static volatile int8_t  _actif[MOTEURS] = {-1, -1};                // _instrs index the engine plays
+static sfz16_engine* volatile _engs[MOTEURS] = {&_eng0};   // the others in PSRAM, the first time a cue asks
+static volatile bool    _notesArmees[MOTEURS] = {};        // a cue routes notes to it
+static volatile int8_t  _actif[MOTEURS] = {-1, -1, -1, -1};        // _instrs index the engine plays
 static uint32_t         _gen = 0;
 static volatile uint32_t _notesRecues = 0;   // diagnostic: how far the notes travel (§208)
 static volatile uint32_t _blocsRendus = 0;    // the audio loop's heartbeat (§208)
 static volatile uint32_t _evenementsVus = 0; // events popped from the queue (§208)
-static volatile uint32_t _blocId[MOTEURS] = {0, 0};      // the app's block that asked for the kit (0: none)
-static volatile float    _gain[MOTEURS] = {1.0f, 1.0f};  // the target gain, any task writes it
-static float             _gainLisse[MOTEURS] = {1.0f, 1.0f};   // the audio task's smoothed copy
+static volatile uint32_t _blocId[MOTEURS] = {};           // the app's block that asked for the kit (0: none)
+static volatile float    _gain[MOTEURS] = {1.0f, 1.0f, 1.0f, 1.0f};   // the target gain, any task writes it
+static float             _gainLisse[MOTEURS] = {1.0f, 1.0f, 1.0f, 1.0f};   // the audio task's smoothed copy
 static volatile uint8_t  _ccEntrant[MOTEURS][128];   // the Control Change tables, written by the MIDI side (§212: per engine)
 static volatile uint32_t _ccRecus = 0;       // diagnostic: CC that reached the table
 
@@ -379,8 +380,8 @@ static void _annoncer(const char* etat, const char* chemin) {
   nidmi_ws_pousser(trame);
 }
 
-/* Engine 1 in PSRAM, the first time a cue asks for it (§212): ~3 ko the internal RAM
- * does not carry for a second cue it may never play. Inited here, published last. */
+/* Engines 1 to 3 in PSRAM, the first time a cue asks for each (§212, §234): ~3 ko each that the
+ * internal RAM does not carry for kits it may never play. Inited here, published last. */
 static bool _assurerMoteur(uint8_t m, String& raison) {
   if (m >= MOTEURS) { raison = "moteur SFZ inconnu"; return false; }
   if (_engs[m]) return true;
@@ -563,7 +564,8 @@ void servir() {
      * proposition (a new kit, or silence) within a block (2.5 ms): once it did,
      * the kit it replaced is retirable. Wait for the adoption, then sort again
      * with the playing cue's kits — otherwise it would stay until the next cue. */
-    for (int t = 0; t < 20 && (_proposition[0] != -1 || _proposition[1] != -1); t++) vTaskDelay(pdMS_TO_TICKS(5));
+    auto propose = [] { for (uint8_t k = 0; k < MOTEURS; k++) if (_proposition[k] != -1) return true; return false; };
+    for (int t = 0; t < 20 && propose(); t++) vTaskDelay(pdMS_TO_TICKS(5));
     vTaskDelay(pdMS_TO_TICKS(5));                // the audio task sets _actif right after taking it
     if (_csvMemo) _marquer(_csvMemo);
     const bool libere = _attendreLesRetraits();  // frees what the housekeeping marked (a few ms)
@@ -580,7 +582,7 @@ static void _adopter(uint8_t m) {
   /* THE FORGOTTEN INIT (§208, found by the voice photograph: inc_int was the
    * 1e9 clamp catching 44100/0 — a static engine starts zeroed, and nothing
    * had ever set its rate). The host tests all called sfz16_engine_init;
-   * the card's loader never did. (Engine 1 is inited where it is allocated.) */
+   * the card's loader never did. (The others are inited where they are allocated.) */
   static bool eng0Init = false;
   if (m == 0 && !eng0Init) { sfz16_engine_init(eng, 48000.0f); eng0Init = true; }
   /* Taken AND cleared in one step: a proposition deposited between a read and
@@ -708,7 +710,9 @@ void costBlock(uint32_t cyclesTotal) {
     _costTotalOver++;
     CostSlow& l = _costSlow[_costNSlow++ & 7];
     l.total = cyclesTotal; l.kernel = _costKernel; l.notes = _costNotesCyc;
-    l.fresh = _costFresh; l.recent = _costRecent; l.voices = (uint8_t)(voixActives(0) + voixActives(1));
+    int voices = 0;
+    for (uint8_t m = 0; m < MOTEURS; m++) voices += voixActives(m);
+    l.fresh = _costFresh; l.recent = _costRecent; l.voices = (uint8_t)voices;
   }
 }
 
@@ -774,24 +778,21 @@ String diagnostic() {
     j += String("{\"chemin\":\"") + echapper(_instrs[i].chemin) + "\",\"actif\":"
        + (_tenu(i) ? "true" : "false") + ",\"retire\":" + (_instrs[i].libererApres ? "true" : "false") + "}";
   }
-  /* The Control Changes held (the ones that are not 0): what a locc/hicc gate sees. */
-  j += "],\"cc\":{";
-  bool premierCc = true;
-  for (int i = 0; i < 128; i++) {                // engine 0's; engine 1 under "cc1"
-    if (!_ccEntrant[0][i]) continue;
-    if (!premierCc) j += ",";
-    premierCc = false;
-    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[0][i];
+  /* The Control Changes held (the ones that are not 0): what a locc/hicc gate sees — engine 0's
+   * under "cc", the others' under "cc1", "cc2", "cc3". */
+  j += "]";
+  for (uint8_t m = 0; m < MOTEURS; m++) {
+    j += m ? String(",\"cc") + m + "\":{" : String(",\"cc\":{");
+    bool premierCc = true;
+    for (int i = 0; i < 128; i++) {
+      if (!_ccEntrant[m][i]) continue;
+      if (!premierCc) j += ",";
+      premierCc = false;
+      j += String("\"") + i + "\":" + (unsigned)_ccEntrant[m][i];
+    }
+    j += "}";
   }
-  j += "},\"cc1\":{";
-  premierCc = true;
-  for (int i = 0; i < 128; i++) {
-    if (!_ccEntrant[1][i]) continue;
-    if (!premierCc) j += ",";
-    premierCc = false;
-    j += String("\"") + i + "\":" + (unsigned)_ccEntrant[1][i];
-  }
-  return j + "}}";
+  return j + "}";
 }
 
 static bool _finit(const char* nom, const char* ext) {

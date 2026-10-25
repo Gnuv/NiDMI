@@ -222,11 +222,14 @@ static void _nettoyerSlot(uint8_t s) {
   if (_slotScriptsSortants == (int8_t)s) { g_midiRouter.fermerSortie(); _slotScriptsSortants = -1; }
   for (const int8_t sv : {AudioEngine::synthDuSlot(s), AudioEngine::synth2DuSlot(s)})
     if (sv >= 0) { String r; SynthVoice::configure((uint8_t)sv, -1, 0, 0, 1.0f, r); }
-  const int8_t k = AudioEngine::kitDuSlot(s);
-  if (k >= 0) { String r; SfzStore::proposer((uint8_t)k, "", r); }   // the engine lets go of its kit
+  bool kits = false;
+  for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
+    const int8_t k = AudioEngine::kitDuSlot(s, i);
+    if (k >= 0) { String r; SfzStore::proposer((uint8_t)k, "", r); kits = true; }   // the engine lets go of its kit
+  }
   Effects::off(s);
   AudioEngine::libererSlot(s);
-  if (k >= 0 && SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
+  if (kits && SfzStore::enMemoire()) SfzStore::entretenir(_sfzEmployes());
 }
 
 /* The slot a cue is about to take: whatever still plays in it is cut, and waited for. */
@@ -267,15 +270,34 @@ static uint8_t _changerDeSlot(float releaseSortant, float delai, float attaque, 
   return nouveau;
 }
 
-/* The other slot's SFZ engine, when it is that of the same block: a kit that goes on from the
- * cue that leaves is handed over, not restarted (§212). Otherwise the one the other slot does
- * not hold. (The synth voices are picked in _appliquer: a slot may hold two, §214.) */
-static int8_t _prendreKit(int8_t chezLAutre, bool memeBloc, uint8_t autre) {
-  if (chezLAutre >= 0 && memeBloc) {
-    AudioEngine::fixerKitSlot(autre, -1);
-    return chezLAutre;
+/* The SFZ engine for the kit `chemin` of block `bloc`: the other slot's, when it plays that kit
+ * for that block — a kit that goes on from the cue that leaves is handed over, not restarted
+ * (§212). Otherwise one no slot holds (two per slot, §234). (The synth voices are picked in
+ * _appliquer: a slot may hold two, §214.) */
+static int8_t _prendreKit(uint32_t bloc, const String& chemin, bool autreJoue, uint8_t autre) {
+  if (autreJoue && bloc)
+    for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
+      const int8_t m = AudioEngine::kitDuSlot(autre, i);
+      if (m >= 0 && SfzStore::blocId((uint8_t)m) == bloc && SfzStore::demande((uint8_t)m) == chemin) {
+        AudioEngine::fixerKitSlot(autre, i, -1);
+        return m;
+      }
+    }
+  return AudioEngine::moteurKitLibre();
+}
+
+/* Field `i` of a comma list ("" past its end), trimmed: the cue's lists go by position. */
+static String _field(const String& list, uint8_t i) {
+  int start = 0;
+  for (uint8_t k = 0; k < i; k++) {
+    const int comma = list.indexOf(',', start);
+    if (comma < 0) return String();
+    start = comma + 1;
   }
-  return (chezLAutre == 0) ? 1 : 0;
+  const int end = list.indexOf(',', start);
+  String f = list.substring(start, end < 0 ? list.length() : end);
+  f.trim();
+  return f;
 }
 
 void _appliquer(const Cue& c) {
@@ -386,7 +408,7 @@ void _appliquer(const Cue& c) {
     bool synthParamsVus = false;
     bool surCue = true;      // defaut : le comportement d'origine de play-sf
     uint8_t polyClavier = AudioEngine::KEYBOARD_POLY_DEFAULT;   // the keyboard's polyphony (§219)
-    uint8_t polySfz = 0;                                        // the kit's, 0 = every voice (§220)
+    String polysSfz;                                            // each kit's, 0 = every voice (§220)
     int debut = 0;
     while (debut < (int)c.params.length()) {
       int fin = c.params.indexOf(';', debut);
@@ -403,7 +425,7 @@ void _appliquer(const Cue& c) {
         else if (cle == "sfzbloc") { blocSfz = kv.substring(eq + 1); blocSfz.trim(); }
         else if (cle == "sfzgain") { gainSfz = kv.substring(eq + 1); gainSfz.trim(); }
         else if (cle == "sfzch")   { canalSfz = kv.substring(eq + 1); canalSfz.trim(); }
-        else if (cle == "sfzpoly") polySfz = (uint8_t)kv.substring(eq + 1).toInt();          // §220
+        else if (cle == "sfzpoly") { polysSfz = kv.substring(eq + 1); polysSfz.trim(); }     // §220
         else if (cle == "keych")   { canalClavier = kv.substring(eq + 1); canalClavier.trim(); }
         else if (cle == "keypoly") polyClavier = (uint8_t)kv.substring(eq + 1).toInt();      // §219
         else if (cle == "synth")     { synth = kv.substring(eq + 1); synth.trim(); }
@@ -435,7 +457,9 @@ void _appliquer(const Cue& c) {
     AudioEngine::fixerDeclenchementSurCue(surCue);
     /* LES PLAY LIST de la cue : `liste=…` et ses champs (AudioEngine.h). */
     const bool listes = _valeurDe(c.params, "liste").length() > 0;
-    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), (uint8_t)canalSfz.toInt());
+    uint8_t canauxKits[AudioEngine::KITS_PER_SLOT];             // each kit's, by position (§234)
+    for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) canauxKits[i] = (uint8_t)_field(canalSfz, i).toInt();
+    AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), canauxKits);
     AudioEngine::setKeyboardPoly(polyClavier);
     /* THE GROUP OF EVERY INSTRUMENT BLOCK (§221): grp=<bloc>:<group>,… — a block it does not
      * place is in group 0. */
@@ -573,24 +597,27 @@ void _appliquer(const Cue& c) {
        tache audio l'adopte ; en attendant, l'ancien instrument garde le clavier.
        Une cue sans sfz= tait celui qui jouait. Puis l'entretien : un instrument
        qu'AUCUNE cue ne nomme plus se decharge (decision du 6 octobre). */
-    {
+    /* TWO KITS AT MOST (§234), by position in sfz=, sfzbloc=, sfzgain=, sfzch=, sfzpoly=. Each its
+     * engine: the leaving cue's if it plays the same kit for the same block (handed over with its
+     * ringing voices), else one no slot holds (§212). Which block asked for the kit, and its
+     * fader: a cue without them leaves the kit at unity. A third is left out (the app says so). */
+    for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
+      const String chemin = _field(cheminSfz, i);
+      if (!chemin.length()) continue;
+      const uint32_t bk = (uint32_t)_field(blocSfz, i).toInt();
+      const int8_t k = _prendreKit(bk, chemin, autreJoue, autre);
+      if (k < 0) { Serial.printf("[cues] sfz %s: no engine left\n", chemin.c_str()); continue; }
+      AudioEngine::fixerKitSlot(ns, i, k);
+      const String gain = _field(gainSfz, i);
+      SfzStore::fixerBloc((uint8_t)k, bk, gain.length() ? gain.toFloat() : 1.0f);
+      SfzStore::setMaxVoices((uint8_t)k, (uint8_t)_field(polysSfz, i).toInt());
       String raisonSfz;
-      if (cheminSfz.length()) {
-        /* The slot's engine: the leaving cue's if it plays the same kit for the same block (handed
-         * over with its ringing voices), else the one the other slot does not hold (§212). Which
-         * block asked for the kit, and its fader: a cue without them leaves the kit at unity. */
-        const uint32_t bk = (uint32_t)blocSfz.toInt();
-        const int8_t chezLAutre = AudioEngine::kitDuSlot(autre);
-        const bool memeKit = autreJoue && bk && chezLAutre >= 0 && SfzStore::blocId((uint8_t)chezLAutre) == bk
-                             && SfzStore::demande((uint8_t)chezLAutre) == cheminSfz;
-        const int8_t k = _prendreKit(chezLAutre, memeKit, autre);
-        AudioEngine::fixerKitSlot(ns, k);
-        SfzStore::fixerBloc((uint8_t)k, bk, gainSfz.length() ? gainSfz.toFloat() : 1.0f);
-        SfzStore::setMaxVoices((uint8_t)k, polySfz);
-        if (!SfzStore::proposer((uint8_t)k, cheminSfz.c_str(), raisonSfz))
-          Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
-      }
+      if (!SfzStore::proposer((uint8_t)k, chemin.c_str(), raisonSfz))
+        Serial.printf("[cues] sfz refuse : %s\n", raisonSfz.c_str());
     }
+    if (_field(cheminSfz, AudioEngine::KITS_PER_SLOT).length())
+      Serial.printf("[cues] more than %u kits in the cue: the others are left out\n",
+                    (unsigned)AudioEngine::KITS_PER_SLOT);
     /* PAS de `return` : la ligne de journal en fin de fonction vaut pour toutes
      * les cues, et la brancher ici la ferait disparaitre pour celles-ci. Le
      * bloc suivant ne peut pas se declencher — -2 n'est pas >= 0. */
@@ -1183,10 +1210,12 @@ bool setBlockVoices(uint32_t bloc, int voices) {
   if (sc < 0) return false;
   bool found = false;
   if (AudioEngine::keyboardBlock() == bloc) { AudioEngine::setKeyboardPoly((uint8_t)voices); found = true; }
-  const int8_t kit = AudioEngine::kitDuSlot((uint8_t)sc);
-  if (kit >= 0 && SfzStore::blocId((uint8_t)kit) == bloc) {
-    SfzStore::setMaxVoices((uint8_t)kit, (uint8_t)(voices > 255 ? 255 : voices));
-    found = true;
+  for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
+    const int8_t kit = AudioEngine::kitDuSlot((uint8_t)sc, i);
+    if (kit >= 0 && SfzStore::blocId((uint8_t)kit) == bloc) {
+      SfzStore::setMaxVoices((uint8_t)kit, (uint8_t)(voices > 255 ? 255 : voices));
+      found = true;
+    }
   }
   const int8_t sv = AudioEngine::synthDuSlot((uint8_t)sc);
   if (sv >= 0 && SynthVoice::bloc((uint8_t)sv) == bloc) {
