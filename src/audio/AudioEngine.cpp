@@ -384,6 +384,9 @@ struct CueSlot {
   volatile uint8_t  nGroups = 0;
 };
 CueSlot           slots[CUE_SLOTS];
+/* THE SWITCH'S SECTION (§238): the loop holds the audio task off while what goes on changes slot
+ * — they share core 1 (§172), and with its interrupts off the audio task cannot start a block. */
+static portMUX_TYPE slotsMux = portMUX_INITIALIZER_UNLOCKED;
 static_assert(KITS_PER_SLOT == 2, "CueSlot::kit's initializer is written out for two");
 static_assert(SfzStore::MOTEURS >= CUE_SLOTS * KITS_PER_SLOT, "an SFZ engine for every kit of both slots");
 
@@ -1871,8 +1874,9 @@ void noteOff(uint8_t canal, uint8_t note, Pour pour, uint8_t group) {
   deposerEvenement(Evenement{note, 0, SORTE_NOTE, 0, 0, canal, _masque(pour), group});
 }
 
-void setBlockGroups(const uint32_t* blocks, const uint8_t* groups, uint8_t n) {
-  CueSlot& c = slots[_slotIci()];
+void setBlockGroups(uint8_t slot, const uint32_t* blocks, const uint8_t* groups, uint8_t n) {
+  if (slot >= CUE_SLOTS) return;
+  CueSlot& c = slots[slot];
   c.nGroups = 0;
   __sync_synchronize();
   if (n > GROUPS_PER_SLOT) n = GROUPS_PER_SLOT;
@@ -1974,6 +1978,53 @@ void couperSlot(uint8_t slot) {
     if (!demarre) { c.req = REQ_NONE; _drainSlot(slot); }
   }
   if (slotLeaving == (int8_t)slot) slotLeaving = -1;
+}
+
+/* What goes on passes from `from` to `to` (§238): the kits, to the arriving cue's positions; the
+ * synth voices; the play lists of those blocks, with their voices (one fading out has left its
+ * list: it stays). Plain writes — switchSlots holds the audio task off meanwhile, so its active
+ * bank is not rewritten under it. */
+static void _handOver(uint8_t from, uint8_t to, const HandOver& h) {
+  CueSlot& a = slots[from];
+  CueSlot& n = slots[to];
+  for (uint8_t i = 0; i < KITS_PER_SLOT; i++) {
+    const int8_t m = h.kit[i];
+    if (m < 0) continue;
+    for (uint8_t j = 0; j < KITS_PER_SLOT; j++) if (a.kit[j] == m) { a.kit[j] = -1; break; }
+    n.kit[i] = m;
+    n.kitCanal[i] = h.kitChannel[i] > 16 ? 0 : h.kitChannel[i];
+  }
+  if (h.synth) {
+    n.synth = a.synth; n.synth2 = a.synth2; n.voixVoulues = a.voixVoulues;
+    a.synth = -1; a.synth2 = -1;
+  }
+  if (!banques) return;
+  Banque& b = banques[banqueActive];
+  for (uint8_t li = 0; li < b.n; li++) {
+    bool goesOn = false;
+    for (const uint32_t bloc : h.lists) goesOn = goesOn || (bloc && bloc == b.listes[li].bloc);
+    if (!goesOn || b.listes[li].slot != from) continue;
+    b.listes[li].slot = to;
+    for (uint8_t v = 0; v < VOIX_MAX; v++)
+      if (voixEch[v].actif && voixEch[v].slot == from && voixEch[v].liste == (int8_t)li) voixEch[v].slot = to;
+  }
+}
+
+void switchSlots(int8_t from, uint8_t to, const HandOver& h, float releaseS,
+                 float delayS, float attackS, float sustain) {
+  if (to >= CUE_SLOTS) return;
+  const bool leaves = from >= 0 && from < (int8_t)CUE_SLOTS && from != (int8_t)to;
+  /* Nobody renders: nothing to hold off — and a slot that leaves is drained at once (its kit's
+   * voices, its effects), which is no work for a section with interrupts off. */
+  const bool hold = demarre;
+  if (hold) portENTER_CRITICAL(&slotsMux);
+  if (leaves) _handOver((uint8_t)from, to, h);
+  arriverSlot(to, delayS, attackS, sustain);
+  if (leaves) {
+    if (releaseS > 0.0f) quitterSlot((uint8_t)from, releaseS);
+    else                 couperSlot((uint8_t)from);
+  }
+  if (hold) portEXIT_CRITICAL(&slotsMux);
 }
 
 void libererSlot(uint8_t slot) {

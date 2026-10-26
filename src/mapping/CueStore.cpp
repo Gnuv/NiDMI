@@ -245,47 +245,6 @@ static void _viderSlot(uint8_t s) {
   _nettoyerSlot(s);
 }
 
-/* THE CUE ARRIVES (§211-212): in the other slot, emptied first; the one that played leaves in
- * `releaseSortant` (its scripts become the leaving branch) or is cut. Its Delay, Attack and
- * Sustain shape the new slot's output. Returns the new slot. */
-static uint8_t _changerDeSlot(float releaseSortant, float delai, float attaque, float sustain) {
-  const int8_t avant = AudioEngine::slotCourant();
-  const uint8_t nouveau = (avant == 0) ? 1 : 0;
-  _viderSlot(nouveau);
-  if (avant >= 0 && AudioEngine::etatSlot((uint8_t)avant) == AudioEngine::SLOT_COURANT) {
-    if (releaseSortant > 0.0f) {
-      AudioEngine::quitterSlot((uint8_t)avant, releaseSortant);
-      g_midiRouter.ouvrirSortie();
-      _slotScriptsSortants = avant;
-    } else {
-      AudioEngine::couperSlot((uint8_t)avant);
-      g_midiRouter.fermerSortie();
-      _slotScriptsSortants = -1;
-    }
-  } else {
-    g_midiRouter.fermerSortie();
-    _slotScriptsSortants = -1;
-  }
-  AudioEngine::arriverSlot(nouveau, delai, attaque, sustain);
-  return nouveau;
-}
-
-/* The SFZ engine for the kit `chemin` of block `bloc`: the other slot's, when it plays that kit
- * for that block — a kit that goes on from the cue that leaves is handed over, not restarted
- * (§212). Otherwise one no slot holds (two per slot, §234). (The synth voices are picked in
- * _appliquer: a slot may hold two, §214.) */
-static int8_t _prendreKit(uint32_t bloc, const String& chemin, bool autreJoue, uint8_t autre) {
-  if (autreJoue && bloc)
-    for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
-      const int8_t m = AudioEngine::kitDuSlot(autre, i);
-      if (m >= 0 && SfzStore::blocId((uint8_t)m) == bloc && SfzStore::demande((uint8_t)m) == chemin) {
-        AudioEngine::fixerKitSlot(autre, i, -1);
-        return m;
-      }
-    }
-  return AudioEngine::moteurKitLibre();
-}
-
 /* Field `i` of a comma list ("" past its end), trimmed: the cue's lists go by position. */
 static String _field(const String& list, uint8_t i) {
   int start = 0;
@@ -298,6 +257,92 @@ static String _field(const String& list, uint8_t i) {
   String f = list.substring(start, end < 0 ? list.length() : end);
   f.trim();
   return f;
+}
+
+/* THE ARRIVING SLOT'S ROUTING (§221, §230), posted before it plays (§238): the group of each
+ * instrument block — grp=<bloc>:<group>,…, a block it does not place is in group 0 — and the
+ * cue's effects. What goes on finds them at the switch: a note of its group, its effects. */
+static void _routerSlot(uint8_t s, const String& params) {
+  uint32_t blocs[AudioEngine::GROUPS_PER_SLOT]; uint8_t groupes[AudioEngine::GROUPS_PER_SLOT];
+  uint8_t n = 0;
+  const String grp = _valeurDe(params, "grp");
+  for (int d = 0; d < (int)grp.length() && n < AudioEngine::GROUPS_PER_SLOT;) {
+    const int v = grp.indexOf(',', d);
+    const String paire = grp.substring(d, v < 0 ? grp.length() : v);
+    const int dp = paire.indexOf(':');
+    if (dp > 0) {
+      blocs[n] = (uint32_t)paire.substring(0, dp).toInt();
+      groupes[n] = (uint8_t)constrain(paire.substring(dp + 1).toInt(), 0, AudioEngine::GROUP_MAX);
+      n++;
+    }
+    if (v < 0) break;
+    d = v + 1;
+  }
+  AudioEngine::setBlockGroups(s, blocs, groupes, n);
+  String raison;
+  if (!Effects::configureFromCue(s, params, raison))
+    Serial.printf("[cues] effects refused: %s\n", raison.c_str());
+}
+
+/* WHAT GOES ON (§212, §238): what the leaving slot plays that the arriving cue plays too — a kit
+ * (the same kit for the same block), the synth voice (the same block), a play list (the same
+ * block). Handed over at the switch, with its ringing voices. */
+static AudioEngine::HandOver _continued(uint8_t from, const Cue& c) {
+  AudioEngine::HandOver h;
+  if (c.engine != -2) return h;
+  const String sfz = _valeurDe(c.params, "sfz"), sfzBloc = _valeurDe(c.params, "sfzbloc"),
+               sfzCh = _valeurDe(c.params, "sfzch");
+  for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
+    const String chemin = _field(sfz, i);
+    const uint32_t bloc = (uint32_t)_field(sfzBloc, i).toInt();
+    if (!chemin.length() || !bloc) continue;
+    for (uint8_t j = 0; j < AudioEngine::KITS_PER_SLOT; j++) {
+      const int8_t m = AudioEngine::kitDuSlot(from, j);
+      bool pris = false;                    // an engine goes to one position
+      for (uint8_t p = 0; p < i; p++) pris = pris || h.kit[p] == m;
+      if (m < 0 || pris) continue;
+      if (SfzStore::blocId((uint8_t)m) == bloc && SfzStore::demande((uint8_t)m) == chemin) {
+        h.kit[i] = m;
+        h.kitChannel[i] = (uint8_t)_field(sfzCh, i).toInt();
+        break;
+      }
+    }
+  }
+  const uint32_t bs = (uint32_t)_valeurDe(c.params, "synthbloc").toInt();
+  const int8_t a1 = AudioEngine::synthDuSlot(from);
+  h.synth = _valeurDe(c.params, "synth").length() && bs && a1 >= 0 && SynthVoice::bloc((uint8_t)a1) == bs;
+  if (_valeurDe(c.params, "liste").length()) {
+    const String blocs = _valeurDe(c.params, "lbloc");
+    for (uint8_t i = 0; i < AudioEngine::LISTES_MAX; i++) h.lists[i] = (uint32_t)_field(blocs, i).toInt();
+  }
+  return h;
+}
+
+/* THE CUE ARRIVES (§211-212): in the other slot, emptied first; the one that played leaves in
+ * `releaseSortant` (its scripts become the leaving branch) or is cut. Its Delay, Attack and
+ * Sustain shape the new slot's output. WHAT GOES ON passes to it at the switch itself, its
+ * groups and effects posted just before (§238): the rest of the cue — its scripts first — takes
+ * tens of ms, and a slot being cut is silent in 10, then stops what it still holds. `suite` says
+ * what was handed over. Returns the new slot. */
+static uint8_t _changerDeSlot(const Cue& c, float releaseSortant, AudioEngine::HandOver& suite) {
+  const int8_t avant = AudioEngine::slotCourant();
+  const uint8_t nouveau = (avant == 0) ? 1 : 0;
+  _viderSlot(nouveau);
+  if (c.engine == -2) _routerSlot(nouveau, c.params);
+  const bool joue = avant >= 0 && AudioEngine::etatSlot((uint8_t)avant) == AudioEngine::SLOT_COURANT;
+  suite = joue ? _continued((uint8_t)avant, c) : AudioEngine::HandOver{};
+  AudioEngine::switchSlots(joue ? avant : -1, nouveau, suite, releaseSortant,
+                           _valeurDe(c.params, "cdelay").toFloat() / 1000.0f,
+                           _valeurDe(c.params, "cattack").toFloat() / 1000.0f,
+                           _valeurDe(c.params, "csustain").length() ? _valeurDe(c.params, "csustain").toFloat() : 1.0f);
+  if (joue && releaseSortant > 0.0f) {
+    g_midiRouter.ouvrirSortie();
+    _slotScriptsSortants = avant;
+  } else {
+    g_midiRouter.fermerSortie();
+    _slotScriptsSortants = -1;
+  }
+  return nouveau;
 }
 
 void _appliquer(const Cue& c) {
@@ -326,13 +371,10 @@ void _appliquer(const Cue& c) {
     if (tenus.length()) _kitsCue += (_kitsCue.length() ? "," : "") + tenus;
     if (_kitsCue.length() || SfzStore::enMemoire()) SfzStore::entretenir(_kitsCue);
   }
-  const uint8_t ns = _changerDeSlot(releaseSortant,
-                                    _valeurDe(c.params, "cdelay").toFloat() / 1000.0f,
-                                    _valeurDe(c.params, "cattack").toFloat() / 1000.0f,
-                                    _valeurDe(c.params, "csustain").length() ? _valeurDe(c.params, "csustain").toFloat() : 1.0f);
+  AudioEngine::HandOver suite;
+  const uint8_t ns = _changerDeSlot(c, releaseSortant, suite);
   const uint8_t autre = ns ^ 1;
   const uint8_t etatAutre = AudioEngine::etatSlot(autre);
-  const bool autreJoue = etatAutre == AudioEngine::SLOT_SORTANT || etatAutre == AudioEngine::SLOT_COUPE;
   /* 1. LES SCRIPTS .nms d'abord : ils transforment le MIDI, donc ils doivent
    *    etre en place avant que la moindre note n'arrive.
    *
@@ -466,43 +508,26 @@ void _appliquer(const Cue& c) {
     for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) canauxKits[i] = (uint8_t)_field(canalSfz, i).toInt();
     AudioEngine::fixerCanaux((uint8_t)canalClavier.toInt(), canauxKits);
     AudioEngine::setKeyboardPoly(polyClavier);
-    /* THE GROUP OF EVERY INSTRUMENT BLOCK (§221): grp=<bloc>:<group>,… — a block it does not
-     * place is in group 0. */
-    {
-      uint32_t blocsG[AudioEngine::GROUPS_PER_SLOT]; uint8_t groupesG[AudioEngine::GROUPS_PER_SLOT];
-      uint8_t n = 0;
-      const String grp = _valeurDe(c.params, "grp");
-      for (int d = 0; d < (int)grp.length() && n < AudioEngine::GROUPS_PER_SLOT;) {
-        const int v = grp.indexOf(',', d);
-        const String paire = grp.substring(d, v < 0 ? grp.length() : v);
-        const int dp = paire.indexOf(':');
-        if (dp > 0) {
-          blocsG[n] = (uint32_t)paire.substring(0, dp).toInt();
-          groupesG[n] = (uint8_t)constrain(paire.substring(dp + 1).toInt(), 0, AudioEngine::GROUP_MAX);
-          n++;
-        }
-        if (v < 0) break;
-        d = v + 1;
-      }
-      AudioEngine::setBlockGroups(blocsG, groupesG, n);
-    }
+    /* (The group of every instrument block, and the effects: posted with the slot, before it
+     * arrived — _routerSlot, §238.) */
 
-    /* THE SYNTH VOICE AND THE EFFECTS OF THE CUE (§210): beside the sampler, no
-     * longer instead of it. A cue without `synth=` silences the voice (its state
-     * stays in PSRAM); without `lowpass` / `reverb`, that effect is off. Before
-     * the sampler: a cue with only a synth arms the reader too (lecteurPret). */
+    /* THE SYNTH VOICE OF THE CUE (§210): beside the sampler, no longer instead of
+     * it. A cue without `synth=` silences the voice (its state stays in PSRAM).
+     * Before the sampler: a cue with only a synth arms the reader too
+     * (lecteurPret). */
     {
       String raison;
       if (synth.length()) {
-        /* The slot's voices: the leaving cue's if it is the same block (handed over, they go on);
-         * else a free one — or the leaving cue's SECOND voice, which it gives up (§212, §214). */
+        /* The slot's voices: the leaving cue's if it is the same block (handed over at the
+         * switch, they go on — §238); else a free one — or the leaving cue's SECOND voice, which
+         * it gives up (§212, §214). */
         const uint32_t bs = (uint32_t)synthBloc.toInt();
-        const int8_t a1 = AudioEngine::synthDuSlot(autre), a2 = AudioEngine::synth2DuSlot(autre);
         int8_t v1 = -1, v2 = -1;
-        if (autreJoue && bs && a1 >= 0 && SynthVoice::bloc((uint8_t)a1) == bs) {
-          v1 = a1; AudioEngine::fixerSynthSlot(autre, -1);
-          if (a2 >= 0) { v2 = a2; AudioEngine::fixerSynth2Slot(autre, -1); }
+        if (suite.synth) {
+          v1 = AudioEngine::synthDuSlot(ns);
+          v2 = AudioEngine::synth2DuSlot(ns);
         } else {
+          const int8_t a2 = AudioEngine::synth2DuSlot(autre);
           v1 = AudioEngine::voixSynthLibre();
           if (v1 < 0 && a2 >= 0) { v1 = a2; AudioEngine::fixerSynth2Slot(autre, -1); }
         }
@@ -525,9 +550,6 @@ void _appliquer(const Cue& c) {
           Serial.println("[cues] synth voice refused: both voices are held");
         }
       }
-      raison = "";
-      if (!Effects::configureFromCue(ns, c.params, raison))
-        Serial.printf("[cues] effects refused: %s\n", raison.c_str());
     }
 
     if (!noms.length() && !listes && !cheminSfz.length() && !synth.length()) {
@@ -603,14 +625,15 @@ void _appliquer(const Cue& c) {
        Une cue sans sfz= tait celui qui jouait. Puis l'entretien : un instrument
        qu'AUCUNE cue ne nomme plus se decharge (decision du 6 octobre). */
     /* TWO KITS AT MOST (§234), by position in sfz=, sfzbloc=, sfzgain=, sfzch=, sfzpoly=. Each its
-     * engine: the leaving cue's if it plays the same kit for the same block (handed over with its
-     * ringing voices), else one no slot holds (§212). Which block asked for the kit, and its
-     * fader: a cue without them leaves the kit at unity. A third is left out (the app says so). */
+     * engine: the leaving cue's if it plays the same kit for the same block (handed over at the
+     * switch with its ringing voices, §238), else one no slot holds (§212). Which block asked for
+     * the kit, and its fader: a cue without them leaves the kit at unity. A third is left out (the
+     * app says so). */
     for (uint8_t i = 0; i < AudioEngine::KITS_PER_SLOT; i++) {
       const String chemin = _field(cheminSfz, i);
       if (!chemin.length()) continue;
       const uint32_t bk = (uint32_t)_field(blocSfz, i).toInt();
-      const int8_t k = _prendreKit(bk, chemin, autreJoue, autre);
+      const int8_t k = (suite.kit[i] >= 0) ? suite.kit[i] : AudioEngine::moteurKitLibre();
       if (k < 0) { Serial.printf("[cues] sfz %s: no engine left\n", chemin.c_str()); continue; }
       AudioEngine::fixerKitSlot(ns, i, k);
       const String gain = _field(gainSfz, i);

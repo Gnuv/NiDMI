@@ -44,6 +44,7 @@ constexpr uint8_t CUE_SLOTS = 2;
 /* TWO SFZ KITS PER CUE (MESURES §234): both play the notes their channel and group give them —
  * two kits on the same pads, as in June. Each its own engine (SfzStore::MOTEURS = two per slot). */
 constexpr uint8_t KITS_PER_SLOT = 2;
+constexpr uint8_t LISTES_MAX = 4;     // play lists armed at once (§196)
 constexpr int      VOIX        = 4;
 
 // Démarre l'I2S et la tâche si ce n'est pas déjà fait. Sûr à appeler souvent.
@@ -115,9 +116,10 @@ constexpr uint8_t GROUP_ALL = 0xFF;
 constexpr uint8_t GROUP_MAX = 30;
 void noteOn(uint8_t canal, uint8_t note, uint8_t velocity, Pour pour = Pour::TOUS, uint8_t group = GROUP_ALL);
 void noteOff(uint8_t canal, uint8_t note, Pour pour = Pour::TOUS, uint8_t group = GROUP_ALL);
-/* The group of each instrument block of the cue that plays (at most GROUPS_PER_SLOT). */
+/* The group of each instrument block of a cue, in its slot (at most GROUPS_PER_SLOT) — posted
+ * before the slot arrives (§238). */
 constexpr uint8_t GROUPS_PER_SLOT = 12;
-void setBlockGroups(const uint32_t* blocks, const uint8_t* groups, uint8_t n);
+void setBlockGroups(uint8_t slot, const uint32_t* blocks, const uint8_t* groups, uint8_t n);
 /* The groups the instruments of every slot not being cut are in, a bit each. */
 uint32_t instrumentGroups();
 /* The slots `pour` reaches, a bit each (TOUS: every slot not being cut). */
@@ -153,8 +155,24 @@ void arriverSlot(uint8_t slot, float delayS, float attackS, float sustain);
 void quitterSlot(uint8_t slot, float releaseS);
 void couperSlot(uint8_t slot);
 void libererSlot(uint8_t slot);
+/* WHAT GOES ON FROM THE LEAVING CUE (§212, MESURES §238): its instruments of a block the arriving
+ * cue plays too — a kit (the same kit for the same block), the synth voice (the same block), a
+ * play list (the same block) — with their ringing voices. */
+struct HandOver {
+  int8_t   kit[KITS_PER_SLOT] = {-1, -1};   // by the arriving cue's position: the engine it takes, -1 none
+  uint8_t  kitChannel[KITS_PER_SLOT] = {};  // that kit's channel in the arriving cue (0: all)
+  bool     synth = false;                    // the leaving slot's synth voice, or its two
+  uint32_t lists[LISTES_MAX] = {};           // the blocks of the play lists that go on, 0: none
+};
+/* THE SWITCH (§212, §238): `to` arrives (arriverSlot), takes from `from` what `h` says goes on,
+ * and `from` leaves in `releaseS` (quitterSlot) or, at 0, is cut (couperSlot); `from` -1: no cue
+ * plays. In one section the audio task cannot cut into — no block hears what goes on in neither
+ * slot, in both, or in the one being cut. Its groups and effects are the arriving cue's, posted
+ * before. */
+void switchSlots(int8_t from, uint8_t to, const HandOver& h, float releaseS,
+                 float delayS, float attackS, float sustain);
 /* The slot's SFZ engines (its kit `i` < KITS_PER_SLOT) and synth voice (-1: none) — the cue
- * picks them (a kit or a voice that goes on from the leaving cue is handed over). */
+ * picks them (a kit or a voice that goes on from the leaving cue is handed over: switchSlots). */
 int8_t kitDuSlot(uint8_t slot, uint8_t i = 0);
 int8_t synthDuSlot(uint8_t slot);
 void   fixerKitSlot(uint8_t slot, uint8_t i, int8_t moteur);
@@ -337,7 +355,6 @@ void arreterEchantillon(bool listesComprises = true);
  * audio ne lit pas, elle l'adopte au debut d'un bloc — jamais une memoire
  * qu'elle lit n'est reecrite sous elle. Aucune lecture en flash : les sons
  * sont tous en PSRAM. */
-constexpr uint8_t LISTES_MAX = 4;     // listes armees a la fois
 constexpr uint8_t CLIPS_MAX  = 32;    // clips par liste
 /* Les listes d'une CUE — toutes, a la place des precedentes. Une liste dont
  * le bloc etait deja arme (une chaine de cellules : meme bloc d'une cue a la
