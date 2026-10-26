@@ -913,6 +913,12 @@ bool ecrireTout(const String& contenuTexte) {
   {
     VerrouSeq verrou;
     if (_index >= total) _index = (total > 0) ? total - 1 : 0;
+    /* THE RELEASE OF THE CUE THAT PLAYS, as the new list says it (§239). Kept when the cue
+     * arrived, it ignored an edit made while it played: a Release set on the cue being played
+     * only counted once that cue was played again, and the next GO still cut it in 10 ms. */
+    Cue c;
+    if ((_lecture || _enPause) && lire(_index, c))
+      _releaseSortant = _valeurDe(c.params, "crelease").toFloat() / 1000.0f;
   }
   Serial.printf("[cues] liste recue : %u o, %d cues (flash au premier silence)\n", (unsigned)n, total);
   annoncerEtat();                 // le compte et la cue suivante ont pu changer (§181)
