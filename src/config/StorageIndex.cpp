@@ -134,7 +134,7 @@ void begin() {
   if (const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
                                                          Stockage::PARTITION))
     g_total = p->size;
-  // Core 1, under everything that plays (audio 11, loop 10, web 9, guard 5).
+  // Core 1, under everything that plays (audio and guard 11, loop 10, web 9).
   xTaskCreatePinnedToCore(task, "storage-index", 4096, nullptr, 1, &g_task, 1);
 }
 

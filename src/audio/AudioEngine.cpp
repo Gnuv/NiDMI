@@ -1604,12 +1604,21 @@ void validerConfigBoot() {
  * ESP-IDF 5.5) — jamais parce qu'une tache PLUS prioritaire est prete. Mesure :
  * reveillee sans que le coeur 1 soit prevenu, l'audio est restee « prete »
  * jusqu'a 500 ms pendant que loopTask (priorite 1) tournait seule — le DMA
- * rejouait ses anciens tampons. La garde se reveille toutes les 2 ms au-dessus
- * de loopTask : chaque reveil fait refaire l'election, et l'audio prete est
- * elue en 2 ms au plus, loin des 30 ms d'avance du DMA. Elle ne fait rien
- * d'autre que noter son propre retard. */
+ * rejouait ses anciens tampons. La garde se reveille toutes les 2 ms : chaque
+ * reveil fait refaire l'election — a condition qu'elle passe DEVANT la tache qui
+ * tourne —, et l'audio prete est elue en 2 ms au plus, loin des 30 ms d'avance du
+ * DMA. Elle ne fait rien d'autre que noter son propre retard.
+ *
+ * AU NIVEAU DE L'AUDIO (§242). Posee a 5 quand loopTask etait a 1, elle est restee
+ * a 5 quand le §172 a monte la boucle a 10 au-dessus du serveur web (9) : sous les
+ * deux taches qui tournent longtemps, elle ne relancait plus rien contre elles.
+ * Mesure : une composition rouverte (le serveur web relit sa source, ses scripts,
+ * ses sons ; la boucle lance sa cue), l'audio « bloquee » 84 a 164 ms, la garde en
+ * retard de 914 ms — un bloc en retard sur sept a dix. A 11, son reveil passe
+ * devant la boucle et le serveur, et ne prend a l'audio que le temps d'un
+ * changement de tache. */
 namespace {
-constexpr UBaseType_t GARDE_PRIORITE = 5;       // > loopTask (1), < async_tcp (10), < audio (11)
+constexpr UBaseType_t GARDE_PRIORITE = 11;      // > loopTask (10), > async_tcp (9), = audio (11)
 constexpr uint32_t    GARDE_PERIODE_MS = 2;
 volatile uint32_t gardePireRetardUs = 0;
 TaskHandle_t garde = nullptr;
