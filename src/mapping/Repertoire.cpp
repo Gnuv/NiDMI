@@ -63,7 +63,7 @@ bool nomSous(uint8_t n, String& nom, String* raison = nullptr) {
   File d = LittleFS.open(dossierIndex(n));
   if (!d || !d.isDirectory()) { if (raison) *raison = "absente"; return false; }
   int k = 0;
-  for (File f = Stockage::nextEntry(d); f; f = Stockage::nextEntry(d)) {
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     if (!f.isDirectory()) continue;
     if (++k == 1) nom = baseDe(String(f.name()));
   }
@@ -79,7 +79,7 @@ template <typename F> void chaqueNumero(F f) {
   bool present[NUMERO_MAX + 1] = {false};
   File d = LittleFS.open(DOSSIER);
   if (d && d.isDirectory()) {
-    for (File e = Stockage::nextEntry(d); e; e = Stockage::nextEntry(d)) {
+    for (File e = d.openNextFile(); e; e = d.openNextFile()) {
       if (!e.isDirectory()) continue;
       const String n = baseDe(String(e.name()));
       if (n.length() != 2 || !isDigit(n[0]) || !isDigit(n[1])) continue;
@@ -122,7 +122,7 @@ bool ecrireMaintenant(const String& chemin, const char* data, size_t n) {
 template <typename F> void chaqueFichier(const String& dossier, F f) {
   File d = LittleFS.open(dossier);
   if (!d || !d.isDirectory()) return;
-  for (File e = Stockage::nextEntry(d); e; e = Stockage::nextEntry(d))
+  for (File e = d.openNextFile(); e; e = d.openNextFile())
     if (!e.isDirectory()) f(baseDe(String(e.name())), (size_t)e.size());
 }
 
@@ -134,7 +134,7 @@ bool effacerDossier(const String& dossier, int profondeur = 0) {
   bool estDossier[16];
   int k = 0;
   bool reste = false;
-  for (File e = Stockage::nextEntry(d); e; e = Stockage::nextEntry(d)) {
+  for (File e = d.openNextFile(); e; e = d.openNextFile()) {
     if (k < 16) { enfants[k] = String(e.path()); estDossier[k] = e.isDirectory(); k++; }
     else reste = true;
   }

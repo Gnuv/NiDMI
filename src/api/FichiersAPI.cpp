@@ -226,7 +226,7 @@ const char* usageDe(const Usage* u, int n, const String& nom) {
 template <typename U> void parcourirDossier(const String& dossier, int profondeur, U& un) {
   File d = LittleFS.open(dossier);
   if (!d || !d.isDirectory()) return;
-  for (File f = Stockage::nextEntry(d); f; f = Stockage::nextEntry(d)) {
+  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
     const String p = f.path();
     if (f.isDirectory()) { if (profondeur < 6) parcourirDossier(p, profondeur + 1, un); continue; }
     un(p, f.size());

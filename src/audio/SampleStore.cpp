@@ -260,7 +260,7 @@ String listerJson() {
   String out = "[";
   File d = LittleFS.open(DOSSIER);
   if (d && d.isDirectory()) {
-    File f = Stockage::nextEntry(d);
+    File f = d.openNextFile();
     bool premier = true;
     while (f) {
       if (!f.isDirectory()) {
@@ -275,7 +275,7 @@ String listerJson() {
           out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
         out += "}";
       }
-      f = Stockage::nextEntry(d);
+      f = d.openNextFile();
     }
   }
   /* The SD card's sounds, after them — "volume" says where they come from. A name
@@ -283,7 +283,7 @@ String listerJson() {
   File s = SdCard::openForWeb(SdCard::FOLDER);        // the web server's walk: never on a card in doubt
   if (s && s.isDirectory()) {
     bool isFirst = out.length() == 1;
-    for (File f = Stockage::nextEntry(s); f; f = Stockage::nextEntry(s)) {
+    for (File f = s.openNextFile(); f; f = s.openNextFile()) {
       if (f.isDirectory()) continue;
       const char* base = _base(f.path());
       if (!_isWav(base) || LittleFS.exists(_chemin(base))) continue;
@@ -449,7 +449,7 @@ void _loadStorage() {
   if (!monter()) return;
   File d = LittleFS.open(DOSSIER);
   if (!d || !d.isDirectory()) return;
-  File f = Stockage::nextEntry(d);
+  File f = d.openNextFile();
   int i;
   while (f && (i = _vide()) >= 0) {
     if (!f.isDirectory()) {
@@ -460,7 +460,7 @@ void _loadStorage() {
       if (_lire(nom.c_str(), e, raison)) _publier(i, e);
       else Serial.printf("[samples] %s ignore : %s\n", nom.c_str(), raison.c_str());
     } else f.close();
-    f = Stockage::nextEntry(d);
+    f = d.openNextFile();
   }
   if (f) { Serial.printf("[samples] au-dela de %u echantillons, le reste est ignore\n",
                          (unsigned)SAMPLES_MAX); f.close(); }
