@@ -2,6 +2,7 @@
 #include "Stockage.h"
 #include "../audio/AudioEngine.h"
 #include "../server/WebDebugConsole.h"
+#include "../diag/HeapTrough.h"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <esp_heap_caps.h>
@@ -131,6 +132,7 @@ void task(void*) {
   g_usedStale = false;
   countBlocks();
   g_ready = true;
+  HeapTrough::mark("storage indexed");
   int n;
   { Lock l; n = g_n; }
   NIDMI_WEB_LOG("[storage] index : %d entrees, %u o utilises sur %u, en %lu ms",

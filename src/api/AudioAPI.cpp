@@ -1,5 +1,6 @@
 #include "../audio/SdStream.h"
 #include "../diag/SurveillantFlash.h"
+#include "../diag/HeapTrough.h"
 #include "../config/Occupations.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
@@ -1660,6 +1661,28 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         request->send(200, "application/json",
             String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false")
             + ",\"au_demarrage\":" + (nidmi_autopsyAtBootArmed() ? "true" : "false") + "}");
+    });
+
+    /* THE INTERNAL HEAP AT BOOT (MESURES §243): state=boot arms the sampler for the next
+     * software restarts, state=off disarms it; without `state`, what this boot recorded. */
+    server.on("/api/diag/heaptrough", HTTP_ANY, [](AsyncWebServerRequest *request){
+        const bool posted = request->hasParam("state", true);
+        if (posted || request->hasParam("state")) {
+            const String s = (posted ? request->getParam("state", true) : request->getParam("state"))->value();
+            HeapTrough::arm(s == "boot");
+            request->send(200, "application/json",
+                String("{\"armed\":") + (HeapTrough::armed() ? "true" : "false") + "}");
+            return;
+        }
+        char* text = nullptr;
+        size_t len = 0;
+        if (!HeapTrough::json(text, len)) {
+            request->send(200, "application/json",
+                String("{\"armed\":") + (HeapTrough::armed() ? "true" : "false") + ",\"recorded\":false}");
+            return;
+        }
+        std::shared_ptr<char> keep(text, [](char* p) { heap_caps_free(p); });
+        request->send(nidmi_reponse_tampon(request, "application/json", keep, len));
     });
 
     /* LA VIE PRECEDENTE (MESURES §162-163). Ce que la carte a garde en memoire

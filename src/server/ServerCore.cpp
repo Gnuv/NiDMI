@@ -6,6 +6,7 @@
 #include "../midi/MidiRouter.h"      // emettreRtp : le RTP sortant, emis par la boucle (§175)
 #include "../audio/AudioEngine.h"
 #include "WebDebugConsole.h"
+#include "../diag/HeapTrough.h"
 #include "../network/UsbNetBootstrap.h"   // parLeCable : le cable ou le WiFi, pour chaque onglet
 #include <ESPmDNS.h>
 #include <mdns.h>
@@ -155,6 +156,7 @@ void ServerCore::begin(const char* apSsid, const char* apPass, const char* hostn
             event == ARDUINO_EVENT_WIFI_AP_START || event == ARDUINO_EVENT_WIFI_STA_START)
             serverCore.noterEvenementReseau();   // une coupure preparee recommence
         if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+            HeapTrough::mark("wifi ip");
             // L'adresse de l'EVENEMENT, pas WiFi.localIP() : pas de lecture
             // d'interface depuis cette tache (voir « LE VERROU RADIO »).
             Serial.printf("[WiFi] STA got IP: %s\n",

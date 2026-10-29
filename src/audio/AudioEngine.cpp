@@ -3,6 +3,7 @@
 #include "../Globals.h"   // g_componentManager : les broches audio peuvent porter un composant
 #include "AudioEngine.h"
 #include "../server/ServerCallbacks.h"   // demarrage a vide, une fois
+#include "../diag/HeapTrough.h"
 
 #include <Arduino.h>
 #include <ESP_I2S.h>
@@ -1732,6 +1733,7 @@ bool ensureStarted() {
     return false;
   }
   SurveillantFlash::watchBursts();       // no burst of flash reads from this core any more (§242)
+  HeapTrough::mark("audio started");
   // La garde d'election, sur le meme coeur (voir plus haut). Une seule, pour
   // toute la vie de la carte : elle ne depend pas de la tache audio.
   if (!garde && xTaskCreatePinnedToCore(gardeElection, "garde", 1280, nullptr,

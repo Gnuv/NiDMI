@@ -1,4 +1,5 @@
 #include "../server/ServerCore.h"
+#include "../diag/HeapTrough.h"
 #include "ui_index.h"
 #include "ui_bundle.h"
 #include "app_archive.h"
@@ -387,8 +388,10 @@ static void _sertArchiveApp(AsyncWebServerRequest *request, const String& chemin
             // Dernier morceau du corps : la réponse est entièrement écoulée.
             // validerConfigBoot() n'écrit que la mémoire RTC (§157) :
             // appelable d'async_tcp.
-            if (validerAuBout && aEcrire > 0 && index + aEcrire >= taille)
+            if (validerAuBout && aEcrire > 0 && index + aEcrire >= taille) {
                 AudioEngine::validerConfigBoot();
+                HeapTrough::mark("page served");
+            }
             return aEcrire;
         });
     if (f->gz) rep->addHeader("Content-Encoding", "gzip");

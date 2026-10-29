@@ -36,6 +36,7 @@
 #include "diag/JournalAvant.h"
 #include "diag/Activite.h"
 #include "diag/Chronos.h"
+#include "diag/HeapTrough.h"
 #include "mapping/VocabulaireEmbarque.h"
 #if defined(NIDMI_USB_MIDI_SUPPORTED) && NIDMI_USB_MIDI_ENABLED_AT_COMPILE_TIME
 #include <esp32-hal-tinyusb.h>
@@ -1475,6 +1476,7 @@ void nidmi_begin() {
     // demande le redemarrage : apres capturerDemandeur() (§162).
     JournalAvant::capturer();
     if (nidmi_autopsyAtBootArmed()) g_autopsie = true;
+    HeapTrough::begin();   // armed for this boot: the heap, read from now on (§243)
     Serial.begin(115200);
     delay(50);
 
