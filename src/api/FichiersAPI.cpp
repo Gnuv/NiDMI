@@ -25,6 +25,7 @@
 // prennent `volume=` (`storage` par defaut). Ce firmware declare la SD pour dire
 // qu'il ne la lit pas encore — l'app n'a pas a l'inventer.
 #include "APICommon.h"
+#include "../config/StorageIndex.h"
 #include "../config/Stockage.h"
 #include "../config/SdCard.h"
 #include "../audio/SfzStore.h"  // lister() : le diagnostic des dossiers de la SD (§208)
@@ -219,19 +220,9 @@ const char* usageDe(const Usage* u, int n, const String& nom) {
 }
 
 // ── Parcourir storage ──────────────────────────────────────────────────────────
-// A toute profondeur — une composition vit trois niveaux sous la racine (§186) —,
-// bornee a six niveaux : l'arbre n'en a pas plus. Corrige de ce qui attend le
-// silence pour s'ecrire (Differe) : la liste dit ce que la carte PORTE, pas ce
-// que la flash a deja recu — comme ScriptStore::listerJson.
-template <typename U> void parcourirDossier(const String& dossier, int profondeur, U& un) {
-  File d = LittleFS.open(dossier);
-  if (!d || !d.isDirectory()) return;
-  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-    const String p = f.path();
-    if (f.isDirectory()) { if (profondeur < 6) parcourirDossier(p, profondeur + 1, un); continue; }
-    un(p, f.size());
-  }
-}
+// Ce que l'index de storage porte (StorageIndex, §241), a toute profondeur, corrige
+// de ce qui attend le silence pour s'ecrire (Differe) : la liste dit ce que la carte
+// PORTE, pas ce que la flash a deja recu — comme ScriptStore::listerJson.
 
 template <typename F> void parcourir(F voir) {
   String vus;
@@ -242,7 +233,12 @@ template <typename F> void parcourir(F voir) {
     if (Differe::attente(chemin.c_str(), t, na, sup)) { if (!sup) voir(chemin, na, true); return; }
     voir(chemin, octetsFlash, false);
   };
-  parcourirDossier(String("/"), 0, un);
+  /* From storage's index, never the flash (§241): this walk took 9 s in the web server. */
+  struct CtxIndex { decltype(un)* un; };
+  CtxIndex ci{ &un };
+  StorageIndex::visit("/", true, [](const char* path, size_t size, bool dir, void* c) {
+    if (!dir) (*((CtxIndex*)c)->un)(String(path), size);
+  }, &ci);
   struct Ctx { String* vus; F* voir; };
   Ctx ctx{ &vus, &voir };
   Differe::visiterAttente("/", [](const char* chemin, size_t n, bool supprime, void* c) {
@@ -339,6 +335,10 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * elle, est celle que la carte garde et remesure au silence (ScriptStore). */
   server.on("/api/fichiers", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
+    if (!StorageIndex::waitReady(3000)) {
+      repondre(request, 503, "la carte range encore la liste de ses fichiers : quelques secondes apres le demarrage");
+      return;
+    }
     Ecrit e;
     e.cap = LISTE_MAX;
     e.t = nidmi_tampon_reponse(e.cap);
@@ -346,8 +346,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
     if (!e.t || !u) { if (u) heap_caps_free(u); repondre(request, 507, "memoire"); return; }
     const int nu = releverUsages(u);
 
-    size_t fichiers, scripts, contenu, utilises, total;
-    ScriptStore::infos(fichiers, scripts, contenu, utilises, total);
+    const StorageIndex::Stats si = StorageIndex::stats();
+    const size_t utilises = si.used, total = si.total;
     const bool charges = SampleStore::charge();
     /* THE SD CARD: declared by the `sd_spi` component (I/O), mounted in its own task.
      * Plugged in afterwards, it is recognised when this list is opened (a new attempt,

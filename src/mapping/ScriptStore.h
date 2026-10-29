@@ -53,31 +53,11 @@ bool lire(Lieu lieu, const char* nom, String& contenu);
 
 bool existe(Lieu lieu, const char* nom);
 
-/* CE QUE STORAGE PORTE VRAIMENT.
- *
- * `octets_total` et `octets_utilises` viennent de LittleFS ; `octetsContenu`
- * est la somme des tailles de fichiers. L'ECART entre les deux est ce qui
- * compte : LittleFS alloue par bloc de secteur flash, si bien qu'un script de
- * 30 octets en occupe plusieurs milliers. Un pourcentage d'octets dirait donc
- * « 13 % » alors qu'on approche du nombre de fichiers tenable.
- *
- * On ne publie PAS de taille de bloc : la mesure la donne sans qu'on ait a
- * l'ecrire en dur (utilises / contenu), et une constante recopiee derive.
- * `fichiers` compte TOUT ce qui occupe la partition — scripts, echantillons,
- * cues, a toute profondeur — parce que tout y prend des blocs. `scripts` en est
- * le sous-ensemble (les .nms, ou qu'ils soient).
- *
- * The LAST measure, never a new one (§240): measuring from the web server
- * locked both cores up — the board panel restarted the board each time it
- * opened. False while nothing has measured since boot (all zero). */
-bool infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
-           size_t& octetsUtilises, size_t& octetsTotal);
-
 /** Bench (§240): the measure, step by step — the block count first if `withInfo`,
  *  then the walk, at most `maxSteps` entries. Each step is said on the console
  *  BEFORE it is taken, so the journal that survives a restart names the step that
- *  hung. Returns the steps with their time in µs, as JSON; a completed walk becomes
- *  the measure infos() serves. */
+ *  hung. Returns the steps with their time in µs, as JSON. What storage holds and
+ *  occupies is StorageIndex's (§241). */
 String walkTrace(int maxSteps, bool withInfo);
 
 }  // namespace ScriptStore

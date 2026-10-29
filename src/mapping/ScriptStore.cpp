@@ -1,5 +1,6 @@
 #include "ScriptStore.h"
 #include "../config/Stockage.h"
+#include "../config/StorageIndex.h"
 #include "../config/EcrituresDifferees.h"
 #include "../server/WebDebugConsole.h"
 #include "Repertoire.h"
@@ -135,23 +136,23 @@ String listerJson(Lieu lieu) {
   String out = "[", vus;
   bool premier = true;
   Liste l{ &out, &vus, &premier };
-  File d = LittleFS.open(dossier);
-  if (d && d.isDirectory()) {
-    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-      if (f.isDirectory()) continue;
-      String n = String(f.name());
-      const int slash = n.lastIndexOf('/');
-      if (slash >= 0) n = n.substring(slash + 1);
-      if (!n.endsWith(".nms")) continue;           // la composition porte aussi ses cues, sa source…
-      std::shared_ptr<char> t; size_t na = 0; bool sup = false;
-      if (Differe::attente(_chemin(lieu, n.c_str()).c_str(), t, na, sup)) {
-        if (!sup) _ajouter(l, n, na);
-        else vus += "|" + n + "|";
-        continue;
-      }
-      _ajouter(l, n, f.size());
+  /* From the index (§241): this walk froze the web server 1.1 s at each connection. */
+  struct CtxIndex { Liste* l; String* vus; Lieu lieu; };
+  CtxIndex ci{ &l, &vus, lieu };
+  StorageIndex::visit(dossier.c_str(), false, [](const char* path, size_t size, bool dir, void* c) {
+    if (dir) return;
+    CtxIndex& x = *(CtxIndex*)c;
+    const char* slash = strrchr(path, '/');
+    const String n = slash ? slash + 1 : path;
+    if (!n.endsWith(".nms")) return;               // la composition porte aussi ses cues, sa source…
+    std::shared_ptr<char> t; size_t na = 0; bool sup = false;
+    if (Differe::attente(_chemin(x.lieu, n.c_str()).c_str(), t, na, sup)) {
+      if (!sup) _ajouter(*x.l, n, na);
+      else *x.vus += "|" + n + "|";
+      return;
     }
-  }
+    _ajouter(*x.l, n, size);
+  }, &ci);
   // Ce qui attend et que la flash n'a pas encore : les .nms de CE dossier.
   struct Ctx { Liste* l; size_t lp; };
   Ctx ctx{ &l, dossier.length() + 1 };
@@ -167,19 +168,11 @@ String listerJson(Lieu lieu) {
   return out;
 }
 
-/* L'OCCUPATION DE MAPFS, GARDEE — PAS MESUREE A CHAQUE LECTURE (MESURES §161).
- * usedBytes() parcourt toute l'arborescence, et chaque fichier s'ouvre pour
- * sa taille : ~1 900 lectures en flash. Chacune coupe le cache et gare
- * l'autre coeur ; Reglages les refaisait toutes les 8 s, et pendant un
- * rallumage de la radio l'audio y a perdu jusqu'a 100 ms.
- * §240: measured from the web server (the first /api/diag/reservoirs after a boot, or
- * /api/fichiers), the walk locked both cores up and the task watchdog restarted the
- * board — every time the board panel opened. Until the cause is known, only the bench
- * route measures (walkTrace); infos() serves what it found. */
+/* THE BENCH WALK (MESURES §240-241): what a walk of storage costs, by Arduino's File, as
+ * the measure the board panel made used to — each entry reopened by its full path, 25 to
+ * 45 ms. What storage holds and occupies now comes from StorageIndex, walked once. */
 namespace {
 struct Mesure { size_t fichiers = 0, scripts = 0, contenu = 0, utilises = 0, total = 0; };
-Mesure   g_mesure;
-bool     g_mesureFaite = false;
 
 /* A TOUTE PROFONDEUR : le repertoire range une composition trois niveaux sous
  * la racine (compositions/<nn>/<nom>/, §186). Borne a six niveaux — l'arbre
@@ -234,16 +227,6 @@ bool mesurer(Mesure& m, Trace* t) {
 }
 }  // namespace
 
-bool infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
-           size_t& octetsUtilises, size_t& octetsTotal) {
-  fichiers       = g_mesure.fichiers;
-  scripts        = g_mesure.scripts;
-  octetsContenu  = g_mesure.contenu;
-  octetsUtilises = g_mesure.utilises;
-  octetsTotal    = g_mesure.total;
-  return g_mesureFaite;
-}
-
 String walkTrace(int maxSteps, bool withInfo) {
   if (!monter()) return "{\"error\":\"storage not mounted\"}";
   String out = "[";
@@ -256,10 +239,6 @@ String walkTrace(int maxSteps, bool withInfo) {
   out += "]";
   NIDMI_WEB_LOG("[walk] end: %d steps, %s, %lu ms", t.n, complete ? "complete" : "stopped",
                 (unsigned long)(millis() - t0));
-  if (complete && withInfo) {          // a full measure: the one infos() serves
-    g_mesure = m;
-    g_mesureFaite = true;
-  }
   return "{\"complete\":" + String(complete ? "true" : "false") + ",\"ms\":"
        + String((unsigned long)(millis() - t0)) + ",\"steps\":" + out + "}";
 }

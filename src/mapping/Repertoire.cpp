@@ -1,4 +1,5 @@
 #include "Repertoire.h"
+#include "../config/StorageIndex.h"
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../audio/AudioEngine.h"
@@ -95,7 +96,9 @@ bool mkdirs(const String& chemin) {
   for (int i = 1; i <= (int)chemin.length(); i++) {
     if (i < (int)chemin.length() && chemin[i] != '/') continue;
     const String p = chemin.substring(0, i);
-    if (!LittleFS.exists(p) && !LittleFS.mkdir(p)) return false;
+    if (LittleFS.exists(p)) continue;
+    if (!LittleFS.mkdir(p)) return false;
+    StorageIndex::dirMade(p.c_str());
   }
   return true;
 }
@@ -114,6 +117,7 @@ bool ecrireMaintenant(const String& chemin, const char* data, size_t n) {
     if (!ok) LittleFS.remove(tmp);
   }
   AudioEngine::ecritureFlashFin();
+  if (ok) StorageIndex::fileWritten(chemin.c_str(), n);
   return ok;
 }
 
@@ -142,10 +146,13 @@ bool effacerDossier(const String& dossier, int profondeur = 0) {
   bool ok = true;
   for (int i = 0; i < k; i++) {
     if (estDossier[i]) ok = (profondeur < 4 && effacerDossier(enfants[i], profondeur + 1)) && ok;
-    else ok = LittleFS.remove(enfants[i]) && ok;
+    else if (LittleFS.remove(enfants[i])) StorageIndex::removed(enfants[i].c_str());
+    else ok = false;
   }
   if (reste) ok = effacerDossier(dossier, profondeur) && ok;   // plus de seize : on repasse
-  return LittleFS.rmdir(dossier) && ok;
+  if (!LittleFS.rmdir(dossier)) return false;
+  StorageIndex::removed(dossier.c_str());
+  return ok;
 }
 
 void annoncerIci() {
@@ -282,7 +289,6 @@ bool assurerOuverte(const String& nomPropose, String& raison) {
   const bool ok = mkdirs(dossier);
   AudioEngine::ecritureFlashFin();
   if (!ok) { raison = "creation impossible : " + dossier; return false; }
-  Differe::noterFichiersModifies();
   { VerrouEtat v; _numero = n; _nom = nom; }
   Differe::nvsOctet(NVS_ESPACE, NVS_CLE, n);                // au silence (§157)
   NIDMI_WEB_LOG("[repertoire] composition creee et ouverte : n°%02u « %s »", (unsigned)n, nom.c_str());
@@ -356,7 +362,6 @@ bool nouvelle(const String& nom, uint8_t numero, String& raison, uint8_t& obtenu
   const bool ok = mkdirs(dossierIndex(n) + "/" + nom);
   AudioEngine::ecritureFlashFin();
   if (!ok) { raison = "creation impossible"; return false; }
-  Differe::noterFichiersModifies();
   obtenu = n;
   return ouvrir(n, raison);
 }
@@ -383,7 +388,6 @@ bool enregistrerSous(const String& nom, uint8_t numero, String& raison, uint8_t&
     ok = Differe::lire((source + "/" + fichier).c_str(), t, k) && ecrireMaintenant(cible + "/" + fichier, t.get(), k);
     if (ok) copies++;
   });
-  Differe::noterFichiersModifies();
   if (!ok) {
     effacerDossier(dossierIndex(n));                        // ne rien laisser de moitie
     raison = "copie impossible (storage pleine ?)";
@@ -417,10 +421,10 @@ bool renommer(uint8_t numero, const String& nom, String& raison) {
     ScriptStore::oublierSous((de + "/").c_str());
     AudioEngine::ecritureFlashDebut();
     ok = LittleFS.rename(de, vers);
+    if (ok) StorageIndex::renamed(de.c_str(), vers.c_str());
     AudioEngine::ecritureFlashFin();
     if (ok && _numero == numero) _nom = nom;
   }
-  Differe::noterFichiersModifies();
   if (!ok) { raison = "renommage impossible"; return false; }
   NIDMI_WEB_LOG("[repertoire] n°%02u renommee « %s »", (unsigned)numero, nom.c_str());
   annoncerIci();
@@ -442,10 +446,10 @@ bool changerNumero(uint8_t de, uint8_t vers, String& raison) {
     ScriptStore::oublierSous((dossierIndex(de) + "/").c_str());
     AudioEngine::ecritureFlashDebut();
     ok = LittleFS.rename(dossierIndex(de), dossierIndex(vers));
+    if (ok) StorageIndex::renamed(dossierIndex(de).c_str(), dossierIndex(vers).c_str());
     AudioEngine::ecritureFlashFin();
     if (ok && _numero == de) _numero = vers;
   }
-  Differe::noterFichiersModifies();
   if (!ok) { raison = "deplacement impossible"; return false; }
   if (numeroOuvert() == vers) Differe::nvsOctet(NVS_ESPACE, NVS_CLE, vers);
   NIDMI_WEB_LOG("[repertoire] « %s » : n°%02u -> n°%02u", nom.c_str(), (unsigned)de, (unsigned)vers);
@@ -466,7 +470,6 @@ bool supprimer(uint8_t numero, String& raison) {
   AudioEngine::ecritureFlashDebut();
   const bool ok = effacerDossier(dossier);
   AudioEngine::ecritureFlashFin();
-  Differe::noterFichiersModifies();
   if (!ok) { raison = "effacement incomplet"; return false; }
   NIDMI_WEB_LOG("[repertoire] n°%02u supprimee", (unsigned)numero);
   annoncerIci();

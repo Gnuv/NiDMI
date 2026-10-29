@@ -17,6 +17,7 @@
 #include "../mapping/MappingEngine.h"
 #include "../mapping/VocabulaireEmbarque.h"
 #include "../mapping/ScriptStore.h"
+#include "../config/StorageIndex.h"
 #include "../mapping/CueStore.h"
 #include "../mapping/CompoStore.h"
 #include "../mapping/Repertoire.h"
@@ -526,6 +527,11 @@ void setupAudioAPI(AsyncWebServer& server) {
      * que le tas interne se bat pour 13 ko. */
 
     server.on("/api/audio/samples", HTTP_GET, [](AsyncWebServerRequest *request){
+        /* From storage's index (§241); right after a boot, its first walk may still run. */
+        if (!StorageIndex::waitReady(3000)) {
+            request->send(503, "application/json", "{\"erreur\":\"la carte range encore la liste de ses fichiers : quelques secondes apres le demarrage\"}");
+            return;
+        }
         String json = "{\"mounted\":" + String(SampleStore::monter() ? "true" : "false");
         json += ",\"total\":"  + String(SampleStore::espaceTotal());
         json += ",\"used\":"   + String(SampleStore::espaceUtilise());
@@ -1214,7 +1220,8 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
                        * de cue, rang pour rang ceux qui suivent les permanents. */
                       + ",\"sortants\":" + g_midiRouter.nomsSortantsJson()
                       + ",\"groups\":" + g_midiRouter.linkGroupsJson()   // each link's group (§221)
-                      + ",\"fichiers\":" + ScriptStore::listerJson(lieuDe(request, false)) + "}");
+                      + ",\"fichiers\":" + (StorageIndex::waitReady(3000) ? ScriptStore::listerJson(lieuDe(request, false))
+                                                                       : String("null")) + "}");
     });
 
     /* LA LONGUEUR DE LA CHAINE, dictee par la COMPOSITION.
@@ -1946,14 +1953,14 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
             json += "\"nvs\":null";          // le dire, plutot que d'inventer des zeros
         }
 
-        /* The last measure, never a new one: measuring here locked both cores up (§240). */
-        size_t nf = 0, ns = 0, oc = 0, ou_ = 0, ot = 0;
-        if (ScriptStore::infos(nf, ns, oc, ou_, ot)) {
-            json += ",\"storage\":{\"fichiers\":" + String((unsigned)nf);
-            json += ",\"scripts\":"        + String((unsigned)ns);
-            json += ",\"octets_contenu\":" + String((unsigned)oc);
-            json += ",\"octets_utilises\":"+ String((unsigned)ou_);
-            json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
+        /* From the index, never a walk (§240-241); null until its first walk is done. */
+        const StorageIndex::Stats si = StorageIndex::stats();
+        if (si.measured) {
+            json += ",\"storage\":{\"fichiers\":" + String((unsigned)si.files);
+            json += ",\"scripts\":"        + String((unsigned)si.scripts);
+            json += ",\"octets_contenu\":" + String((unsigned)si.content);
+            json += ",\"octets_utilises\":"+ String((unsigned)si.used);
+            json += ",\"octets_total\":"   + String((unsigned)si.total) + "}";
         } else {
             json += ",\"storage\":null";
         }

@@ -1,4 +1,5 @@
 #include "SampleStore.h"
+#include "../config/StorageIndex.h"
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
 #include "../config/SdCard.h"
@@ -247,37 +248,38 @@ bool monter() {
   // Un televersement coupe par un redemarrage : il n'a jamais ete un son.
   if (LittleFS.exists(PROVISOIRE)) LittleFS.remove(PROVISOIRE);
   _monte = true;
-  Serial.printf("[samples] storage monte — %u o utilises sur %u\n",
-                (unsigned)LittleFS.usedBytes(), (unsigned)LittleFS.totalBytes());
+  /* What storage holds, walked once by a background task: no route walks it (§241).
+   * Its occupancy is said by the index when the walk ends — counting it here cost
+   * two traversals of every block at each boot. */
+  StorageIndex::begin();
+  Serial.println("[samples] storage monte");
   return true;
 }
 
-size_t espaceTotal()   { return _monte ? LittleFS.totalBytes() : 0; }
-size_t espaceUtilise() { return _monte ? LittleFS.usedBytes()  : 0; }
+size_t espaceTotal()   { return _monte ? StorageIndex::stats().total : 0; }
+size_t espaceUtilise() { return _monte ? StorageIndex::stats().used  : 0; }
 
 String listerJson() {
   if (!monter()) return "[]";
   String out = "[";
-  File d = LittleFS.open(DOSSIER);
-  if (d && d.isDirectory()) {
-    File f = d.openNextFile();
-    bool premier = true;
-    while (f) {
-      if (!f.isDirectory()) {
-        if (!premier) out += ",";
-        premier = false;
-        const char* base = _base(f.path());
-        out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size());
-        /* SA DUREE, quand il est charge (MESURES §196) : l'editeur de clips en
-         * fait l'invite de la fin d'une selection. */
-        const int i = _index(base);
-        if (i >= 0 && _ech[i].freq)
-          out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
-        out += "}";
-      }
-      f = d.openNextFile();
-    }
-  }
+  /* storage's sounds, from the index (§241): a walk of the flash here froze the web
+   * server 1.5 s at each connection of the app. */
+  struct Ctx { String* out; bool premier; };
+  Ctx ctx{ &out, true };
+  StorageIndex::visit(DOSSIER, false, [](const char* path, size_t size, bool dir, void* c) {
+    if (dir) return;
+    Ctx& x = *(Ctx*)c;
+    if (!x.premier) *x.out += ",";
+    x.premier = false;
+    const char* base = _base(path);
+    *x.out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String((unsigned)size);
+    /* SA DUREE, quand il est charge (MESURES §196) : l'editeur de clips en
+     * fait l'invite de la fin d'une selection. */
+    const int i = _index(base);
+    if (i >= 0 && _ech[i].freq)
+      *x.out += ",\"ms\":" + String((uint32_t)((uint64_t)_ech[i].trames * 1000ULL / _ech[i].freq));
+    *x.out += "}";
+  }, &ctx);
   /* The SD card's sounds, after them — "volume" says where they come from. A name
    * that storage already holds wins, and is not listed twice. */
   File s = SdCard::openForWeb(SdCard::FOLDER);        // the web server's walk: never on a card in doubt
@@ -286,7 +288,8 @@ String listerJson() {
     for (File f = s.openNextFile(); f; f = s.openNextFile()) {
       if (f.isDirectory()) continue;
       const char* base = _base(f.path());
-      if (!_isWav(base) || LittleFS.exists(_chemin(base))) continue;
+      size_t inStorage;
+      if (!_isWav(base) || StorageIndex::fileSize(_chemin(base).c_str(), inStorage)) continue;
       if (!isFirst) out += ",";
       isFirst = false;
       out += "{\"name\":\"" + String(base) + "\",\"bytes\":" + String(f.size())
@@ -395,15 +398,15 @@ bool ecrireFin(const void* qui, String& raison) {
   }
   _enCours.close();
   _proprietaire = nullptr;
-  Differe::noterFichiersModifies();
   bool bon = false;
+  size_t taille = 0;
   if (_echecEcriture) {
     raison = "ecriture incomplete (storage pleine ?)";
   } else {
     File f = LittleFS.open(PROVISOIRE, FILE_READ);
     uint16_t c; uint32_t fr, t;
     if (!f) raison = "fichier illisible";
-    else { bon = _lireEntete(f, c, fr, t, raison); f.close(); }
+    else { taille = f.size(); bon = _lireEntete(f, c, fr, t, raison); f.close(); }
   }
   if (bon) {
     // L'ancien, s'il y en a un, cede la place au dernier moment.
@@ -413,6 +416,7 @@ bool ecrireFin(const void* qui, String& raison) {
       bon = LittleFS.rename(PROVISOIRE, dest);
       if (!bon) raison = "renommage impossible dans storage";
     }
+    if (bon) StorageIndex::fileWritten(dest.c_str(), taille);
   }
   if (!bon) {
     LittleFS.remove(PROVISOIRE);
@@ -426,15 +430,15 @@ void ecrireAbandon(const void* qui) {
   _enCours.close();
   _proprietaire = nullptr;
   LittleFS.remove(PROVISOIRE);
-  Differe::noterFichiersModifies();
   Serial.printf("[samples] %s : televersement interrompu, rien n'est garde\n",
                 _nomEnCours.c_str());
 }
 
 bool supprimer(const char* nom) {
   if (!monter()) return false;
-  Differe::noterFichiersModifies();
-  return LittleFS.remove(_chemin(nom));
+  if (!LittleFS.remove(_chemin(nom))) return false;
+  StorageIndex::removed(_chemin(nom).c_str());
+  return true;
 }
 
 /* TOUT CHARGER, UNE FOIS : au demarrage (restaurerAuBoot), ou au premier son

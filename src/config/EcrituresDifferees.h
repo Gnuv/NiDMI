@@ -82,11 +82,6 @@ uint16_t nombreEnAttente();    // fichiers + valeurs NVS
  * l'app dit « en attente du silence » (CONVERGENCE §9.7, MESURES §188). */
 void surAttente(void (*rappel)(uint16_t nombre));
 
-/** Les fichiers de storage ont change — ecrits ou supprimes, ici ou par un
- *  televersement. Ce qu'on mesurait de leur occupation est a refaire (et se
- *  refait au silence : ScriptStore::infos, MESURES §161). */
-void noterFichiersModifies();
-uint32_t generationFichiers();
 String etatJson();
 
 }  // namespace Differe
