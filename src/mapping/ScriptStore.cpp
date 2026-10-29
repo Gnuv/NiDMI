@@ -137,7 +137,7 @@ String listerJson(Lieu lieu) {
   Liste l{ &out, &vus, &premier };
   File d = LittleFS.open(dossier);
   if (d && d.isDirectory()) {
-    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+    for (File f = Stockage::nextEntry(d); f; f = Stockage::nextEntry(d)) {
       if (f.isDirectory()) continue;
       String n = String(f.name());
       const int slash = n.lastIndexOf('/');
@@ -209,7 +209,7 @@ void parcourirPour(Mesure& m, const String& dossier, int profondeur, Trace* t) {
   for (;;) {
     if (!step(t, "next", dossier)) return;
     t0 = micros();
-    File f = d.openNextFile();
+    File f = Stockage::nextEntry(d);
     if (!f) return;
     const String p = f.path();
     stepDone(t, "next", p, t0);

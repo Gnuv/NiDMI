@@ -12,7 +12,23 @@
 // Le nom etait recopie dans six fichiers : une copie finit par diverger. Il
 // est ici, et nulle part ailleurs ; la table (tools/nidmi_s3_ota.csv) dit le
 // meme.
+#include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
 namespace Stockage {
 constexpr const char* PARTITION = "storage";    // le nom dans la table de partitions
 constexpr const char* BASE      = "/storage";   // son point de montage ; les chemins montres commencent apres
+
+/* THE NEXT ENTRY OF A WALK OF storage — after 1 ms of sleep (MESURES §240).
+ * Every flash read parks core 0 (cache off on both cores), and LittleFS reads
+ * hundreds of times per entry: 16 to 60 ms of reads one after the other. A whole
+ * walk (160 entries) took more than 5 s, core 0's idle task never ran, and the
+ * task watchdog restarted the board — the board panel did it each time it opened.
+ * The sleep gives core 0 its breath between two entries; an entry alone never
+ * lasts 5 s. Every walk of storage, from any task, takes its entries here. */
+inline File nextEntry(File& dir) {
+  vTaskDelay(1);
+  return dir.openNextFile();
+}
 }  // namespace Stockage
