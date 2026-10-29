@@ -1189,6 +1189,14 @@ String quiTenaitLesCoeurs(uint8_t tours) {
 void nidmi_autopsie(bool active) { g_autopsie = active; if (!active) g_photosPrises = 0; }
 bool nidmi_autopsieActive() { return g_autopsie; }
 
+/* ARMED FOR THE NEXT BOOTS (RTC memory: a software restart keeps it, a power cut does not).
+ * A late block at boot came once in three or four restarts, before any request could switch
+ * the autopsy on: armed, it is on from nidmi_begin(), restart after restart, until switched off. */
+RTC_NOINIT_ATTR static uint32_t s_autopsyBootMagic;
+static const uint32_t AUTOPSY_BOOT_MAGIC = 0x4155544FUL;   // "AUTO"
+void nidmi_autopsyAtBoot(bool armed) { s_autopsyBootMagic = armed ? AUTOPSY_BOOT_MAGIC : 0; }
+bool nidmi_autopsyAtBootArmed() { return s_autopsyBootMagic == AUTOPSY_BOOT_MAGIC; }
+
 namespace {
 /* Les releves d'un tour, dans le meme anneau que les photos. */
 struct Tour {
@@ -1440,6 +1448,7 @@ void nidmi_begin() {
     // Ce que la vie precedente a garde en memoire RTC — son resume dit qui a
     // demande le redemarrage : apres capturerDemandeur() (§162).
     JournalAvant::capturer();
+    if (nidmi_autopsyAtBootArmed()) g_autopsie = true;
     Serial.begin(115200);
     delay(50);
 

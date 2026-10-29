@@ -1643,17 +1643,23 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
     /* L'AUTOPSIE DES BLOCS LENTS, A LA DEMANDE (MESURES §161) : les
      * photographies des taches, qui disent QUI tenait chaque coeur et dans
      * quel etat etait l'audio. Eteinte par defaut (une photo coute ~3 ms,
-     * interruptions coupees, sur le coeur de l'audio). etat=on|off ; en RAM. */
+     * interruptions coupees, sur le coeur de l'audio). etat=on|off ; en RAM.
+     * etat=boot : on, and on again at every software restart until etat=off (a late
+     * block at boot comes before any request could switch it on). */
     server.on("/api/diag/autopsie", HTTP_ANY, [](AsyncWebServerRequest *request){
         extern void nidmi_autopsie(bool);
         extern bool nidmi_autopsieActive();
+        extern void nidmi_autopsyAtBoot(bool);
+        extern bool nidmi_autopsyAtBootArmed();
         if (request->hasParam("etat", true) || request->hasParam("etat")) {
             const String e = request->hasParam("etat", true) ? request->getParam("etat", true)->value()
                                                              : request->getParam("etat")->value();
-            nidmi_autopsie(e == "on");
+            nidmi_autopsie(e == "on" || e == "boot");
+            nidmi_autopsyAtBoot(e == "boot" || (e == "on" && nidmi_autopsyAtBootArmed()));
         }
         request->send(200, "application/json",
-            String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false") + "}");
+            String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false")
+            + ",\"au_demarrage\":" + (nidmi_autopsyAtBootArmed() ? "true" : "false") + "}");
     });
 
     /* LA VIE PRECEDENTE (MESURES §162-163). Ce que la carte a garde en memoire
