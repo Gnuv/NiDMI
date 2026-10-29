@@ -25,6 +25,8 @@ struct Releve {
   TaskHandle_t pireTache = nullptr;
   uint32_t pireAttenteUs = 0;              // attente du coeur voisin avant l'operation
   TaskHandle_t pireAttenteTache = nullptr;
+  uint32_t plusOps = 0;                    // the task that launched the most operations, and how many
+  TaskHandle_t plusTache = nullptr;
 };
 
 /** Pose les crochets. Une fois, au demarrage. */
@@ -37,6 +39,13 @@ Releve releverEtRaz();
  *  included —, never reset (it wraps: take differences). Both cores are stopped meanwhile: a
  *  measure of what a task costs takes them out of the time it took (the synth voices, §214). */
 uint32_t cyclesSinceBoot();
+
+/** From now on, a burst launched from core 1 is caught (the audio has started). */
+void watchBursts();
+
+/** The first burst of flash reads launched from core 1 since the audio started — against the rule of §242 —:
+ *  its task, when (ms since boot) and its stack (PCs, for addr2line). False: none. */
+bool rafaleCoeur1(String& texte, String& pile);
 
 /** La plus longue operation de flash depuis le demarrage, relevee a chaque lecture : sa duree,
  *  l'heure (ms) du releve qui l'a vue, la tache qui l'a lancee. */

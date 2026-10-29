@@ -1201,7 +1201,8 @@ namespace {
 /* Les releves d'un tour, dans le meme anneau que les photos. */
 struct Tour {
     uint32_t ops = 0, flashUs = 0, flashPireUs = 0, attenteUs = 0;
-    TaskHandle_t flashTache = nullptr, attenteTache = nullptr;
+    TaskHandle_t flashTache = nullptr, attenteTache = nullptr, plusTache = nullptr;
+    uint32_t plusOps = 0;
     const char* section = "-";
     uint32_t sectionUs = 0, ecartEof = 0, nbEof = 0, ecartTic = 0;
 };
@@ -1279,6 +1280,17 @@ static void wifiBoucle(){
             JournalAvant::compteurs(blocs, retards, retardsEcritures);
         }
         const SurveillantFlash::Releve fl = SurveillantFlash::releverEtRaz();
+        {
+            static bool rafaleDite = false;     // the rule of §242: said once, with its stack
+            String r, pile;
+            if (!rafaleDite && SurveillantFlash::rafaleCoeur1(r, pile)) {
+                rafaleDite = true;
+                NIDMI_WEB_LOG("[flash] rafale de lectures partie du coeur 1, celui de l'audio (§242) : %s", r.c_str());
+                // A console line holds ~200 characters: the stack in lines of eight.
+                for (int i = 0; i < (int)pile.length(); i += 9 * 8)
+                    NIDMI_WEB_LOG("[flash] pile :%s", pile.substring(i, i + 9 * 8).c_str());
+            }
+        }
         uint32_t ecartEof = 0, nbEof = 0, ecartTic = 0;
         AudioEngine::sondesEtRaz(ecartEof, nbEof, ecartTic);
         const uint32_t tp = nidmi_section("photo");
@@ -1292,6 +1304,7 @@ static void wifiBoucle(){
             t.ops = fl.operations; t.flashUs = fl.totalUs; t.flashPireUs = fl.pireUs;
             t.flashTache = fl.pireTache; t.section = g_sectionNom; t.sectionUs = g_sectionUs;
             t.attenteUs = fl.pireAttenteUs; t.attenteTache = fl.pireAttenteTache;
+            t.plusOps = fl.plusOps; t.plusTache = fl.plusTache;
             t.ecartEof = ecartEof; t.nbEof = nbEof; t.ecartTic = ecartTic;
         }
         if (pire > 8000) {
@@ -1305,6 +1318,7 @@ static void wifiBoucle(){
                     s.ops += u.ops; s.flashUs += u.flashUs; s.nbEof += u.nbEof;
                     if (u.flashPireUs > s.flashPireUs) { s.flashPireUs = u.flashPireUs; s.flashTache = u.flashTache; }
                     if (u.attenteUs > s.attenteUs) { s.attenteUs = u.attenteUs; s.attenteTache = u.attenteTache; }
+                    if (u.plusOps > s.plusOps) { s.plusOps = u.plusOps; s.plusTache = u.plusTache; }
                     if (u.sectionUs > s.sectionUs) { s.sectionUs = u.sectionUs; s.section = u.section; }
                     if (u.ecartEof > s.ecartEof) s.ecartEof = u.ecartEof;
                     if (u.ecartTic > s.ecartTic) s.ecartTic = u.ecartTic;
@@ -1335,8 +1349,9 @@ static void wifiBoucle(){
                               suspTache ? pcTaskGetName(suspTache) : "-",
                               (unsigned long)(retardGarde / 1000), (unsigned long)((retardGarde % 1000) / 100));
             }
-            NIDMI_WEB_LOG("[audio] flash : %lu op, %lu.%lu ms en tout, pire %lu.%lu ms (%s) ; attente du coeur voisin : pire %lu.%lu ms (%s)",
-                          (unsigned long)s.ops,
+            NIDMI_WEB_LOG("[audio] flash : %lu op, dont %lu par %s en un tour, %lu.%lu ms en tout, pire %lu.%lu ms (%s) ; attente du coeur voisin : pire %lu.%lu ms (%s)",
+                          (unsigned long)s.ops, (unsigned long)s.plusOps,
+                          s.plusTache ? pcTaskGetName(s.plusTache) : "-",
                           (unsigned long)(s.flashUs / 1000), (unsigned long)((s.flashUs % 1000) / 100),
                           (unsigned long)(s.flashPireUs / 1000), (unsigned long)((s.flashPireUs % 1000) / 100),
                           s.flashTache ? pcTaskGetName(s.flashTache) : "-",

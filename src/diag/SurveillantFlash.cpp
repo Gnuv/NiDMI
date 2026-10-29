@@ -3,6 +3,9 @@
 #include <esp_cpu.h>
 #include <esp_flash.h>
 #include <esp_private/esp_clk.h>
+#include <esp_debug_helpers.h>
+#include <esp_timer.h>
+#include <esp_cpu_utils.h>
 
 namespace SurveillantFlash {
 namespace {
@@ -25,6 +28,23 @@ DRAM_ATTR TaskHandle_t g_pireTache = nullptr;
 // rien d'autre ne passe sur son coeur, l'audio compris.
 DRAM_ATTR volatile uint32_t g_pireAttenteCycles = 0;
 DRAM_ATTR TaskHandle_t g_pireAttenteTache = nullptr;
+/* WHO LAUNCHES THE MOST (§242): a burst is thousands of short reads, none of them the longest —
+ * the worst one named the wrong task. Four tasks per reading, counted at the end of each op. */
+constexpr int kQui = 4;
+DRAM_ATTR TaskHandle_t g_quiTache[kQui] = {};
+DRAM_ATTR volatile uint32_t g_quiOps[kQui] = {};
+/* THE RULE OF §242 WATCHED: a burst of flash reads never leaves from core 1, the audio's. The
+ * first task that launches kRafale of them there in one reading is named, with its stack —
+ * taken in debut(), before the cache goes off. Once per boot, from the audio's start: setup()'s
+ * own bursts, before it, cost nothing. */
+constexpr uint32_t kRafale = 400;
+constexpr int      kPile = 20;
+DRAM_ATTR volatile uint32_t g_coeur1Ops = 0;
+DRAM_ATTR volatile bool g_rafaleArmee = false;
+DRAM_ATTR volatile bool g_rafalePrise = false;
+DRAM_ATTR TaskHandle_t g_rafaleTache = nullptr;
+DRAM_ATTR uint32_t g_rafalePile[kPile] = {};
+DRAM_ATTR uint32_t g_rafaleMs = 0;
 
 /* Le temps au compteur de cycles : une lecture de registre, sure cache coupe
  * (esp_timer n'est pas garanti en IRAM). Debut et fin d'une operation
@@ -33,6 +53,17 @@ IRAM_ATTR esp_err_t debut(void* arg) {
   // La tache se lit AVANT : cache encore la. Le temps, APRES : c'est alors
   // qu'on tient la flash (une autre operation a pu nous faire attendre).
   const TaskHandle_t t = xTaskGetCurrentTaskHandle();
+  if (g_rafaleArmee && !g_rafalePrise && esp_cpu_get_core_id() == 1 && ++g_coeur1Ops >= kRafale) {
+    g_rafalePrise = true;
+    g_rafaleTache = t;
+    g_rafaleMs = (uint32_t)(esp_timer_get_time() / 1000);
+    esp_backtrace_frame_t f;
+    esp_backtrace_get_start(&f.pc, &f.sp, &f.next_pc);
+    for (int i = 0; i < kPile; i++) {
+      g_rafalePile[i] = esp_cpu_process_stack_pc(f.pc);
+      if (!f.next_pc || !esp_backtrace_get_next_frame(&f)) break;
+    }
+  }
   const uint32_t avant = (uint32_t)esp_cpu_get_cycle_count();
   const esp_err_t r = g_debutOrig(arg);
   g_tacheEnCours = t;
@@ -49,6 +80,10 @@ IRAM_ATTR esp_err_t fin(void* arg) {
   g_totalCycles = g_totalCycles + d;
   g_cyclesSinceBoot = g_cyclesSinceBoot + d;
   if (d > g_pireCycles) { g_pireCycles = d; g_pireTache = g_tacheEnCours; }
+  for (int i = 0; i < kQui; i++) {
+    if (g_quiTache[i] == g_tacheEnCours) { g_quiOps[i] = g_quiOps[i] + 1; break; }
+    if (!g_quiTache[i]) { g_quiTache[i] = g_tacheEnCours; g_quiOps[i] = 1; break; }
+  }
   return g_finOrig(arg);
 }
 
@@ -83,8 +118,14 @@ Releve releverEtRaz() {
   r.pireTache = g_pireTache;
   r.pireAttenteUs = g_pireAttenteCycles / g_cyclesParUs;
   r.pireAttenteTache = g_pireAttenteTache;
+  for (int i = 0; i < kQui; i++) {
+    if (g_quiOps[i] > r.plusOps) { r.plusOps = g_quiOps[i]; r.plusTache = g_quiTache[i]; }
+    g_quiTache[i] = nullptr;
+    g_quiOps[i] = 0;
+  }
   g_pireAttenteCycles = 0;
   g_pireAttenteTache = nullptr;
+  g_coeur1Ops = 0;
   g_n = 0;
   g_totalCycles = 0;
   g_pireCycles = 0;
@@ -95,6 +136,17 @@ Releve releverEtRaz() {
     strlcpy(g_bootPireTache, r.pireTache ? pcTaskGetName(r.pireTache) : "?", sizeof(g_bootPireTache));
   }
   return r;
+}
+
+void watchBursts() { g_coeur1Ops = 0; g_rafaleArmee = true; }
+
+bool rafaleCoeur1(String& texte, String& pile) {
+  if (!g_rafalePrise) return false;
+  texte = String(g_rafaleTache ? pcTaskGetName(g_rafaleTache) : "?") + " a " + String(g_rafaleMs) + " ms";
+  pile = "";
+  char b[12];
+  for (int i = 0; i < kPile && g_rafalePile[i]; i++) { snprintf(b, sizeof b, " %08lx", (unsigned long)g_rafalePile[i]); pile += b; }
+  return true;
 }
 
 uint32_t cyclesSinceBoot() { return g_cyclesSinceBoot; }

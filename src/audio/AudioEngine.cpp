@@ -27,6 +27,7 @@
 #include "../config/EcrituresDifferees.h"
 #include "../midi/MidiRouter.h"   // le silence MIDI, pour le moment d'ecrire en flash (§170)
 #include <Preferences.h>
+#include "../diag/SurveillantFlash.h"
 #include <driver/i2s_std.h>
 #include <esp_attr.h>
 #include <esp_freertos_hooks.h>
@@ -1730,6 +1731,7 @@ bool ensureStarted() {
     i2s.end(); vQueueDelete(evenements); evenements = nullptr;
     return false;
   }
+  SurveillantFlash::watchBursts();       // no burst of flash reads from this core any more (§242)
   // La garde d'election, sur le meme coeur (voir plus haut). Une seule, pour
   // toute la vie de la carte : elle ne depend pas de la tache audio.
   if (!garde && xTaskCreatePinnedToCore(gardeElection, "garde", 1280, nullptr,
