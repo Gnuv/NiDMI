@@ -27,6 +27,8 @@
 #include "mapping/CueStore.h"
 #include "mapping/CompoStore.h"
 #include "mapping/Repertoire.h"
+#include "mapping/ScriptStore.h"
+#include "config/StorageIndex.h"
 #include "config/EcrituresDifferees.h"
 #include "config/Instrument.h"
 #include "config/Concert.h"
@@ -989,6 +991,15 @@ static void rechargerComposition(){
     if (Cues::lectureAuDemarrage()) askBootPlay();     // the loop plays it once the SD's sounds are in (§236)
 }
 
+/* Ouvrir une composition : sa relecture, puis ses scripts lus d'avance, par la tache de
+ * storage sur le coeur 0 — une rafale de lectures de flash partie du coeur 1 affamait
+ * l'audio (§242). */
+static void reloadAndPreload() {
+    rechargerComposition();
+    ScriptStore::preload();
+}
+static void rechargerSurCoeur0() { StorageIndex::run(reloadAndPreload, true); }
+
 /* Les demandes de composition des scripts, AVANT le transport : « ouvre la 2 »
  * puis « joue » tient en un tour. */
 static void executerRepertoire(){
@@ -1563,6 +1574,10 @@ void nidmi_begin() {
     /* Le repertoire d'abord (MESURES §186) : il dit quelle composition est
        ouverte, donc ou la source, les cues et la chaine se lisent. */
     Repertoire::demarrer();
+    /* The storage task, from here (§242): the flash bursts go through it — at 3 s, the loading of
+       the sounds of storage, by restaurerAuBoot; it was started by that very loading. */
+    StorageIndex::begin();
+    StorageIndex::run(ScriptStore::preload, false);   // its scripts, on core 0, before the first cue asks the loop (§242)
     Instrument::demarrer();         // son nom (§188), hors de l'interface
     Concert::demarrer();            // le verrou de concert, relu AVANT le serveur (§197)
     // La composition que la carte garde pour l'app (MESURES §156) : lue en PSRAM
@@ -1707,7 +1722,7 @@ void nidmi_begin() {
     Cues::restaurerOptions();
     TransportNotes::begin();        // a pedal on the next cue (§215): before MIDI reaches the cues
     Cues::surChangement(publierEtatsTransport);
-    Repertoire::surOuverture(rechargerComposition);     // ouvrir = redemarrer dessus (§186)
+    Repertoire::surOuverture(rechargerSurCoeur0);       // ouvrir = redemarrer dessus (§186), relu sur le coeur 0 (§242)
     /* Ce qui attend le silence pour s'ecrire en flash, dit aux onglets quand ca
        change (§188) : leur barre de titre dit « en attente du silence ». */
     Differe::surAttente([](uint16_t n) {

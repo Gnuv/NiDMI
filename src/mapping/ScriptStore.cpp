@@ -5,6 +5,8 @@
 #include "../server/WebDebugConsole.h"
 #include "Repertoire.h"
 #include <LittleFS.h>
+#include <dirent.h>
+#include <vector>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -20,7 +22,7 @@ namespace {
  * supprimer() le tiennent a jour — ce sont les seuls chemins d'ecriture des
  * .nms (les ecritures differees ne font qu'y reporter ce qu'ecrire() a pose).
  * Seules des taches y touchent. */
-constexpr int    kGardesMax = 32;
+constexpr int    kGardesMax = 64;          // a composition held 42 scripts on 29/10 (§242)
 constexpr size_t kNomMax    = 160;         // un CHEMIN complet (§186), en PSRAM
 struct Garde { char nom[kNomMax]; char* texte; size_t n; };
 Garde* _gardes = nullptr;          // kGardesMax entrees, en PSRAM, prises au premier besoin
@@ -241,6 +243,68 @@ String walkTrace(int maxSteps, bool withInfo) {
                 (unsigned long)(millis() - t0));
   return "{\"complete\":" + String(complete ? "true" : "false") + ",\"ms\":"
        + String((unsigned long)(millis() - t0)) + ",\"steps\":" + out + "}";
+}
+
+/* READ AHEAD, FROM CORE 0 (§242). What the loop would read from the flash at the first cue —
+ * the scripts of the open composition and of the interface — is read into the PSRAM cache by
+ * the storage task on core 0 (StorageIndex::run), at boot and after a reopening: a burst of flash reads started on core 1,
+ * the audio's core, starved the audio. The scripts of another composition leave the cache
+ * first: it holds kGardesMax. */
+void preload() {
+  if (!monter()) return;
+  const String ouvert = Repertoire::dossierOuvert();
+  const String racine = String(Repertoire::DOSSIER) + "/";
+  {
+    VerrouGardes v;
+    for (int i = 0; _gardes && i < _nGardes;) {
+      const char* n = _gardes[i].nom;
+      const bool ailleurs = !strncmp(n, racine.c_str(), racine.length())
+          && !(ouvert.length() && !strncmp(n, ouvert.c_str(), ouvert.length()) && n[ouvert.length()] == '/');
+      if (ailleurs) { heap_caps_free(_gardes[i].texte); _gardes[i] = _gardes[--_nGardes]; continue; }
+      i++;
+    }
+  }
+  int lus = 0;
+  for (const Lieu lieu : { Lieu::Composition, Lieu::Interface }) {
+    const String d = _dossier(lieu);
+    if (!d.length()) continue;
+    /* The names first, then the reads: lire() takes locks that a listing must not hold. */
+    std::vector<String> noms;
+    if (StorageIndex::ready()) {
+      StorageIndex::visit(d.c_str(), false, [](const char* p, size_t, bool dir, void* c) {
+        const char* base = strrchr(p, '/') + 1;
+        const size_t k = strlen(base);
+        if (!dir && k > 4 && !strcmp(base + k - 4, ".nms"))
+          static_cast<std::vector<String>*>(c)->push_back(String(base));
+      }, &noms);
+    } else if (DIR* r = opendir((String(BASE) + d).c_str())) {
+      while (dirent* e = readdir(r)) {
+        const size_t k = strlen(e->d_name);
+        if (e->d_type != DT_DIR && k > 4 && !strcmp(e->d_name + k - 4, ".nms")) noms.push_back(String(e->d_name));
+      }
+      closedir(r);
+    }
+    /* Straight into the PSRAM cache, never through a String: up to 4 KB, Arduino allocates it in
+     * internal RAM (SPIRAM_MALLOC_ALWAYSINTERNAL) — while the boot serves the app's page. */
+    for (const String& nom : noms) {
+      const String c = _chemin(lieu, nom.c_str());
+      std::shared_ptr<char> t; size_t n = 0; bool sup = false;
+      if (Differe::attente(c.c_str(), t, n, sup)) continue;    // pending: read from the PSRAM already
+      {
+        VerrouGardes v;
+        if (_gardes && _trouver(c.c_str())) continue;
+      }
+      File f = LittleFS.open(c, FILE_READ);
+      if (!f) continue;
+      const size_t taille = f.size();
+      char* tampon = (taille && taille <= TAILLE_MAX)
+                         ? (char*)heap_caps_malloc(taille, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+      if (tampon && f.read((uint8_t*)tampon, taille) == taille) { _garder(c.c_str(), tampon, taille); lus++; }
+      f.close();
+      heap_caps_free(tampon);
+    }
+  }
+  NIDMI_WEB_LOG("[scripts] %d script(s) lus d'avance, depuis le coeur 0", lus);
 }
 
 bool existe(Lieu lieu, const char* nom) {

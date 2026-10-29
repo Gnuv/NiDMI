@@ -8,6 +8,7 @@
 #include <esp_littlefs.h>
 #include <esp_partition.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
@@ -30,6 +31,11 @@ struct Lock {
 
 volatile bool g_ready = false;
 TaskHandle_t  g_task = nullptr;
+/* The work others hand to this task (run()). A null fn only wakes it: a block count to redo. */
+struct Job { void (*fn)(); SemaphoreHandle_t done; };
+StaticQueue_t g_jobsBuf;
+uint8_t       g_jobsStore[4 * sizeof(Job)];
+QueueHandle_t g_jobs = xQueueCreateStatic(4, sizeof(Job), g_jobsStore, &g_jobsBuf);
 size_t        g_used = 0, g_total = 0;
 volatile bool g_usedStale = false;        // a write since the last block count
 
@@ -69,7 +75,13 @@ void putParents(const char* path) {
 
 void wake() {
   g_usedStale = true;
-  if (g_task) xTaskNotifyGive(g_task);
+  const Job j{ nullptr, nullptr };
+  xQueueSend(g_jobs, &j, 0);             // full: the task is busy and will see it
+}
+
+void doJob(const Job& j) {
+  if (j.fn) j.fn();
+  if (j.done) xSemaphoreGive(j.done);
 }
 
 /* THE WALK, by the POSIX calls: one stat per file, none per folder (Arduino's
@@ -80,6 +92,11 @@ void walk(const String& rel, int depth) {
   DIR* d = opendir(full.c_str());
   if (!d) return;
   while (dirent* e = readdir(d)) {
+    /* What is handed over meanwhile does not wait for the end of the walk (~7 s): the loop waits
+     * for the boot's sound loading. And a tick's pause per entry: the walk reads for seconds, and
+     * IDLE0 — which the task watchdog watches — must pass (§242). */
+    for (Job j; xQueueReceive(g_jobs, &j, 0) == pdTRUE;) doJob(j);
+    vTaskDelay(1);
     const String p = (rel == "/" ? String() : rel) + "/" + e->d_name;
     if (e->d_type == DT_DIR) {
       { Lock l; put(p.c_str(), 0, true); }
@@ -106,6 +123,9 @@ void countBlocks() {
 }
 
 void task(void*) {
+  /* What was handed over before the walk goes first: the open composition's scripts, which
+   * the first cue will ask for. */
+  for (Job j; xQueueReceive(g_jobs, &j, 0) == pdTRUE;) doJob(j);
   const uint32_t t0 = millis();
   walk("/", 0);
   g_usedStale = false;
@@ -116,9 +136,12 @@ void task(void*) {
   NIDMI_WEB_LOG("[storage] index : %d entrees, %u o utilises sur %u, en %lu ms",
                 n, (unsigned)g_used, (unsigned)g_total, (unsigned long)(millis() - t0));
   for (;;) {
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    while (g_usedStale) {
-      if (!AudioEngine::silencePourLaFlash()) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+    Job j;
+    if (xQueueReceive(g_jobs, &j, g_usedStale ? pdMS_TO_TICKS(500) : portMAX_DELAY) == pdTRUE) {
+      doJob(j);
+      continue;
+    }
+    if (g_usedStale && AudioEngine::silencePourLaFlash()) {
       g_usedStale = false;
       countBlocks();
     }
@@ -134,8 +157,24 @@ void begin() {
   if (const esp_partition_t* p = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY,
                                                          Stockage::PARTITION))
     g_total = p->size;
-  // Core 1, under everything that plays (audio 11, loop 10, web 9, guard 5).
-  xTaskCreatePinnedToCore(task, "storage-index", 4096, nullptr, 1, &g_task, 1);
+  /* Core 0 — a burst of flash reads started on core 1 starved the audio (§242) —, above sd-card
+   * (1): the loop waits for the boot's sound loading, handed over here. Without a pause, the walk
+   * kept IDLE0 out for ~6 s: the task watchdog watches IDLE0 (not IDLE1), and restarted the board
+   * three boots in a row; at IDLE's priority, the walk took 14 s, and a route waits for it. Hence
+   * the pause per entry, in walk(): 3.9 s. 5 KB: the reload of the demo composition used 2.6. */
+  xTaskCreatePinnedToCore(task, "storage", 5120, nullptr, 2, &g_task, 0);
+}
+
+void run(void (*fn)(), bool wait) {
+  if (!fn) return;
+  if (g_task && xTaskGetCurrentTaskHandle() == g_task) { fn(); return; }   // from a job: it would wait for itself
+  if (!g_entries && !g_task) { /* not begun: the queue waits for the task — unless the caller waits */
+    if (wait) { fn(); return; }
+  }
+  StaticSemaphore_t buf;
+  const Job j{ fn, wait ? xSemaphoreCreateBinaryStatic(&buf) : nullptr };
+  if (xQueueSend(g_jobs, &j, portMAX_DELAY) != pdTRUE) { if (j.done) vSemaphoreDelete(j.done); fn(); return; }
+  if (j.done) { xSemaphoreTake(j.done, portMAX_DELAY); vSemaphoreDelete(j.done); }
 }
 
 bool ready() { return g_ready; }

@@ -445,7 +445,7 @@ bool supprimer(const char* nom) {
  * demande. Un fichier refuse (mauvais format, PSRAM pleine) est DIT et saute :
  * un magasin qui echoue en silence est pire qu'un magasin vide.
  *
- * Storage first, HERE; the SD card next, in ITS task (SdCard): MBs read over SPI
+ * Storage first, by the storage task; the SD card next, in ITS task (SdCard): MBs read over SPI
  * are read neither in the loop, nor in the web server, nor under the store's lock. */
 namespace {
 // Under the lock.
@@ -471,15 +471,22 @@ void _loadStorage() {
   Serial.printf("[samples] %u echantillons prets, %u o en PSRAM\n",
                 (unsigned)_prets, (unsigned)_octets);
 }
+void _loadStorageOnce() {
+  Verrou verrou;
+  if (_charge) return;
+  _charge = true;
+  _loadStorage();
+}
 }  // namespace
 
 uint8_t chargerTout() {
   {
     Verrou verrou;
     if (_charge) return _prets;
-    _charge = true;
-    _loadStorage();
   }
+  /* By the storage task, on core 0 (§242): called by the loop at boot, the walk and the reads of
+   * storage/samples were a burst of flash reads from the audio's core — a late block at boot. */
+  StorageIndex::run(_loadStorageOnce, true);
   SdCard::loadSounds();                // no effect if the card is not mounted
   Verrou verrou;
   return _prets;

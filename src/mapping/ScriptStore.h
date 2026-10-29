@@ -53,6 +53,11 @@ bool lire(Lieu lieu, const char* nom, String& contenu);
 
 bool existe(Lieu lieu, const char* nom);
 
+/** Reads the scripts of the open composition and of the interface into the PSRAM cache —
+ *  from core 0, before the loop asks for them (§242). The other compositions' scripts leave
+ *  the cache first. Any task but the audio's core: it is a burst of flash reads. */
+void preload();
+
 /** Bench (§240): the measure, step by step — the block count first if `withInfo`,
  *  then the walk, at most `maxSteps` entries. Each step is said on the console
  *  BEFORE it is taken, so the journal that survives a restart names the step that

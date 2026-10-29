@@ -22,6 +22,16 @@ namespace StorageIndex {
 /** Starts the background walk. Called once storage is mounted; again does nothing. */
 void begin();
 
+/** THE STORAGE TASK RUNS THE FLASH BURSTS, ON CORE 0 (MESURES §242). A burst of flash reads
+ *  started on core 1 — the audio's core — starved the audio: a composition reopened by the
+ *  web server (1 792 reads), the audio woken but not elected for ~83 ms, one reopening in
+ *  three or four; at boot, the loop reading the first cue's scripts (1 416 reads). Started on
+ *  core 0, core 1 only waits in ipc1 for each read: 0 late blocks in 30 reopenings. `fn` runs
+ *  in this task, after what was handed over before; `wait`: returns once it is done. Handed
+ *  over before begin(), it runs first, before the walk — unless the caller waits: then here.
+ *  Called from a job, it runs at once. */
+void run(void (*fn)(), bool wait);
+
 /** True once the first walk is done. */
 bool ready();
 /** Waits at most `ms` for the first walk (a request right after a boot). */
