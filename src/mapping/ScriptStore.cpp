@@ -1,7 +1,7 @@
 #include "ScriptStore.h"
 #include "../config/Stockage.h"
 #include "../config/EcrituresDifferees.h"
-#include "../audio/AudioEngine.h"
+#include "../server/WebDebugConsole.h"
 #include "Repertoire.h"
 #include <LittleFS.h>
 #include <esp_heap_caps.h>
@@ -171,53 +171,97 @@ String listerJson(Lieu lieu) {
  * usedBytes() parcourt toute l'arborescence, et chaque fichier s'ouvre pour
  * sa taille : ~1 900 lectures en flash. Chacune coupe le cache et gare
  * l'autre coeur ; Reglages les refaisait toutes les 8 s, et pendant un
- * rallumage de la radio l'audio y a perdu jusqu'a 100 ms. Ces chiffres ne
- * changent qu'avec les fichiers : mesures une fois, puis refaits apres une
- * ecriture — au silence, comme l'ecriture elle-meme. En jeu, la derniere
- * mesure. */
+ * rallumage de la radio l'audio y a perdu jusqu'a 100 ms.
+ * §240: measured from the web server (the first /api/diag/reservoirs after a boot, or
+ * /api/fichiers), the walk locked both cores up and the task watchdog restarted the
+ * board — every time the board panel opened. Until the cause is known, only the bench
+ * route measures (walkTrace); infos() serves what it found. */
 namespace {
 struct Mesure { size_t fichiers = 0, scripts = 0, contenu = 0, utilises = 0, total = 0; };
 Mesure   g_mesure;
-uint32_t g_mesureGeneration = 0;
 bool     g_mesureFaite = false;
 
 /* A TOUTE PROFONDEUR : le repertoire range une composition trois niveaux sous
  * la racine (compositions/<nn>/<nom>/, §186). Borne a six niveaux — l'arbre
  * n'en a pas plus, et une recursion sans borne sur une pile de tache non. */
-void parcourirPour(Mesure& m, const String& dossier, int profondeur) {
+/* The bench's trace (§240): every step said on the console before it is taken. */
+struct Trace { String* out; int n = 0; int max = 0; bool stop = false; };
+
+bool step(Trace* t, const char* what, const String& path) {
+  if (!t) return true;
+  if (t->stop || ++t->n > t->max) { t->stop = true; return false; }
+  NIDMI_WEB_LOG("[walk] %d %s %s", t->n, what, path.c_str());
+  return true;
+}
+void stepDone(Trace* t, const char* what, const String& path, uint32_t t0) {
+  if (!t) return;
+  if (t->out->length() > 1) *t->out += ",";
+  *t->out += "{\"n\":" + String(t->n) + ",\"step\":\"" + what + "\",\"path\":\"" + path
+           + "\",\"us\":" + String((unsigned long)(micros() - t0)) + "}";
+}
+
+void parcourirPour(Mesure& m, const String& dossier, int profondeur, Trace* t) {
+  if (!step(t, "open", dossier)) return;
+  uint32_t t0 = micros();
   File d = LittleFS.open(dossier);
+  stepDone(t, "open", dossier, t0);
   if (!d || !d.isDirectory()) return;
-  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+  for (;;) {
+    if (!step(t, "next", dossier)) return;
+    t0 = micros();
+    File f = d.openNextFile();
+    if (!f) return;
     const String p = f.path();
-    if (f.isDirectory()) { if (profondeur < 6) parcourirPour(m, p, profondeur + 1); continue; }
+    stepDone(t, "next", p, t0);
+    if (f.isDirectory()) { if (profondeur < 6) parcourirPour(m, p, profondeur + 1, t); continue; }
     m.fichiers++; m.contenu += f.size();
     if (p.endsWith(".nms")) m.scripts++;
   }
 }
 
-void mesurer(Mesure& m) {
+bool mesurer(Mesure& m, Trace* t) {
   m = Mesure();
-  m.total    = LittleFS.totalBytes();
-  m.utilises = LittleFS.usedBytes();
-  parcourirPour(m, "/", 0);
+  if (t && t->max < 0) {               // withInfo: the block count first, as the measure did
+    t->max = -t->max;
+    if (!step(t, "info", "/")) return false;
+    const uint32_t t0 = micros();
+    m.total    = LittleFS.totalBytes();
+    m.utilises = LittleFS.usedBytes();
+    stepDone(t, "info", "/", t0);
+  }
+  parcourirPour(m, "/", 0, t);
+  return !(t && t->stop);
 }
 }  // namespace
 
-void infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
+bool infos(size_t& fichiers, size_t& scripts, size_t& octetsContenu,
            size_t& octetsUtilises, size_t& octetsTotal) {
-  fichiers = scripts = octetsContenu = octetsUtilises = octetsTotal = 0;
-  if (!monter()) return;
-  const uint32_t g = Differe::generationFichiers();
-  if (!g_mesureFaite || (g != g_mesureGeneration && AudioEngine::silencePourLaFlash())) {
-    mesurer(g_mesure);
-    g_mesureGeneration = g;
-    g_mesureFaite = true;
-  }
   fichiers       = g_mesure.fichiers;
   scripts        = g_mesure.scripts;
   octetsContenu  = g_mesure.contenu;
   octetsUtilises = g_mesure.utilises;
   octetsTotal    = g_mesure.total;
+  return g_mesureFaite;
+}
+
+String walkTrace(int maxSteps, bool withInfo) {
+  if (!monter()) return "{\"error\":\"storage not mounted\"}";
+  String out = "[";
+  Trace t;
+  t.out = &out;
+  t.max = withInfo ? -maxSteps : maxSteps;
+  Mesure m;
+  const uint32_t t0 = millis();
+  const bool complete = mesurer(m, &t);
+  out += "]";
+  NIDMI_WEB_LOG("[walk] end: %d steps, %s, %lu ms", t.n, complete ? "complete" : "stopped",
+                (unsigned long)(millis() - t0));
+  if (complete && withInfo) {          // a full measure: the one infos() serves
+    g_mesure = m;
+    g_mesureFaite = true;
+  }
+  return "{\"complete\":" + String(complete ? "true" : "false") + ",\"ms\":"
+       + String((unsigned long)(millis() - t0)) + ",\"steps\":" + out + "}";
 }
 
 bool existe(Lieu lieu, const char* nom) {

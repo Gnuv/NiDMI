@@ -1889,6 +1889,17 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         request->send(200, "application/json", String("{\"causes\":\"") + causes + "\"}");
     });
 
+    /* THE STORAGE WALK, STEP BY STEP (bench, §240): the measure the board panel made, run
+     * here in the web server as it was, each step said on the console before it is taken —
+     * after a restart, /api/diag/avant names the step that hung. `max` bounds the steps (to
+     * halve the walk), `info=1` counts the blocks first. Never during a concert. */
+    server.on("/api/diag/walk", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (Concert::refuse(request, "banc refuse : la carte est verrouillee pour le concert")) return;
+        const int max = request->hasParam("max") ? request->getParam("max")->value().toInt() : 1000;
+        const bool info = request->hasParam("info") && request->getParam("info")->value() == "1";
+        request->send(200, "application/json", ScriptStore::walkTrace(max > 0 ? max : 1000, info));
+    });
+
     server.on("/api/diag/reservoirs", HTTP_GET, [](AsyncWebServerRequest *request){
         if (request->hasParam("reset")) {
             MappingEngine::reinitStatsReprises();
@@ -1935,13 +1946,17 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
             json += "\"nvs\":null";          // le dire, plutot que d'inventer des zeros
         }
 
+        /* The last measure, never a new one: measuring here locked both cores up (§240). */
         size_t nf = 0, ns = 0, oc = 0, ou_ = 0, ot = 0;
-        ScriptStore::infos(nf, ns, oc, ou_, ot);
-        json += ",\"storage\":{\"fichiers\":" + String((unsigned)nf);
-        json += ",\"scripts\":"        + String((unsigned)ns);
-        json += ",\"octets_contenu\":" + String((unsigned)oc);
-        json += ",\"octets_utilises\":"+ String((unsigned)ou_);
-        json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
+        if (ScriptStore::infos(nf, ns, oc, ou_, ot)) {
+            json += ",\"storage\":{\"fichiers\":" + String((unsigned)nf);
+            json += ",\"scripts\":"        + String((unsigned)ns);
+            json += ",\"octets_contenu\":" + String((unsigned)oc);
+            json += ",\"octets_utilises\":"+ String((unsigned)ou_);
+            json += ",\"octets_total\":"   + String((unsigned)ot) + "}";
+        } else {
+            json += ",\"storage\":null";
+        }
         // La composition gardee pour l'app (§156) : recue, rendue, ecrite au silence.
         json += ",\"compo\":" + Compo::etatJson();
         // Ce qui attend le silence pour s'ecrire en flash (§157).
