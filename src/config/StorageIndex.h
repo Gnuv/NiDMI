@@ -43,6 +43,8 @@ void visit(const char* folder, bool recursive,
 
 /** Whether `path` is a file the index holds, and its size. */
 bool fileSize(const char* path, size_t& size);
+/** Whether `path` is a folder the index holds. */
+bool isDir(const char* path);
 
 struct Stats {
   size_t files = 0, scripts = 0, content = 0;   // from the index

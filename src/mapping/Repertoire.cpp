@@ -7,6 +7,7 @@
 #include "../server/ServerCore.h"     // nidmi_ws_pousser : les onglets apprennent le changement
 #include "ScriptStore.h"
 #include <LittleFS.h>
+#include <vector>
 #include <Preferences.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -57,17 +58,42 @@ String dossierIndex(uint8_t n) {
 
 String baseDe(const String& p) { return p.substring(p.lastIndexOf('/') + 1); }
 
+/* WHAT A FOLDER HOLDS, from the index once it is ready (§241-242): walking the flash costs
+ * 25 to 45 ms per entry, and the list of compositions paid it in the web server at every
+ * opening of the dialog. Before the index — demarrer(), at boot — from the flash. Collected
+ * first, then handed over: `f` may write, and the index's lock is not held while it does. */
+struct Enfant { String nom; size_t taille; bool dossier; };
+template <typename F> void chaqueEnfant(const String& dossier, F f) {
+  std::vector<Enfant> v;
+  if (StorageIndex::ready()) {
+    StorageIndex::visit(dossier.c_str(), false, [](const char* p, size_t taille, bool dir, void* c) {
+      static_cast<std::vector<Enfant>*>(c)->push_back({ baseDe(String(p)), taille, dir });
+    }, &v);
+  } else {
+    File d = LittleFS.open(dossier);
+    if (!d || !d.isDirectory()) return;
+    for (File e = d.openNextFile(); e; e = d.openNextFile())
+      v.push_back({ baseDe(String(e.name())), (size_t)e.size(), e.isDirectory() });
+  }
+  for (const Enfant& e : v) f(e);
+}
+
+bool estDossier(const String& chemin) {
+  if (StorageIndex::ready()) return StorageIndex::isDir(chemin.c_str());
+  File d = LittleFS.open(chemin);
+  return d && d.isDirectory();
+}
+
 /* Le nom range sous un dossier d'index : son UNIQUE sous-dossier. Aucun, ou
  * plusieurs — une copie faite a la main, par l'USB — : la carte le dit et ne
  * devine pas. */
 bool nomSous(uint8_t n, String& nom, String* raison = nullptr) {
-  File d = LittleFS.open(dossierIndex(n));
-  if (!d || !d.isDirectory()) { if (raison) *raison = "absente"; return false; }
+  const String d = dossierIndex(n);
+  if (!estDossier(d)) { if (raison) *raison = "absente"; return false; }
   int k = 0;
-  for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-    if (!f.isDirectory()) continue;
-    if (++k == 1) nom = baseDe(String(f.name()));
-  }
+  chaqueEnfant(d, [&](const Enfant& e) {
+    if (e.dossier && ++k == 1) nom = e.nom;
+  });
   if (k == 1) return true;
   if (raison) *raison = k ? "plusieurs dossiers sous ce numero : la carte ne choisit pas"
                           : "aucun dossier nomme sous ce numero";
@@ -78,16 +104,12 @@ bool nomSous(uint8_t n, String& nom, String* raison = nullptr) {
  * deux chiffres. Le reste n'est pas une composition, et n'est pas touche. */
 template <typename F> void chaqueNumero(F f) {
   bool present[NUMERO_MAX + 1] = {false};
-  File d = LittleFS.open(DOSSIER);
-  if (d && d.isDirectory()) {
-    for (File e = d.openNextFile(); e; e = d.openNextFile()) {
-      if (!e.isDirectory()) continue;
-      const String n = baseDe(String(e.name()));
-      if (n.length() != 2 || !isDigit(n[0]) || !isDigit(n[1])) continue;
-      const int v = n.toInt();
-      if (v >= 1 && v <= NUMERO_MAX) present[v] = true;
-    }
-  }
+  chaqueEnfant(DOSSIER, [&](const Enfant& e) {
+    const String& n = e.nom;
+    if (!e.dossier || n.length() != 2 || !isDigit(n[0]) || !isDigit(n[1])) return;
+    const int v = n.toInt();
+    if (v >= 1 && v <= NUMERO_MAX) present[v] = true;
+  });
   for (int v = 1; v <= NUMERO_MAX; v++) if (present[v]) f((uint8_t)v);
 }
 
@@ -124,10 +146,7 @@ bool ecrireMaintenant(const String& chemin, const char* data, size_t n) {
 /* Les fichiers d'un dossier nomme (a plat : une composition n'a pas de
  * sous-dossier). */
 template <typename F> void chaqueFichier(const String& dossier, F f) {
-  File d = LittleFS.open(dossier);
-  if (!d || !d.isDirectory()) return;
-  for (File e = d.openNextFile(); e; e = d.openNextFile())
-    if (!e.isDirectory()) f(baseDe(String(e.name())), (size_t)e.size());
+  chaqueEnfant(dossier, [&](const Enfant& e) { if (!e.dossier) f(e.nom, e.taille); });
 }
 
 /* Effacer un dossier et ce qu'il porte, a toute profondeur (bornee). */
@@ -173,7 +192,7 @@ uint8_t premierLibre() {
 uint8_t numeroPour(uint8_t voulu, String& raison) {
   if (voulu) {
     if (voulu > NUMERO_MAX) { raison = "numero hors bornes (1 a " + String((unsigned)NUMERO_MAX) + ")"; return 0; }
-    if (LittleFS.exists(dossierIndex(voulu))) { raison = "le n°" + String((unsigned)voulu) + " est pris"; return 0; }
+    if (estDossier(dossierIndex(voulu))) { raison = "le n°" + String((unsigned)voulu) + " est pris"; return 0; }
     return voulu;
   }
   const uint8_t n = premierLibre();
@@ -438,7 +457,7 @@ bool changerNumero(uint8_t de, uint8_t vers, String& raison) {
   if (!nomSous(de, nom, &raison)) { raison = "n°" + String((unsigned)de) + " : " + raison; return false; }
   if (!vers || vers > NUMERO_MAX) { raison = "numero hors bornes (1 a " + String((unsigned)NUMERO_MAX) + ")"; return false; }
   if (vers == de) return true;
-  if (LittleFS.exists(dossierIndex(vers))) { raison = "le n°" + String((unsigned)vers) + " est pris"; return false; }
+  if (estDossier(dossierIndex(vers))) { raison = "le n°" + String((unsigned)vers) + " est pris"; return false; }
   bool ok;
   {
     VerrouEtat v;                                           // voir renommer
@@ -462,7 +481,7 @@ bool supprimer(uint8_t numero, String& raison) {
   if (!monter()) { raison = "storage non monte"; return false; }
   if (numero == numeroOuvert()) { raison = "c'est la composition ouverte : en ouvrir une autre d'abord"; return false; }
   const String dossier = dossierIndex(numero);
-  if (!LittleFS.exists(dossier)) { raison = "n°" + String((unsigned)numero) + " : absente"; return false; }
+  if (!estDossier(dossier)) { raison = "n°" + String((unsigned)numero) + " : absente"; return false; }
   /* Ce qui attendait d'y etre ecrit ne l'est plus : sinon, au silence, le
    * dossier renaitrait. */
   Differe::oublierSous((dossier + "/").c_str());

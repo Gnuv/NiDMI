@@ -206,6 +206,12 @@ bool fileSize(const char* path, size_t& size) {
   return true;
 }
 
+bool isDir(const char* path) {
+  Lock l;
+  const int i = path ? find(path) : -1;
+  return i >= 0 && g_entries[i].dir;
+}
+
 Stats stats() {
   Stats s;
   Lock l;

@@ -249,7 +249,8 @@ bool existe(Lieu lieu, const char* nom) {
   if (!c.length()) return false;
   std::shared_ptr<char> t; size_t n = 0; bool sup = false;
   if (Differe::attente(c.c_str(), t, n, sup)) return !sup;
-  return LittleFS.exists(c);
+  size_t taille;
+  return StorageIndex::ready() ? StorageIndex::fileSize(c.c_str(), taille) : LittleFS.exists(c);
 }
 
 /* Recu tout de suite, ecrit en flash au premier silence (§157) : l'ecriture

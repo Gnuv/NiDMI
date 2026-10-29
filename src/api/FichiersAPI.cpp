@@ -330,9 +330,9 @@ void setupFichiersAPI(AsyncWebServer& server) {
     request->send(200, "application/json", SfzStore::diagnostic());
   });
 
-  /* LA LISTE. Parcourt storage a chaque appel : c'est un GESTE (ouvrir la colonne,
-   * apres un televersement), jamais un sondage — la regle du §161. L'occupation,
-   * elle, est celle que la carte garde et remesure au silence (ScriptStore). */
+  /* LA LISTE. Un GESTE (ouvrir la colonne, apres un televersement), jamais un sondage —
+   * la regle du §161. Storage se lit dans son index (§241), son occupation est celle que
+   * l'index remesure au silence ; la SD, elle, se parcourt a chaque appel. */
   server.on("/api/fichiers", HTTP_GET, [](AsyncWebServerRequest* request) {
     if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     if (!StorageIndex::waitReady(3000)) {
@@ -532,7 +532,9 @@ void setupFichiersAPI(AsyncWebServer& server) {
       default: {
         std::shared_ptr<char> t; size_t n = 0; bool sup = false;
         const bool attend = Differe::attente(chemin.c_str(), t, n, sup);
-        const bool existe = attend ? !sup : LittleFS.exists(chemin);
+        size_t taille;
+        const bool existe = attend ? !sup : StorageIndex::ready() ? StorageIndex::fileSize(chemin.c_str(), taille)
+                                                                  : LittleFS.exists(chemin);
         ok = existe && Differe::supprimerFichier(chemin.c_str());
         break;
       }
