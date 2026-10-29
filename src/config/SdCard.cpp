@@ -34,7 +34,7 @@ volatile bool     _wantMeasure = false;
 volatile bool     _wantWiring  = false;
 volatile bool     _wantHeads   = false;
 volatile bool     _wantSfz     = false;
-volatile uint32_t _taskAlive   = 0;         // the task lives: only one at a time
+volatile uint32_t _taskAlive   = 0;         // the task is at work (it sleeps between two jobs)
 volatile uint32_t _lastAttemptMs = 0;
 volatile uint32_t _attempts    = 0;
 /* THE CARD'S LIFE. "lost": it WAS mounted and its reads now fail in a row (pulled out,
@@ -99,8 +99,16 @@ char     _measName[SampleStore::NOM_MAX] = "";
 uint32_t _measHz = 0;
 
 /* Task stack: the FAT mount, an array of 24 names (1.1 KB), the Strings of the
- * read and a measurement. Transient — given back when the task dies. */
+ * read and a measurement. IN PSRAM (MESURES §243): in internal RAM it took 8.7 KB at
+ * boot, while the WiFi connects — the internal heap fell to 3.5 KB free — and again at
+ * every kit loaded. Allowed because nothing this task runs touches the flash (it reads
+ * the SD, by the CPU: SPIClass, no DMA): with the cache off, a PSRAM stack cannot be
+ * read. Hence also a task that SLEEPS between two jobs instead of dying — a task whose
+ * stack is not the heap's default must not delete itself. */
 constexpr uint32_t STACK_BYTES = 8192;
+StaticTask_t   _taskTcb;
+StackType_t*   _taskStack = nullptr;
+TaskHandle_t   _taskHandle = nullptr;
 
 void _startTask();
 
@@ -477,19 +485,24 @@ void _task(void*) {
     if (_wantHeads)   { _wantHeads   = false; SdStream::loadHeads(); continue; }
     if (_wantLoad)    { _wantLoad    = false; _loadSounds(); continue; }
     if (_wantSfz)     { _wantSfz     = false; SfzStore::servir(); continue; }
-    break;
+    __sync_lock_release(&_taskAlive);
+    // A flag raised between the last turn and the release: back to work, unless its
+    // raiser already took the flag — then its notification wakes us at once.
+    if ((_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure
+         || _wantWiring || _wantHeads || _wantSfz) && !__sync_lock_test_and_set(&_taskAlive, 1)) continue;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
-  __sync_lock_release(&_taskAlive);
-  // A flag raised between the last turn and the release: start again.
-  if (_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure || _wantWiring || _wantHeads || _wantSfz) _startTask();
-  vTaskDelete(nullptr);
 }
 
 void _startTask() {
-  if (__sync_lock_test_and_set(&_taskAlive, 1)) return;      // it is running: it will see the flags
+  if (__sync_lock_test_and_set(&_taskAlive, 1)) return;      // it is at work: it will see the flags
+  if (_taskHandle) { xTaskNotifyGive(_taskHandle); return; }
   /* Core 0, priority 1: below WiFi, the TCP/IP stack, the audio (core 1) and the
    * loop — it only runs when nothing else needs the CPU. */
-  if (xTaskCreatePinnedToCore(_task, "sd-card", STACK_BYTES, nullptr, 1, nullptr, 0) != pdPASS) {
+  if (!_taskStack) _taskStack = (StackType_t*)heap_caps_malloc(STACK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (_taskStack)
+    _taskHandle = xTaskCreateStaticPinnedToCore(_task, "sd-card", STACK_BYTES, nullptr, 1, _taskStack, &_taskTcb, 0);
+  if (!_taskHandle) {
     __sync_lock_release(&_taskAlive);
     NIDMI_WEB_LOG("[SD] tache impossible (memoire) — la carte ne sera pas montee");
   }
