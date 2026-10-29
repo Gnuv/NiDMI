@@ -506,5 +506,7 @@ const char* causeResetTexte();
 /* Les trois compteurs du son, et rien d'autre : metriques() parcourt le tas.
  * Pour le journal qui survit au redemarrage, a chaque quart de seconde (§162). */
 void compteursSon(uint32_t& blocs, uint32_t& retards, uint32_t& retardsEcritures);
+/** Writes to the DAC whose wait for a DMA buffer ran out (§242): the DMA's wake, lost. */
+uint32_t dmaWakesLostCount();
 
 }  // namespace AudioEngine

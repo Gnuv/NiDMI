@@ -79,6 +79,8 @@ void setupAudioAPI(AsyncWebServer& server) {
         json += "\"underruns_ecritures\":" + String(m.retardsEcritures) + ",";
         // Les notes que la file vers le son n'a pas prises : 0 attendu (§170).
         json += "\"notes_perdues\":"     + String(AudioEngine::notesPerdues()) + ",";
+        // Les reveils du DMA perdus, rattrapes par le delai de l'ecriture (§242).
+        json += "\"dma_wakes_lost\":"    + String(AudioEngine::dmaWakesLostCount()) + ",";
         // Plaits demande 16 ko contigus, plus sa marge de manœuvre.
         json += "\"engine\":"             + String(m.moteur) + ",";
         json += "\"plaits_ready\":"       + String(m.plaitsPret ? "true" : "false") + ",";

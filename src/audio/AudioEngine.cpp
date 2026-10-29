@@ -53,7 +53,7 @@ StaticQueue_t structureEvenements;
 volatile uint32_t notesPerduesCompte = 0;
 volatile bool demarre    = false;
 /* Arret propre de la tache audio : elle rend la main d'elle-meme plutot que
- * d'etre tuee. La tuer pendant un i2s.write() laisserait le DMA a moitie servi
+ * d'etre tuee. La tuer pendant une ecriture vers le DAC (ecrireBloc) laisserait le DMA a moitie servi
  * et le peripherique dans un etat qu'aucun i2s.end() ne rattrape. */
 volatile bool arretDemande = false;
 volatile bool tacheArretee = false;
@@ -70,10 +70,12 @@ volatile uint32_t ecrituresFlash = 0, nRetardsEcritures = 0;
 // retard (20 ms) — en silence comme en jeu.
 volatile uint32_t pireBlocUs = 0;
 // … et la part de ce pire bloc passee a le RENDRE (calcul, echantillons lus en
-// PSRAM) ; le reste, c'est i2s.write() qui attend qu'un tampon DMA se libere.
+// PSRAM) ; le reste, c'est ecrireBloc() qui attend qu'un tampon DMA se libere.
 // Un decrochage dans le rendu et un decrochage dans l'attente du DMA n'ont pas
 // la meme cause (MESURES §161).
 volatile uint32_t pireBlocRenduUs = 0;
+/* Writes to the DAC whose wait for a free DMA buffer ran out (§242): each is a wake lost. */
+volatile uint32_t dmaWakesLost = 0;
 
 /* LES DEUX SONDES DU DECROCHAGE (MESURES §161). Quand un bloc attend le DMA,
  * deux causes : le DMA a cesse d'envoyer (plus de fin de tampon), ou le coeur
@@ -1241,6 +1243,25 @@ void rendre() {
   if (bipBlocsRestants) bipBlocsRestants--;
 }
 
+/* THE BLOCK TO THE DAC, WITH A TIME LIMIT (§242). i2s.write() waited for a free DMA buffer with
+ * no limit, woken by the DMA's interrupt. When a composition was reopened — thousands of flash
+ * reads in the web server — that wake was lost one time in four: the audio stayed BLOCKED ~83 ms
+ * while the DMA kept finishing buffers every 5 ms, core 1 had idle time and the election guard
+ * woke on time. A wait of 6 ms — a buffer lasts 5 — is never reached in normal running; reached,
+ * the task wakes by core 1's tick (a timed wake, which kept working) and asks again. */
+void ecrireBloc(const int16_t* bloc, size_t octets) {
+  i2s_chan_handle_t tx = i2s.txChan();
+  const uint8_t* p = (const uint8_t*)bloc;
+  while (octets) {
+    size_t faits = 0;
+    const esp_err_t e = i2s_channel_write(tx, p, octets, &faits, 6);
+    p += faits;
+    octets -= faits;
+    if (e == ESP_ERR_TIMEOUT) { dmaWakesLost = dmaWakesLost + 1; continue; }
+    if (e != ESP_OK) break;            // a channel no longer running: nothing to wait for
+  }
+}
+
 void boucleAudio(void*) {
   /* 95 % of a block's cycles: 240 MHz, 120 frames at the real rate. */
   const uint32_t budgetBloc = (uint32_t)((uint64_t)getCpuFrequencyMhz() * 1000000ULL * FRAMES
@@ -1360,7 +1381,7 @@ void boucleAudio(void*) {
       if (captureFilled >= captureFrames) captureArmed = false;
     }
     const uint32_t ur = micros();
-    i2s.write((const uint8_t*)entrelace, sizeof(entrelace));
+    ecrireBloc(entrelace, sizeof(entrelace));
     // Un bloc dure 2,67 ms ; si l'aller-retour dépasse largement, c'est que la
     // tâche a été préemptée au point de vider le DMA.
     const uint32_t du = micros() - u0;
@@ -2962,6 +2983,8 @@ const char* causeResetTexte() {
     default:                return "inconnu";
   }
 }
+
+uint32_t dmaWakesLostCount() { return dmaWakesLost; }
 
 void compteursSon(uint32_t& blocs, uint32_t& retards, uint32_t& retardsEcritures) {
   blocs = nBlocs;
