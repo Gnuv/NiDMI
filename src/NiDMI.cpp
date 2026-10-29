@@ -652,7 +652,12 @@ static void relanceAuDemarrage(unsigned long now){
     if (!monteDepuis) monteDepuis = now ? now : 1;
     uint32_t rx = 0, txExp = 0;
     nidmi_usbnet::compteurs(rx, txExp);
-    if (nidmi_usbnet::reseauActif() || rx > 0) { fini = true; return; }   // le cable vit
+    /* Alive = active AND the host has sent something. Active alone is not enough: macOS
+     * sometimes activates the interface and deactivates it 6 ms later, for good (§243) — the
+     * loop saw those 6 ms and gave up. Active but silent: wait, the count starts again. */
+    const bool actif = nidmi_usbnet::reseauActif();
+    if (actif && rx > 0) { fini = true; return; }   // le cable vit
+    if (actif) { monteDepuis = now ? now : 1; return; }
     if (now - monteDepuis < 10000) return;
     if (derniere && now - derniere < 15000) return;
     if (UsbMidiManager::tenuDepuisDemarrage()) {
