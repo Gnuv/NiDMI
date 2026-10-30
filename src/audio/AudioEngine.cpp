@@ -62,6 +62,7 @@ volatile bool tacheArretee = false;
 
 uint32_t heapAvant = 0, heapApres = 0, srReel = SAMPLE_RATE;
 volatile uint32_t nBlocs = 0, nRetards = 0;
+volatile bool freezeAsked = false;       // bench: the audio task stops rendering, as if stuck (§247)
 // Les ecritures en flash VOLONTAIRES, faites en silence (§155, §156) : un compteur
 // de sequence — impair pendant l'ecriture —, et les blocs en retard qui l'ont
 // chevauchee. Ils sont dans nRetards (ils ont eu lieu) ET ici (rien ne s'est
@@ -1249,6 +1250,7 @@ void boucleAudio(void*) {
                                          / (srReel ? srReel : SAMPLE_RATE) * 95 / 100);
   for (;;) {
     if (arretDemande) { tacheArretee = true; vTaskDelete(nullptr); }
+    while (freezeAsked) vTaskDelay(pdMS_TO_TICKS(10));   // bench: stuck, the watch must see it (§247)
     /* LES PLAY LIST PROPOSEES s'adoptent AVANT les notes de ce bloc (§196) :
      * une liste posee puis jouee (l'ecoute de l'inspecteur) trouve la sienne. */
     _appliquerDemandes();                // what the cues posted for their slots, before their lists (§212)
@@ -1674,6 +1676,8 @@ void audioWatch(void*) {
   }
 }
 }  // namespace
+
+void freezeForBench() { freezeAsked = true; }
 
 bool ensureStarted() {
   if (demarre) return true;

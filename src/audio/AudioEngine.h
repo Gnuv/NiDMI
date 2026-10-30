@@ -100,6 +100,8 @@ void validerConfigBoot();
 
 /** This boot follows a crash or a brownout — not a power-on, not a requested restart. */
 bool bootFollowsCrash();
+/** BENCH (§247): the audio task stops rendering, as if stuck — the audio watch must restart the board. */
+void freezeForBench();
 
 // Thread-safe. velocity 0 sur noteOn = noteOff (convention MIDI).
 /* `canal`: the MIDI channel the note came on, 1..16, 0 when none is said (the

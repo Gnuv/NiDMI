@@ -1667,12 +1667,15 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
     /* A CRASH ON DEMAND (MESURES §244), for the bench: POST confirm=crash. The loop panics at its
      * next turn. Refused when the board is locked for a concert, like every write. */
     server.on("/api/diag/crash", HTTP_POST, [](AsyncWebServerRequest *request){
-        if (!request->hasParam("confirm", true) || request->getParam("confirm", true)->value() != "crash") {
-            request->send(400, "application/json", "{\"erreur\":\"confirm=crash\"}");
+        const String c = request->hasParam("confirm", true) ? request->getParam("confirm", true)->value() : String();
+        if (c != "crash" && c != "freeze") {
+            request->send(400, "application/json", "{\"erreur\":\"confirm=crash, ou confirm=freeze (l'audio se fige, §247)\"}");
             return;
         }
-        request->send(200, "application/json", "{\"status\":\"ok\",\"crash\":true}");
-        nidmi_requestCrash();
+        request->send(200, "application/json", c == "crash" ? "{\"status\":\"ok\",\"crash\":true}"
+                                                            : "{\"status\":\"ok\",\"freeze\":true}");
+        if (c == "crash") nidmi_requestCrash();
+        else AudioEngine::freezeForBench();
     });
 
     /* THE INTERNAL HEAP AT BOOT (MESURES §243): state=boot arms the sampler for the next
