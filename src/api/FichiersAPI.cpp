@@ -273,7 +273,7 @@ template <typename F> void walkSdCard(F voir) {
 /* ── LA SD : les kits SFZ (§248) ─────────────────────────────────────────── */
 constexpr size_t SD_SFZ_MAX = 64 * 1024;            // SfzStore's own ceiling for a .sfz text
 constexpr size_t SD_WAV_MAX = 3 * 1024 * 1024;      // a sample; the kits share a 4 MB budget
-constexpr size_t SD_PSRAM_MARGIN = 1024 * 1024;     // left to the board while a body waits
+constexpr size_t SD_PSRAM_MARGIN = 1024 * 1024;     // PSRAM left free, all blocks together, while a body waits
 
 bool volumeSd(AsyncWebServerRequest* r) {
   return r->hasParam("volume") && r->getParam("volume")->value() == SdCard::VOLUME_ID;
@@ -586,7 +586,8 @@ void setupFichiersAPI(AsyncWebServer& server) {
         String bas = nom; bas.toLowerCase();
         const size_t max = bas.endsWith(".wav") ? SD_WAV_MAX : SD_SFZ_MAX;
         if (index == 0 && total && total <= max
-            && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) > total + SD_PSRAM_MARGIN)
+            && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) > total
+            && heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > total + SD_PSRAM_MARGIN)
           request->_tempObject = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (request->_tempObject && index + len <= total)
           memcpy((uint8_t*)request->_tempObject + index, data, len);

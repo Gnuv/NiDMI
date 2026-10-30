@@ -499,8 +499,10 @@ void _read(String& reason) {
   const size_t n = f.size();
   const size_t max = String(_jobPath).endsWith(".sfz") ? READ_SFZ_MAX : READ_WAV_MAX;
   if (n > max) { f.close(); reason = "fichier trop gros pour etre servi (" + String((unsigned)(max / 1024)) + " Ko au plus)"; return; }
-  uint8_t* b = (uint8_t*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!b) { f.close(); reason = "memoire"; return; }
+  /* 1 MB of PSRAM stays free, as for the clips' heads (SdStream): the kits and the sounds come first. */
+  uint8_t* b = heap_caps_get_free_size(MALLOC_CAP_SPIRAM) > n + 1024 * 1024
+             ? (uint8_t*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  if (!b) { f.close(); reason = "memoire : la PSRAM de la carte est pleine"; return; }
   size_t lus = 0;
   while (lus < n) {
     const size_t k = f.read(b + lus, (n - lus) < 16384 ? (n - lus) : 16384);
