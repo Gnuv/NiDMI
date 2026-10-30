@@ -68,7 +68,8 @@ struct FailedAttempt { uint32_t ms, sector, n, hz; uint8_t stage, value; char ta
 constexpr int FAILED_RING = 12;
 FailedAttempt _failed[FAILED_RING];
 volatile uint32_t _failedCount = 0;
-enum : uint8_t { STAGE_BUSY = 1, STAGE_CMD = 2, STAGE_TOKEN = 3, STAGE_CRC = 4, STAGE_MULTI = 5 };
+enum : uint8_t { STAGE_BUSY = 1, STAGE_CMD = 2, STAGE_TOKEN = 3, STAGE_CRC = 4, STAGE_MULTI = 5,
+                 STAGE_WBUSY = 6, STAGE_WCMD = 7, STAGE_WRESP = 8, STAGE_WDONE = 9 };   // a write (§248)
 uint8_t _lastToken = 0xFF;
 void _noteFailed(uint32_t sector, uint32_t n, uint8_t stage, uint8_t value) {
   FailedAttempt& f = _failed[_failedCount % FAILED_RING];
@@ -298,17 +299,21 @@ bool _writeSectors(const uint8_t* buf, uint32_t sector, uint32_t n) {
   for (uint32_t i = 0; i < n && ok; i++) {
     ok = false;
     for (int attempt = 0; attempt < 3 && !ok; attempt++) {
-      _select();
-      if (!_waitReady(500)) { _deselect(); continue; }
       const uint32_t s = sector + i;
-      if (_cmd(24, _hc ? s : (s << 9), 0x01) != 0x00) { _deselect(); continue; }
+      _select();
+      if (!_waitReady(500)) { _deselect(); _noteFailed(s, 1, STAGE_WBUSY, 0); continue; }
+      const uint8_t r1 = _cmd(24, _hc ? s : (s << 9), 0x01);
+      if (r1 != 0x00) { _deselect(); _noteFailed(s, 1, STAGE_WCMD, r1); continue; }
       _spi->transfer(0xFF);                              // one byte before the token
       _spi->transfer(DATA_TOKEN);
       _spi->writeBytes(buf + 512 * i, 512);
       _spi->transfer16(0xFFFF);                          // CRC, unchecked in SPI mode
-      const uint8_t resp = _spi->transfer(0xFF) & 0x1F;
-      ok = (resp == 0x05) && _waitReady(1000);           // accepted, then programmed
+      uint8_t resp = 0xFF;                               // the data response: within a few bytes
+      for (int k = 0; k < 8 && resp == 0xFF; k++) resp = _spi->transfer(0xFF);
+      if ((resp & 0x1F) != 0x05) { _waitReady(1000); _deselect(); _noteFailed(s, 1, STAGE_WRESP, resp); continue; }
+      ok = _waitReady(1000);                             // accepted, then programmed
       _deselect();
+      if (!ok) _noteFailed(s, 1, STAGE_WDONE, 0);
     }
   }
   _spi->endTransaction();
@@ -453,7 +458,7 @@ uint32_t    crcRejected()   { return _crcRejected; }
 uint32_t    failStreak()    { return _failStreak; }
 uint32_t    failTotal()     { return _failTotal; }
 String failedAttemptsJson() {
-  static const char* const names[] = { "", "busy", "cmd", "token", "crc", "multi" };
+  static const char* const names[] = { "", "busy", "cmd", "token", "crc", "multi", "wbusy", "wcmd", "wresp", "wdone" };
   String j = "{\"count\":" + String((unsigned long)_failedCount) + ",\"sectors\":" + String((unsigned long)_sectors) + ",\"last\":[";
   const uint32_t total = _failedCount;
   const uint32_t first = total > FAILED_RING ? total - FAILED_RING : 0;
@@ -462,7 +467,7 @@ String failedAttemptsJson() {
     if (k > first) j += ",";
     j += "{\"ms\":" + String((unsigned long)f.ms) + ",\"sector\":" + String((unsigned long)f.sector)
        + ",\"n\":" + String((unsigned long)f.n) + ",\"mhz\":" + String((unsigned long)(f.hz / 1000000UL))
-       + ",\"stage\":\"" + names[f.stage < 6 ? f.stage : 0] + "\",\"value\":" + String((unsigned)f.value)
+       + ",\"stage\":\"" + names[f.stage < 10 ? f.stage : 0] + "\",\"value\":" + String((unsigned)f.value)
        + ",\"task\":\"" + String(f.task) + "\"}";
   }
   return j + "]}";
