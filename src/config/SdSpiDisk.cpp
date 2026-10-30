@@ -38,7 +38,11 @@ volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
  * card that was pulled out or lost its contact (SdCard watches it). */
 volatile uint32_t _blocksWritten = 0;
 volatile uint32_t _lastBusyUs = 0;                       // the last written block's programming time
-volatile int32_t _lastStatus = -1;                       // CMD13 right after it: R1<<8 | R2, -1 = none
+volatile uint32_t _lastSettleUs = 0;                     // until it answered CMD13 again
+volatile int32_t _lastStatus = -1;
+char _lastReinit[96] = "";                               // initialising it again after it went silent
+volatile uint32_t _reinits = 0;
+volatile bool _writeReset = false;                       // the card reset under a write: the next ones fail at once                       // CMD13 right after it: R1<<8 | R2, -1 = none
 volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 0;
 /* THE BUS SPEED FALLS BACK BY ITSELF: a flaky wire at 20 MHz shows as reads that must be done
  * again. TROUBLE_LIMIT of them within TROUBLE_WINDOW_MS and the clock is HALVED (down to
@@ -297,6 +301,7 @@ bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
 bool _writeSectors(const uint8_t* buf, uint32_t sector, uint32_t n) {
   BusLock lock;
   if (_outage && (int32_t)(millis() - _outageEndMs) < 0) return false;   // simulated loss: writes fail too
+  if (_writeReset) return false;                          // it reset under this file's write: it would again
   _spi->beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
   bool ok = true;
   for (uint32_t i = 0; i < n && ok; i++) {
@@ -322,15 +327,30 @@ bool _writeSectors(const uint8_t* buf, uint32_t sector, uint32_t n) {
       /* The card must still answer once programmed: SEND_STATUS. A card that reset during its
        * busy time (its supply sagging under the programming current) releases MISO — the wait
        * above then ends early — and answers nothing any more until it is initialised again. */
-      _select();
-      const uint8_t sr1 = _cmd(13, 0, 0x01);
-      const uint8_t sr2 = _spi->transfer(0xFF);
-      _deselect();
+      uint8_t sr1 = 0xFF, sr2 = 0xFF;
+      const uint32_t t1 = micros();
+      do {
+        _select();
+        sr1 = _cmd(13, 0, 0x01);
+        sr2 = _spi->transfer(0xFF);
+        _deselect();
+        if (sr1 == 0xFF && micros() - t1 > 4000) vTaskDelay(1);
+      } while (sr1 == 0xFF && micros() - t1 < 250000);
+      _lastSettleUs = micros() - t1;
       _lastStatus = sr1 == 0xFF ? -2 : (int32_t)((sr1 << 8) | sr2);
       if (sr1 != 0x00 || sr2 != 0x00) {
         ok = false;
         _noteFailed(s, 1, STAGE_WGONE, (uint8_t)(_lastBusyUs > 25500 ? 255 : _lastBusyUs / 100));
-        if (sr1 == 0xFF) break;                          // gone: further attempts cannot answer
+        if (sr1 == 0xFF) {                               // gone: answers CMD0 again if it reset
+          _spi->endTransaction();
+          String why;
+          const bool back = _initialise(why);
+          strlcpy(_lastReinit, back ? "ok" : why.c_str(), sizeof _lastReinit);
+          _reinits = _reinits + 1;
+          _writeReset = true;
+          _spi->beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
+          break;
+        }
       }
     }
   }
@@ -485,7 +505,7 @@ String failedAttemptsJson() {
     if (k > first) j += ",";
     j += "{\"ms\":" + String((unsigned long)f.ms) + ",\"sector\":" + String((unsigned long)f.sector)
        + ",\"n\":" + String((unsigned long)f.n) + ",\"mhz\":" + String((unsigned long)(f.hz / 1000000UL))
-       + ",\"stage\":\"" + names[f.stage < 10 ? f.stage : 0] + "\",\"value\":" + String((unsigned)f.value)
+       + ",\"stage\":\"" + names[f.stage < sizeof names / sizeof *names ? f.stage : 0] + "\",\"value\":" + String((unsigned)f.value)
        + ",\"task\":\"" + String(f.task) + "\"}";
   }
   return j + "]}";
@@ -516,6 +536,7 @@ static bool _makeParents(char* full) {
 
 bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason) {
   if (!_ready || _pdrv == 0xFF || !path || path[0] != '/') { reason = "carte SD non montee"; return false; }
+  _writeReset = false;
   /* In PSRAM: a FIL and two long paths, the sd-card task's stack is 8 KB. */
   struct Job { FIL fil; char full[200]; char temp[208]; };
   Job* j = (Job*)heap_caps_calloc(1, sizeof(Job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -553,11 +574,18 @@ bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason) 
   ok = true;
 done:
   heap_caps_free(j);
+  if (_writeReset)
+    reason = "la carte SD s'est remise a zero en ecrivant : son alimentation flanche sous le courant "
+             "d'ecriture (module, fils, voir EXIGENCES_PCB) — fichier non ecrit, la SD reste lisible";
   return ok;
 }
+bool writeReset() { return _writeReset; }
 uint32_t blocksWritten() { return _blocksWritten; }
 uint32_t lastWriteBusyUs() { return _lastBusyUs; }
 int32_t lastWriteStatus() { return _lastStatus; }
+uint32_t lastWriteSettleUs() { return _lastSettleUs; }
+const char* lastWriteReinit() { return _lastReinit; }
+uint32_t writeReinits() { return _reinits; }
 
 bool listDir(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx) {
   if (!_ready) return false;

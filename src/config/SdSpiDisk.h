@@ -42,7 +42,11 @@ File open(const char* path);                     // read-only; empty when nothin
 bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason);
 uint32_t blocksWritten();        // 512-byte blocks written since boot
 uint32_t lastWriteBusyUs();      // the last written block's programming time
-int32_t lastWriteStatus();       // CMD13 after it (R1<<8 | R2), -1 none, -2 the card no longer answered
+uint32_t lastWriteSettleUs();    // from the end of its busy time until it answered CMD13
+int32_t lastWriteStatus();
+const char* lastWriteReinit();   // after a block it went silent: initialising it again ("ok" or why not)
+uint32_t writeReinits();
+bool writeReset();               // the last writeFile failed because the card reset under it (its FatFs state is stale)       // CMD13 after it (R1<<8 | R2), -1 none, -2 the card no longer answered
 
 /* A folder's entries WITHOUT OPENING THEM (FatFs f_readdir): name, folder or not, size — `visit`
  * returns false to stop. Opening every file to weigh it cost ~7 ms each, the "._" twins a Mac

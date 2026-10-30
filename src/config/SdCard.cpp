@@ -48,7 +48,7 @@ volatile uint8_t  _jobState    = 0;         // 0 never, 1 pending, 2 done, 3 fai
 volatile uint32_t _jobMs       = 0;         // how long it took
 volatile uint32_t _jobDoneAt   = 0;
 volatile int      _jobReloaded = 0;         // kits in memory reloaded after a write
-char              _jobReason[112] = "";
+char              _jobReason[224] = "";
 portMUX_TYPE      _jobMux      = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t _taskAlive   = 0;         // the task is at work (it sleeps between two jobs)
 volatile uint32_t _lastAttemptMs = 0;
@@ -526,6 +526,10 @@ void _job() {
     heap_caps_free(_jobData);
     _jobData = nullptr;
     _jobReloaded = ok ? SfzStore::refresh(_jobPath) : 0;
+    /* The card reset under the write (its supply sags under the programming current, MESURES
+     * §248): the driver initialised it again, but FatFs still holds what it read before and
+     * what it failed to write. Mounted again from the card itself. */
+    if (!ok && SdSpiDisk::writeReset()) { _unmount(); _mount(); }
   }
   _jobMs = millis() - t0;
   _jobDoneAt = millis();
@@ -846,6 +850,9 @@ String diagnostics() {
        + ",\"blocks_read\":" + String((unsigned long)SdSpiDisk::blocksRead())
        + ",\"blocks_written\":" + String((unsigned long)SdSpiDisk::blocksWritten())
        + ",\"last_write_busy_us\":" + String((unsigned long)SdSpiDisk::lastWriteBusyUs())
+       + ",\"last_write_settle_us\":" + String((unsigned long)SdSpiDisk::lastWriteSettleUs())
+       + ",\"write_reinits\":" + String((unsigned long)SdSpiDisk::writeReinits())
+       + ",\"last_write_reinit\":\"" + String(SdSpiDisk::lastWriteReinit()) + "\""
        + ",\"last_write_status\":" + String((long)SdSpiDisk::lastWriteStatus())
        + ",\"crc_errors\":" + String((unsigned long)SdSpiDisk::crcErrors())
        + ",\"crc_rejected\":" + String((unsigned long)SdSpiDisk::crcRejected())
