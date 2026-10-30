@@ -608,7 +608,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
             /* La requete part avant la fin : rien n'est garde. Appele aussi apres
              * une fin normale — sans effet, le televersement est clos. */
             request->onDisconnect([request]() { SampleStore::ecrireAbandon(request); });
-            SampleStore::ecrireDebut(request, nom.c_str());
+            SampleStore::ecrireDebut(request, nom.c_str(), total);
           }
           SampleStore::ecrireMorceau(request, data, len);
           return;

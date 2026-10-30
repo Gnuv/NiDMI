@@ -24,6 +24,8 @@ constexpr const char* PROVISOIRE = "/televersement.part";
 /* Un televersement sans nouvelle depuis ce delai est mort sans prevenir : le
  * suivant le remplace plutot que d'etre refuse pour toujours. */
 constexpr uint32_t    ABANDON_MS = 30000;
+/* What storage keeps free beyond an upload: LittleFS's own blocks, and the deferred writes (§254). */
+constexpr size_t      STORAGE_MARGIN = 32 * 1024;
 
 bool   _monte = false;
 
@@ -362,13 +364,21 @@ bool nomValide(const char* nom, String& raison) {
   return true;
 }
 
-bool ecrireDebut(const void* qui, const char* nom) {
+bool ecrireDebut(const void* qui, const char* nom, size_t total) {
   String raison;
   if (_proprietaire && _proprietaire != qui && millis() - _dernierMorceauMs < ABANDON_MS)
     raison = "un autre televersement est en cours";
   else if (!nomValide(nom, raison)) {}
   else if (!monter())
     raison = "storage non monte";
+  else {
+    const StorageIndex::Stats s = StorageIndex::stats();
+    const size_t libre = (s.measured && s.total > s.used) ? s.total - s.used : 0;
+    if (s.measured && total + STORAGE_MARGIN > libre)
+      raison = "trop gros pour la memoire interne (" + String((unsigned)(total / 1024)) + " Ko, "
+             + String((unsigned)(libre > STORAGE_MARGIN ? (libre - STORAGE_MARGIN) / 1024 : 0))
+             + " Ko libres) : le copier sur la SD avec un ordinateur, dans /samples";
+  }
   if (!raison.length()) {
     if (_enCours) _enCours.close();
     _enCours = LittleFS.open(PROVISOIRE, FILE_WRITE);

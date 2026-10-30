@@ -59,7 +59,11 @@ constexpr size_t NOM_MAX = 48;          // nul final compris
  * qui casserait un chemin ou du JSON (`/`, `\`, `"`), les caractères de
  * contrôle, le vide, et au-delà de NOM_MAX - 1. */
 bool nomValide(const char* nom, String& raison);
-bool ecrireDebut(const void* qui, const char* nom);
+/* `total`: the size the request announces. A sound that storage cannot hold is refused BEFORE a
+ * byte is written (§254): each 4 KB written costs a late audio block (§177), and a long sound used
+ * to be written until the flash was full, then refused. The new file is written beside the old
+ * one, renamed at the end: the old one's place is not counted. */
+bool ecrireDebut(const void* qui, const char* nom, size_t total);
 bool ecrireMorceau(const void* qui, const uint8_t* donnees, size_t taille);
 bool ecrireFin(const void* qui, String& raison);
 void ecrireAbandon(const void* qui);
