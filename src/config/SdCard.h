@@ -79,14 +79,21 @@ void loadHeads();
  * reads the kit, retires what no cue names. Callable from ANY task; never waits. */
 void requestSfz();
 
-/* WRITE A FILE UNDER /sfz (MESURES §248: the SFZ editor saves a kit, or sends one of its samples).
- * `data` is a PSRAM buffer the card TAKES (freed after the write, or now on a refusal). Returns at
- * once — false with `reason` when the card is absent or a write is still running; the task writes
- * it, then reloads every kit in memory that reads it (SfzStore::refresh) and announces the result
- * (`NIDMI_SD_WRITE:ok|error:<path>`). writeStatus(): the last write, as JSON — {"job","state":
- * "pending"|"done"|"failed","path","bytes","ms","reason","reloaded"}. Any task. */
+/* THE KITS' FILES, FOR THE SFZ EDITOR (MESURES §248) — one job at a time, done by the task: the SD is
+ * never read from async_tcp (a multi-sector read from there made the card stop answering).
+ *   requestWrite: write a file under /sfz. `data` is a PSRAM buffer the card TAKES (freed after the
+ *                 write, or now on a refusal). Then every kit in memory that reads it is read again
+ *                 (SfzStore::refresh); announced `NIDMI_SD_WRITE:ok|error:<path>`.
+ *   requestRead:  read a file whole into PSRAM; takeRead() hands it over once it is done (200; 409
+ *                 still reading; 422 failed, `reason`; 404 another job, or already taken). A read
+ *                 nobody takes is dropped after 10 s.
+ * Both return at once — false with `reason` when the card is absent or another job holds the slot.
+ * jobStatus(): the last job, as JSON — {"job","kind":"read"|"write","state":"pending"|"done"|"failed",
+ * "path","bytes","ms","reloaded","reason"}. Any task. */
 bool   requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason);
-String writeStatus();
+bool   requestRead(const char* path, uint32_t& job, String& reason);
+int    takeRead(uint32_t job, uint8_t*& data, size_t& n, String& path, String& reason);
+String jobStatus();
 
 // Opens a card file for reading; an empty File when the card is not mounted.
 File open(const char* path);

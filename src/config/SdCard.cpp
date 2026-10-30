@@ -34,16 +34,22 @@ volatile bool     _wantMeasure = false;
 volatile bool     _wantWiring  = false;
 volatile bool     _wantHeads   = false;
 volatile bool     _wantSfz     = false;
-/* THE WRITE (§248): one at a time. The web server posts it (path, buffer), the task writes it. */
-volatile bool     _wantWrite   = false;
-char              _writePath[200] = "";
-uint8_t*          _writeData   = nullptr;
-size_t            _writeBytes  = 0;
-volatile uint32_t _writeJob    = 0;
-volatile uint8_t  _writeState  = 0;         // 0 never, 1 pending, 2 done, 3 failed
-volatile uint32_t _writeMs     = 0;
-volatile int      _writeReloaded = 0;       // kits in memory reloaded after it
-char              _writeReason[112] = "";
+/* THE JOB (§248): one at a time — a kit's file WRITTEN (the editor saves) or READ (the editor opens
+ * it, a waveform). The web server posts it, the task does it: the SD is never read from async_tcp — a
+ * multi-sector read from there made the card stop answering (it was declared lost, then remounted),
+ * while the same file read by this task passed clean. */
+volatile bool     _wantJob     = false;
+volatile bool     _jobIsWrite  = false;
+char              _jobPath[200] = "";
+uint8_t*          _jobData     = nullptr;   // a write: what to write; a read: what was read, until taken
+size_t            _jobBytes    = 0;
+volatile uint32_t _jobId       = 0;
+volatile uint8_t  _jobState    = 0;         // 0 never, 1 pending, 2 done, 3 failed
+volatile uint32_t _jobMs       = 0;         // how long it took
+volatile uint32_t _jobDoneAt   = 0;
+volatile int      _jobReloaded = 0;         // kits in memory reloaded after a write
+char              _jobReason[112] = "";
+portMUX_TYPE      _jobMux      = portMUX_INITIALIZER_UNLOCKED;
 volatile uint32_t _taskAlive   = 0;         // the task is at work (it sleeps between two jobs)
 volatile uint32_t _lastAttemptMs = 0;
 volatile uint32_t _attempts    = 0;
@@ -116,6 +122,10 @@ uint32_t _measHz = 0;
  * read. Hence also a task that SLEEPS between two jobs instead of dying — a task whose
  * stack is not the heap's default must not delete itself. */
 constexpr uint32_t STACK_BYTES = 8192;
+/* A kit's file served to the editor (§248): read whole into PSRAM, then sent. */
+constexpr size_t   READ_SFZ_MAX = 64 * 1024;
+constexpr size_t   READ_WAV_MAX = 3 * 1024 * 1024;
+constexpr uint32_t READ_KEEP_MS = 10000;     // a read nobody took is dropped after this
 StaticTask_t   _taskTcb;
 StackType_t*   _taskStack = nullptr;
 TaskHandle_t   _taskHandle = nullptr;
@@ -483,22 +493,50 @@ void _verify() {
                 _verifyName, (unsigned long)v.spans, (unsigned long)v.mismatches);
 }
 
-void _write() {
+void _read(String& reason) {
+  File f = open(_jobPath);
+  if (!f || f.isDirectory()) { reason = "introuvable sur la SD"; return; }
+  const size_t n = f.size();
+  const size_t max = String(_jobPath).endsWith(".sfz") ? READ_SFZ_MAX : READ_WAV_MAX;
+  if (n > max) { f.close(); reason = "fichier trop gros pour etre servi (" + String((unsigned)(max / 1024)) + " Ko au plus)"; return; }
+  uint8_t* b = (uint8_t*)heap_caps_malloc(n ? n : 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!b) { f.close(); reason = "memoire"; return; }
+  size_t lus = 0;
+  while (lus < n) {
+    const size_t k = f.read(b + lus, (n - lus) < 16384 ? (n - lus) : 16384);
+    if (!k) break;
+    lus += k;
+    vTaskDelay(1);                                          // core 0's IDLE task
+  }
+  f.close();
+  if (lus != n) { heap_caps_free(b); reason = "lecture incomplete"; return; }
+  _jobData = b; _jobBytes = n;
+}
+
+void _job() {
   const uint32_t t0 = millis();
   String reason;
-  bool ok = _mounted && SdSpiDisk::writeFile(_writePath, _writeData, _writeBytes, reason);
-  if (!_mounted && reason.isEmpty()) reason = "carte SD absente ou perdue";
-  heap_caps_free(_writeData);
-  _writeData = nullptr;
-  _writeReloaded = ok ? SfzStore::refresh(_writePath) : 0;
-  _writeMs = millis() - t0;
-  strlcpy(_writeReason, reason.c_str(), sizeof _writeReason);
+  bool ok = false;
+  if (!_mounted) reason = "carte SD absente ou perdue";
+  else if (_jobIsWrite) ok = SdSpiDisk::writeFile(_jobPath, _jobData, _jobBytes, reason);
+  else { _read(reason); ok = reason.isEmpty(); }
+  if (_jobIsWrite) {
+    heap_caps_free(_jobData);
+    _jobData = nullptr;
+    _jobReloaded = ok ? SfzStore::refresh(_jobPath) : 0;
+  }
+  _jobMs = millis() - t0;
+  _jobDoneAt = millis();
+  strlcpy(_jobReason, reason.c_str(), sizeof _jobReason);
   __sync_synchronize();
-  _writeState = ok ? 2 : 3;
-  NIDMI_WEB_LOG("[SD] %s : %s (%u o, %lu ms%s%s)", _writePath, ok ? "ecrit" : "NON ecrit",
-                (unsigned)_writeBytes, (unsigned long)_writeMs, ok ? "" : " — ", ok ? "" : _writeReason);
+  _jobState = ok ? 2 : 3;
+  if (!_jobIsWrite && ok) return;                           // a read says nothing: it is taken at once
+  NIDMI_WEB_LOG("[SD] %s : %s (%u o, %lu ms%s%s)", _jobPath,
+                ok ? "ecrit" : (_jobIsWrite ? "NON ecrit" : "NON lu"),
+                (unsigned)_jobBytes, (unsigned long)_jobMs, ok ? "" : " — ", ok ? "" : _jobReason);
+  if (!_jobIsWrite) return;
   char frame[240];
-  snprintf(frame, sizeof frame, "NIDMI_SD_WRITE:%s:%s", ok ? "ok" : "error", _writePath);
+  snprintf(frame, sizeof frame, "NIDMI_SD_WRITE:%s:%s", ok ? "ok" : "error", _jobPath);
   nidmi_ws_pousser(frame);
 }
 
@@ -514,12 +552,12 @@ void _task(void*) {
     if (_wantHeads)   { _wantHeads   = false; SdStream::loadHeads(); continue; }
     if (_wantLoad)    { _wantLoad    = false; _loadSounds(); continue; }
     if (_wantSfz)     { _wantSfz     = false; SfzStore::servir(); continue; }
-    if (_wantWrite)   { _wantWrite   = false; _write();    continue; }
+    if (_wantJob)     { _wantJob     = false; _job();      continue; }
     __sync_lock_release(&_taskAlive);
     // A flag raised between the last turn and the release: back to work, unless its
     // raiser already took the flag — then its notification wakes us at once.
     if ((_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure
-         || _wantWiring || _wantHeads || _wantSfz || _wantWrite) && !__sync_lock_test_and_set(&_taskAlive, 1)) continue;
+         || _wantWiring || _wantHeads || _wantSfz || _wantJob) && !__sync_lock_test_and_set(&_taskAlive, 1)) continue;
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
 }
@@ -702,28 +740,68 @@ bool measure(const char* name, uint32_t hz) {
   return true;
 }
 
-bool requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason) {
-  if (!_declared || !_mounted) { heap_caps_free(data); reason = "carte SD absente ou perdue"; return false; }
-  if (_writeState == 1) { heap_caps_free(data); reason = "une ecriture sur la SD est en cours : reessayer"; return false; }
-  if (!path || strlen(path) >= sizeof _writePath) { heap_caps_free(data); reason = "chemin trop long"; return false; }
-  strlcpy(_writePath, path, sizeof _writePath);
-  _writeData = data; _writeBytes = n;
-  _writeReason[0] = 0; _writeReloaded = 0; _writeMs = 0;
-  job = _writeJob = _writeJob + 1;
+/* Takes the job slot: false when a job runs, or a read is waiting to be taken (a read left
+ * untaken for READ_KEEP_MS is dropped: the page that asked went away). */
+static bool _takeSlot(String& reason) {
+  bool ok = false;
+  portENTER_CRITICAL(&_jobMux);
+  ok = _jobState != 1 && !(_jobState == 2 && !_jobIsWrite && _jobData && millis() - _jobDoneAt <= READ_KEEP_MS);
+  if (ok) _jobState = 1;
+  portEXIT_CRITICAL(&_jobMux);
+  if (!ok) { reason = "la SD sert deja une demande : reessayer"; return false; }
+  if (!_jobIsWrite && _jobData) { heap_caps_free(_jobData); _jobData = nullptr; }
+  return true;
+}
+
+static bool _post(bool write, const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason) {
+  if (!_declared || !_mounted) { reason = "carte SD absente ou perdue"; return false; }
+  if (!path || strlen(path) >= sizeof _jobPath) { reason = "chemin trop long"; return false; }
+  if (!_takeSlot(reason)) return false;
+  strlcpy(_jobPath, path, sizeof _jobPath);
+  _jobIsWrite = write;
+  _jobData = data; _jobBytes = n;
+  _jobReason[0] = 0; _jobReloaded = 0; _jobMs = 0;
+  job = _jobId = _jobId + 1;
   __sync_synchronize();
-  _writeState = 1;
-  _wantWrite = true;
+  _wantJob = true;
   _startTask();
   return true;
 }
 
-String writeStatus() {
+bool requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason) {
+  if (_post(true, path, data, n, job, reason)) return true;
+  heap_caps_free(data);
+  return false;
+}
+
+bool requestRead(const char* path, uint32_t& job, String& reason) {
+  return _post(false, path, nullptr, 0, job, reason);
+}
+
+int takeRead(uint32_t job, uint8_t*& data, size_t& n, String& path, String& reason) {
+  int code = 0;
+  portENTER_CRITICAL(&_jobMux);
+  if (job != _jobId || _jobIsWrite) code = 404;
+  else if (_jobState == 1) code = 409;
+  else if (_jobState == 3) code = 422;
+  else if (!_jobData) code = 404;
+  else { data = _jobData; n = _jobBytes; _jobData = nullptr; code = 200; }
+  portEXIT_CRITICAL(&_jobMux);
+  if (code == 200) path = _jobPath;
+  if (code == 404) reason = "lecture inconnue ou deja servie";
+  else if (code == 409) reason = "lecture en cours";
+  else if (code == 422) reason = _jobReason;
+  return code;
+}
+
+String jobStatus() {
   static const char* const states[] = { "none", "pending", "done", "failed" };
-  String r = _writeReason; r.replace("\"", "'");
-  String p = _writePath;   p.replace("\"", "'");
-  return "{\"job\":" + String((unsigned long)_writeJob) + ",\"state\":\"" + states[_writeState & 3]
-       + "\",\"path\":\"" + p + "\",\"bytes\":" + String((unsigned)_writeBytes)
-       + ",\"ms\":" + String((unsigned long)_writeMs) + ",\"reloaded\":" + String(_writeReloaded)
+  String r = _jobReason; r.replace("\"", "'");
+  String p = _jobPath;   p.replace("\"", "'");
+  return "{\"job\":" + String((unsigned long)_jobId) + ",\"kind\":\"" + (_jobIsWrite ? "write" : "read")
+       + "\",\"state\":\"" + states[_jobState & 3]
+       + "\",\"path\":\"" + p + "\",\"bytes\":" + String((unsigned)_jobBytes)
+       + ",\"ms\":" + String((unsigned long)_jobMs) + ",\"reloaded\":" + String(_jobReloaded)
        + ",\"reason\":\"" + r + "\"}";
 }
 

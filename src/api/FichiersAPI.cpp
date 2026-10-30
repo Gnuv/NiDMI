@@ -28,8 +28,10 @@
 // /sfz : les kits et leurs samples. GET lit un `.sfz` ou un `.wav` (refuse en
 // concert : le bus de la SD est aux flux) ; POST ecrit un `.sfz` ou un `.wav` —
 // `nom` est alors le CHEMIN sous la racine (/sfz/kit/kit.sfz) — par la tache
-// `sd-card`, qui recharge ensuite les kits en memoire qui le lisent. Le POST rend
-// la main : 202, puis GET /api/sd/write dit ou en est l'ecriture (annoncee aussi :
+// `sd-card`, qui recharge ensuite les kits en memoire qui le lisent. Les deux rendent
+// la main (202) : la tache `sd-card` lit ou ecrit — jamais async_tcp, une lecture
+// multi-secteurs d'ici faisait tomber la carte —, GET /api/sd/job dit ou elle en
+// est, GET /api/sd/read?job= sert ce qu'elle a lu (une ecriture est annoncee aussi :
 // NIDMI_SD_WRITE). Pas de suppression sur la SD.
 #include "APICommon.h"
 #include "../config/StorageIndex.h"
@@ -316,9 +318,19 @@ bool wavJouable(const uint8_t* d, size_t n, String& raison) {
 }  // namespace
 
 void setupFichiersAPI(AsyncWebServer& server) {
-  /* WHERE THE LAST SD WRITE IS (§248) — asked after a POST volume=sd, until it is done. */
-  server.on("/api/sd/write", HTTP_GET, [](AsyncWebServerRequest* request) {
-    request->send(200, "application/json", SdCard::writeStatus());
+  /* WHERE THE LAST SD JOB IS (§248) — asked after a GET or a POST volume=sd, until it is done. */
+  server.on("/api/sd/job", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "application/json", SdCard::jobStatus());
+  });
+
+  /* WHAT A READ JOB READ (§248), once: from PSRAM, the SD is not touched here. */
+  server.on("/api/sd/read", HTTP_GET, [](AsyncWebServerRequest* request) {
+    const uint32_t job = request->hasParam("job") ? (uint32_t)request->getParam("job")->value().toInt() : 0;
+    uint8_t* data = nullptr; size_t n = 0; String chemin, raison;
+    const int code = SdCard::takeRead(job, data, n, chemin, raison);
+    if (code != 200) { repondre(request, code, raison); return; }
+    std::shared_ptr<char> t((char*)data, [](char* p) { heap_caps_free(p); });
+    request->send(nidmi_reponse_tampon(request, typeDe(chemin), t, n));
   });
 
 
@@ -477,19 +489,16 @@ void setupFichiersAPI(AsyncWebServer& server) {
   server.on("/api/fichier", HTTP_GET, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
     if (volumeSd(request)) {
-      /* A kit's file, for the SFZ editor (§248). Read in pieces as the response goes — the bus is the
-       * streams' in a concert: refused then. A card in doubt answers nothing (openForWeb). */
+      /* A kit's file, for the SFZ editor (§248): the sd-card task reads it into PSRAM, then
+       * /api/sd/read serves it — 202 here, /api/sd/job says when. The bus is the streams' in a
+       * concert: refused then. */
       String raison;
       if (!cheminKit(chemin, raison)) { repondre(request, 400, raison); return; }
       if (Concert::refuse(request, "lecture de la SD refusee : la carte est verrouillee pour le concert")) return;
-      auto f = std::make_shared<File>(SdCard::openForWeb(chemin.c_str()));
-      if (!*f || f->isDirectory()) { repondre(request, 404, "introuvable sur la SD : " + chemin); return; }
-      const size_t taille = f->size();
-      request->send(request->beginResponse(typeDe(chemin), taille, [f](uint8_t* out, size_t max, size_t) -> size_t {
-        const size_t k = f->read(out, max);
-        if (!k) f->close();
-        return k;
-      }));
+      uint32_t job = 0;
+      if (!SdCard::requestRead(chemin.c_str(), job, raison)) { repondre(request, 409, raison); return; }
+      request->send(202, "application/json", "{\"status\":\"pending\",\"job\":" + String((unsigned long)job)
+                    + ",\"chemin\":\"" + chemin + "\"}");
       return;
     }
     if (!volumeInterne(request)) { repondre(request, 501, "volume inconnu"); return; }
