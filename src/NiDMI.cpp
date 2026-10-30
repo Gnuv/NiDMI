@@ -58,6 +58,16 @@ static String g_staSnStr;
 static unsigned long g_lastStaConnectAttempt = 0;
 static const unsigned long STA_RECONNECT_BASE_MS = 10000;  // 1re tentative après 10 s
 static const unsigned long STA_RECONNECT_MAX_MS  = 60000;  // plafond du backoff
+/* THE BOOT HOLDS THE STA FOR THE CABLE (MESURES §244). With « cable prioritaire » (or the
+ * standalone instrument), the WiFi was joined at every boot only to be cut 12 s later, when
+ * the cable proved alive — ~30 KB of internal RAM for those seconds, the heap down to a few
+ * KB. The radio still starts at boot (§142: it is the path that works), as an access point;
+ * the box is joined only if the cable does not take over: no computer on the USB bus at 6 s,
+ * the cable not alive at 30 s, the rule removed, the WiFi forced. Never after two crashes in
+ * a row: then the board boots as before. */
+static bool g_holdSta = false;
+static const unsigned long HOLD_NO_HOST_MS = 6000;
+static const unsigned long HOLD_MAX_MS     = 30000;
 /* ── LE CABLE OU LE WIFI ─────────────────────────────────────────────────────
  * « On n'a pas besoin de deux acces en simultane : soit l'un, soit l'autre. »
  * Mesure (MESURES §147), son charge, sous charge : cable seul, MIDI 0 retard et
@@ -424,6 +434,7 @@ extern "C" void nidmi_requestEssaiWifi(unsigned long dureeMs){
  * Tout se passe dans nidmi_loop() : l'API ne fait que lever un drapeau, et la
  * NVS s'ecrit ici, hors du contexte async (§13). */
 static const unsigned long CABLE_CONFIRMATION_MS = 10000;
+static const unsigned long CABLE_CONFIRMATION_BOOT_MS = 2000;   // while the boot holds the STA (§244)
 static const uint32_t      CABLE_TRAMES_MIN      = 3;
 static const unsigned long CABLE_SILENCE_MS      = 30000;   // 4 sondes sans reponse (10, 15, 20, 25 s)
 static const unsigned long CABLE_SONDE_APRES_MS  = 10000;
@@ -725,7 +736,8 @@ static void basculeCable(unsigned long now){
         b.tramesFenetre = 0;
         return;
     }
-    if (now - b.vivantDepuis < CABLE_CONFIRMATION_MS || b.tramesFenetre < CABLE_TRAMES_MIN) return;
+    const unsigned long confirmation = g_holdSta ? CABLE_CONFIRMATION_BOOT_MS : CABLE_CONFIRMATION_MS;
+    if (now - b.vivantDepuis < confirmation || b.tramesFenetre < CABLE_TRAMES_MIN) return;
     if (!serverCore.coupureSure()) return;     // le mDNS d'abord (§161)
     serverCore.couperRadioWifi();
     b.tientLeWifi = true;
@@ -745,7 +757,8 @@ static void basculeCable(unsigned long now){
  *      l'ordinateur que pour le configurer, par le cable (192.168.7.1). Refusee
  *      sur un firmware sans lien reseau USB : on s'enfermerait dehors.
  *   3. CABLE PRIORITAIRE — la bascule ci-dessus.
- * Le demarrage allume TOUJOURS la radio (§142) : la regle coupe en marche.
+ * Le demarrage allume TOUJOURS la radio (§142) : la regle coupe en marche. Mais il ne
+ * rejoint la box que si le cable ne prend pas le relais (g_holdSta, §244).
  * Les deux options valent tout de suite, et se MEMORISENT par les ecritures
  * differees, comme les autres (MESURES §184) : 3 s apres leur dernier
  * changement — un bouton qui bascule vite n'use pas la flash —, au premier
@@ -1381,6 +1394,21 @@ static void wifiBoucle(){
     surveillerLienCable(now);
     relanceAuDemarrage(now);        // le cable jamais active apres un demarrage (§183)
     const bool essai = g_essai.enCours || g_essaiDemande;
+    if (g_holdSta) {
+        const bool host = nidmi_usbnet::linkUp() && !nidmi_usbnet::suspendu();
+        const char* why = (b.tientLeWifi || p.autonomeTient) ? ""   // cut: the hold has done its work
+                        : p.force                            ? "WiFi force"
+                        : !b.prioritaire && !p.autonome      ? "reglage retire"
+                        : !host && now >= HOLD_NO_HOST_MS    ? "pas d'ordinateur sur le cable"
+                        : now >= HOLD_MAX_MS                 ? "le cable ne vit pas"
+                        : nullptr;
+        if (why) {
+            g_holdSta = false;
+            g_lastStaConnectAttempt = 0;                  // the box at once
+            g_staReconnectInterval = STA_RECONNECT_BASE_MS;
+            if (*why) NIDMI_WEB_LOG("[NiDMI] WiFi : la box est rejointe (%s)", why);
+        }
+    }
     // Une remise en marche qui a manque de memoire se retente — si la radio
     // est encore voulue : l'instrument autonome l'annule.
     const bool reessai = b.radioEnAttente && now - b.radioEchecA >= CABLE_RADIO_REESSAI_MS;
@@ -1600,7 +1628,16 @@ void nidmi_begin() {
     touchDiag("APRES WiFi/serveur");
 
     // Tente STA après que le mode APSTA soit configuré
-    if (g_staSsid.length() > 0) {
+    {
+        Preferences prefs;
+        prefs.begin(NVS_OPTIONS_RESEAU, true);
+        const bool cableFirst = prefs.getBool(NVS_CLE_PRIORITAIRE, true) || prefs.getBool(NVS_CLE_AUTONOME, false);
+        prefs.end();
+        g_holdSta = nidmi_usbnet::enabled() && cableFirst && AudioEngine::crashesBeforeBoot() < 2;
+        if (g_holdSta && g_staSsid.length() > 0)
+            NIDMI_WEB_LOG("[NiDMI] WiFi : la box attend le cable (cable prioritaire)");
+    }
+    if (g_staSsid.length() > 0 && !g_holdSta) {
         if (g_staIpStr.length() > 0 && g_staGwStr.length() > 0 && g_staSnStr.length() > 0) {
             IPAddress ip, gw, sn;
             if (ip.fromString(g_staIpStr) && gw.fromString(g_staGwStr) && sn.fromString(g_staSnStr)) {
@@ -1609,7 +1646,7 @@ void nidmi_begin() {
             }
         }
         serverCore.connectSta(g_staSsid.c_str(), g_staPass.length() > 0 ? g_staPass.c_str() : nullptr);
-    } else {
+    } else if (g_staSsid.length() == 0) {
         Serial.println("[NiDMI] No STA configuration found");
     }
     
@@ -1905,7 +1942,7 @@ void nidmi_loop() {
     // GARDEE PAR LA RADIO : connectSta() appelle WiFi.begin(), qui RALLUMERAIT un
     // WiFi coupe sur commande — la coupure serait un mensonge, et la mesure fausse.
     tc = nidmi_section("sta");
-    if (g_staSsid.length() > 0 && serverCore.radioWifiAllumee()) {
+    if (g_staSsid.length() > 0 && serverCore.radioWifiAllumee() && !g_holdSta) {
         wl_status_t staStatus = WiFi.status();
         unsigned long now = millis();
         if (staStatus == WL_CONNECTED) {

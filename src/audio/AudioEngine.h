@@ -98,6 +98,10 @@ void rearmerGardeFou();
 // vie, qui remet le compteur à zéro. Mémoire RTC : appelable d'async_tcp.
 void validerConfigBoot();
 
+/** The crashes in a row that came before this boot (0 after a power-on or a requested restart).
+ *  Readable before restaurerAuBoot(): it reads the RTC counter as the boot guard will. */
+uint8_t crashesBeforeBoot();
+
 // Thread-safe. velocity 0 sur noteOn = noteOff (convention MIDI).
 /* `canal`: the MIDI channel the note came on, 1..16, 0 when none is said (the
  * test tone, the app's socket). Each instrument listens to its track's channel —
