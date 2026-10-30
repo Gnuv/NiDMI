@@ -987,6 +987,15 @@ bool aller(int index) {
   return true;
 }
 
+bool placeHead(int index) {
+  VerrouSeq verrou;
+  if (index < 0 || index >= nombre()) return false;
+  _index = index;
+  _enPause = false;
+  _annoncer();
+  return true;
+}
+
 void demarrer() {
   VerrouSeq verrou;
   /* REPRISE : on ne recharge pas la cue, on rend son temps. La recharger

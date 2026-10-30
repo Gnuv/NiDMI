@@ -947,7 +947,46 @@ static void impressionsDrainer() {
 /* LE TRANSPORT, lu par r("sys.<nom>") (MESURES §181) : appele par le sequenceur
  * a chaque changement (Cues::surChangement), jamais par sondage. Six noms du
  * bus (il en tient 32) : l'arret se deduit (ni lecture, ni pause). */
+/* WHERE THE SHOW WAS (MESURES §244). After a crash the board played its first cue again, or
+ * nothing: in a performance, the show restarted from its beginning. The transport's state —
+ * the open composition, the cue, playing or not — is kept in RTC memory at every change (a
+ * software restart and a crash keep it, a power cut does not), read back first thing at boot,
+ * and a boot that follows a crash or a brownout puts the head back on that cue, and plays it
+ * if it was playing. Not after two crashes in a row (the cue may be what crashes), nor when
+ * the boot guard cut the sound, nor on another composition. The cue starts from its beginning. */
+struct ShowPoint { uint32_t magic; uint8_t compo; uint8_t playing; int16_t index; };
+RTC_NOINIT_ATTR static ShowPoint s_showPoint;
+static ShowPoint g_lastShow = {};                  // what the previous life left, read at boot
+static const uint32_t SHOW_POINT_MAGIC = 0x53484F57UL;   // "SHOW"
+
+static void captureShowPoint(){
+    g_lastShow = s_showPoint;
+    if (g_lastShow.magic != SHOW_POINT_MAGIC) g_lastShow = {};
+}
+
+static void askBootPlay();
+
+static bool resumeShow(){
+    if (g_lastShow.magic != SHOW_POINT_MAGIC || !AudioEngine::bootFollowsCrash()) return false;
+    if (AudioEngine::crashesBeforeBoot() >= 2) {
+        NIDMI_WEB_LOG("[cues] reprise apres plantage laissee : %u plantages de suite",
+                      (unsigned)AudioEngine::crashesBeforeBoot());
+        return false;
+    }
+    if (g_lastShow.compo != Repertoire::numeroOuvert() || !Cues::placeHead(g_lastShow.index)) return false;
+    if (g_lastShow.playing) {
+        askBootPlay();
+        NIDMI_WEB_LOG("[cues] reprise apres plantage : cue %d, relancee", g_lastShow.index + 1);
+    } else {
+        NIDMI_WEB_LOG("[cues] reprise apres plantage : la tete revient sur la cue %d (elle ne jouait pas)",
+                      g_lastShow.index + 1);
+    }
+    return true;
+}
+
 static void publierEtatsTransport(const Cues::Etat& e){
+    s_showPoint = { SHOW_POINT_MAGIC, Repertoire::numeroOuvert(), (uint8_t)(e.lecture && !e.pause ? 1 : 0),
+                    (int16_t)e.index };
     FluxRegistry::update("sys.play",     e.lecture ? 1 : 0);
     FluxRegistry::update("sys.pause",    e.pause ? 1 : 0);
     FluxRegistry::update("sys.cue",      (float)(e.index + 1));
@@ -1509,6 +1548,7 @@ void nidmi_begin() {
     // demande le redemarrage : apres capturerDemandeur() (§162).
     JournalAvant::capturer();
     if (nidmi_autopsyAtBootArmed()) g_autopsie = true;
+    captureShowPoint();    // before the first transport announcement overwrites it (§244)
     HeapTrough::begin();   // armed for this boot: the heap, read from now on (§243)
     Serial.begin(115200);
     delay(50);
@@ -1861,13 +1901,15 @@ void nidmi_loop() {
            doit trouver ses échantillons en mémoire. Sautée quand le garde-fou a
            coupé la restauration — la lecture pourrait être ce qui plante — et
            sur un démarrage à vide, demandé justement pour ne rien lancer. */
-        if (Cues::lectureAuDemarrage()) {
-            if (AudioEngine::metriques().bootCoupe)
+        /* After a crash, where the show was (§244) — whatever « lecture au demarrage » says. */
+        if (AudioEngine::metriques().bootCoupe) {
+            if (Cues::lectureAuDemarrage() || AudioEngine::bootFollowsCrash())
                 NIDMI_WEB_LOG("[cues] lecture au demarrage SAUTEE : le garde-fou a coupe la restauration");
-            else if (nidmi_demarreAVide())
+        } else if (nidmi_demarreAVide()) {
+            if (Cues::lectureAuDemarrage())
                 NIDMI_WEB_LOG("[cues] lecture au demarrage sautee : demarrage a vide");
-            else
-                askBootPlay();
+        } else if (!resumeShow() && Cues::lectureAuDemarrage()) {
+            askBootPlay();
         }
     }
     serveBootPlay();

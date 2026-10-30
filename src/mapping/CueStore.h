@@ -89,6 +89,7 @@ void  pauser();
 void  suivant();           // GO   : cue suivante — la premiere apres la derniere si la liste boucle, rien sinon
 void  precedent();         // cue precedente (la derniere avant la premiere si la liste boucle)
 bool  aller(int index);    // saut direct
+bool  placeHead(int index);   // the head on cue N, nothing applied: the next PLAY plays it (resume after a crash, §244)
 void  boucle();            // appelee par nidmi_loop : avance les cues minutees
 
 // ── Options du transport (MESURES §181) ──────────────────────────────────

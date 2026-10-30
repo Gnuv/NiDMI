@@ -1598,6 +1598,12 @@ uint8_t crashesBeforeBoot() {
   return (crash && rtcMagie == MAGIE_RTC) ? rtcPlantages : 0;
 }
 
+bool bootFollowsCrash() {
+  const esp_reset_reason_t r = esp_reset_reason();
+  return r == ESP_RST_PANIC || r == ESP_RST_INT_WDT || r == ESP_RST_TASK_WDT || r == ESP_RST_WDT
+      || r == ESP_RST_BROWNOUT;
+}
+
 void validerConfigBoot() {
   // Memoire RTC : rien a ecrire en flash, donc appelable d'async_tcp. Une
   // restauration coupee attend un choix humain (rearmerGardeFou), pas une page.
