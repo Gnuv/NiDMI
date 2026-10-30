@@ -41,6 +41,8 @@ File open(const char* path);                     // read-only; empty when nothin
  * THE SD-CARD TASK ONLY (SdCard::requestWrite). False with `reason`. */
 bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason);
 uint32_t blocksWritten();        // 512-byte blocks written since boot
+uint32_t lastWriteBusyUs();      // the last written block's programming time
+int32_t lastWriteStatus();       // CMD13 after it (R1<<8 | R2), -1 none, -2 the card no longer answered
 
 /* A folder's entries WITHOUT OPENING THEM (FatFs f_readdir): name, folder or not, size — `visit`
  * returns false to stop. Opening every file to weigh it cost ~7 ms each, the "._" twins a Mac

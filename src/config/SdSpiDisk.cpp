@@ -37,6 +37,8 @@ volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
  * `_failStreak`: reads that failed after all their attempts, in a row — the signature of a
  * card that was pulled out or lost its contact (SdCard watches it). */
 volatile uint32_t _blocksWritten = 0;
+volatile uint32_t _lastBusyUs = 0;                       // the last written block's programming time
+volatile int32_t _lastStatus = -1;                       // CMD13 right after it: R1<<8 | R2, -1 = none
 volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 0;
 /* THE BUS SPEED FALLS BACK BY ITSELF: a flaky wire at 20 MHz shows as reads that must be done
  * again. TROUBLE_LIMIT of them within TROUBLE_WINDOW_MS and the clock is HALVED (down to
@@ -69,7 +71,8 @@ constexpr int FAILED_RING = 12;
 FailedAttempt _failed[FAILED_RING];
 volatile uint32_t _failedCount = 0;
 enum : uint8_t { STAGE_BUSY = 1, STAGE_CMD = 2, STAGE_TOKEN = 3, STAGE_CRC = 4, STAGE_MULTI = 5,
-                 STAGE_WBUSY = 6, STAGE_WCMD = 7, STAGE_WRESP = 8, STAGE_WDONE = 9 };   // a write (§248)
+                 STAGE_WBUSY = 6, STAGE_WCMD = 7, STAGE_WRESP = 8, STAGE_WDONE = 9,
+                 STAGE_WGONE = 10 };   // a write (§248)
 uint8_t _lastToken = 0xFF;
 void _noteFailed(uint32_t sector, uint32_t n, uint8_t stage, uint8_t value) {
   FailedAttempt& f = _failed[_failedCount % FAILED_RING];
@@ -311,9 +314,24 @@ bool _writeSectors(const uint8_t* buf, uint32_t sector, uint32_t n) {
       uint8_t resp = 0xFF;                               // the data response: within a few bytes
       for (int k = 0; k < 8 && resp == 0xFF; k++) resp = _spi->transfer(0xFF);
       if ((resp & 0x1F) != 0x05) { _waitReady(1000); _deselect(); _noteFailed(s, 1, STAGE_WRESP, resp); continue; }
+      const uint32_t t0 = micros();
       ok = _waitReady(1000);                             // accepted, then programmed
+      _lastBusyUs = micros() - t0;
       _deselect();
-      if (!ok) _noteFailed(s, 1, STAGE_WDONE, 0);
+      if (!ok) { _noteFailed(s, 1, STAGE_WDONE, 0); continue; }
+      /* The card must still answer once programmed: SEND_STATUS. A card that reset during its
+       * busy time (its supply sagging under the programming current) releases MISO — the wait
+       * above then ends early — and answers nothing any more until it is initialised again. */
+      _select();
+      const uint8_t sr1 = _cmd(13, 0, 0x01);
+      const uint8_t sr2 = _spi->transfer(0xFF);
+      _deselect();
+      _lastStatus = sr1 == 0xFF ? -2 : (int32_t)((sr1 << 8) | sr2);
+      if (sr1 != 0x00 || sr2 != 0x00) {
+        ok = false;
+        _noteFailed(s, 1, STAGE_WGONE, (uint8_t)(_lastBusyUs > 25500 ? 255 : _lastBusyUs / 100));
+        if (sr1 == 0xFF) break;                          // gone: further attempts cannot answer
+      }
     }
   }
   _spi->endTransaction();
@@ -458,7 +476,7 @@ uint32_t    crcRejected()   { return _crcRejected; }
 uint32_t    failStreak()    { return _failStreak; }
 uint32_t    failTotal()     { return _failTotal; }
 String failedAttemptsJson() {
-  static const char* const names[] = { "", "busy", "cmd", "token", "crc", "multi", "wbusy", "wcmd", "wresp", "wdone" };
+  static const char* const names[] = { "", "busy", "cmd", "token", "crc", "multi", "wbusy", "wcmd", "wresp", "wdone", "wgone" };
   String j = "{\"count\":" + String((unsigned long)_failedCount) + ",\"sectors\":" + String((unsigned long)_sectors) + ",\"last\":[";
   const uint32_t total = _failedCount;
   const uint32_t first = total > FAILED_RING ? total - FAILED_RING : 0;
@@ -538,6 +556,8 @@ done:
   return ok;
 }
 uint32_t blocksWritten() { return _blocksWritten; }
+uint32_t lastWriteBusyUs() { return _lastBusyUs; }
+int32_t lastWriteStatus() { return _lastStatus; }
 
 bool listDir(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx) {
   if (!_ready) return false;

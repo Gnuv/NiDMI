@@ -845,6 +845,8 @@ String diagnostics() {
     j += ",\"driver\":{\"type\":\"" + String(SdSpiDisk::type()) + "\",\"cmd8_echo\":" + String((unsigned long)SdSpiDisk::cmd8Echo())
        + ",\"blocks_read\":" + String((unsigned long)SdSpiDisk::blocksRead())
        + ",\"blocks_written\":" + String((unsigned long)SdSpiDisk::blocksWritten())
+       + ",\"last_write_busy_us\":" + String((unsigned long)SdSpiDisk::lastWriteBusyUs())
+       + ",\"last_write_status\":" + String((long)SdSpiDisk::lastWriteStatus())
        + ",\"crc_errors\":" + String((unsigned long)SdSpiDisk::crcErrors())
        + ",\"crc_rejected\":" + String((unsigned long)SdSpiDisk::crcRejected())
        + ",\"fail_streak\":" + String((unsigned long)SdSpiDisk::failStreak())
