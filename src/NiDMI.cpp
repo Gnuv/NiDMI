@@ -980,18 +980,37 @@ RTC_NOINIT_ATTR static ShowPoint s_showPoint;
 static ShowPoint g_lastShow = {};                  // what the previous life left, read at boot
 static const uint32_t SHOW_POINT_MAGIC = 0x53484F57UL;   // "SHOW"
 
+/* CRASHES IN A ROW, for the resume alone (§246). The boot guard's counter (AudioEngine) also
+ * counts the lives in which no page of the app was served — a board nobody opens, the usual case
+ * on stage — and it is already counted for this boot when the resume reads it: the first crash
+ * of a board never opened read 2, and the show restarted from its first cue. Here: the crashes
+ * that led to this boot, one after the other, forgotten once a life has lasted CRASH_RUN_FORGET_MS. */
+struct CrashRun { uint32_t magic; uint8_t n; };
+RTC_NOINIT_ATTR static CrashRun s_crashRun;
+static const uint32_t CRASH_RUN_MAGIC = 0x43525348UL;   // "CRSH"
+static const uint32_t CRASH_RUN_FORGET_MS = 60000;
+
+static uint8_t crashesInARow(){ return s_crashRun.magic == CRASH_RUN_MAGIC ? s_crashRun.n : 0; }
+
+static void forgetCrashRun(unsigned long now){
+    if (now > CRASH_RUN_FORGET_MS && s_crashRun.n) s_crashRun.n = 0;
+}
+
 static void captureShowPoint(){
     g_lastShow = s_showPoint;
     if (g_lastShow.magic != SHOW_POINT_MAGIC) g_lastShow = {};
+    if (s_crashRun.magic != CRASH_RUN_MAGIC) s_crashRun = { CRASH_RUN_MAGIC, 0 };
+    if (AudioEngine::bootFollowsCrash()) { if (s_crashRun.n < 255) s_crashRun.n++; }
+    else s_crashRun.n = 0;
 }
 
 static void askBootPlay();
 
 static bool resumeShow(){
     if (g_lastShow.magic != SHOW_POINT_MAGIC || !AudioEngine::bootFollowsCrash()) return false;
-    if (AudioEngine::crashesBeforeBoot() >= 2) {
+    if (crashesInARow() >= 2) {
         NIDMI_WEB_LOG("[cues] reprise apres plantage laissee : %u plantages de suite",
-                      (unsigned)AudioEngine::crashesBeforeBoot());
+                      (unsigned)crashesInARow());
         return false;
     }
     if (g_lastShow.compo != Repertoire::numeroOuvert() || !Cues::placeHead(g_lastShow.index)) return false;
@@ -1455,6 +1474,7 @@ static void wifiBoucle(){
     }
     surveillerLienCable(now);
     relanceAuDemarrage(now);        // le cable jamais active apres un demarrage (§183)
+    forgetCrashRun(now);            // a life of a minute ends a run of crashes (§246)
     const bool essai = g_essai.enCours || g_essaiDemande;
     if (g_holdSta) {
         const bool host = nidmi_usbnet::linkUp() && !nidmi_usbnet::suspendu();
@@ -1696,7 +1716,7 @@ void nidmi_begin() {
         prefs.begin(NVS_OPTIONS_RESEAU, true);
         const bool cableFirst = prefs.getBool(NVS_CLE_PRIORITAIRE, true) || prefs.getBool(NVS_CLE_AUTONOME, false);
         prefs.end();
-        g_holdSta = nidmi_usbnet::enabled() && cableFirst && AudioEngine::crashesBeforeBoot() < 2;
+        g_holdSta = nidmi_usbnet::enabled() && cableFirst && crashesInARow() < 2;
         if (g_holdSta && g_staSsid.length() > 0)
             NIDMI_WEB_LOG("[NiDMI] WiFi : la box attend le cable (cable prioritaire)");
     }
