@@ -17,7 +17,7 @@
  */
 namespace {
 void refuse(AsyncWebServerRequest* r, int code, const String& why) {
-    r->send(code, "application/json", "{\"status\":\"error\",\"message\":" + nidmi_json_chaine(why) + "}");
+    r->send(code, "application/json", "{\"status\":\"error\",\"message\":\"" + nidmi_json_chaine(why) + "\"}");
 }
 String field(AsyncWebServerRequest* r, const char* name) {
     return r->hasParam(name, true) ? r->getParam(name, true)->value() : String();
