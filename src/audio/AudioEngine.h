@@ -336,12 +336,14 @@ void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
  * list : une cue qui arrive laisse poserListes() decider des siennes (une
  * liste qui continue d'une cue a l'autre continue de jouer). */
 void arreterEchantillon(bool listesComprises = true);
-/* THE FILE BROWSER'S PREVIEW (MESURES §251): one sound of the store, whole, at its own pitch and
- * level, on a voice tagged PREVIEW_BLOCK — never the keyboard's sound, never a cue's. It plays in
- * the cue slot that plays (its envelope and the MIX zone's effects; no group's). A new preview, or
- * stopPreview(), silences the previous one in 5 ms. `durationMs`: how long it plays. False, with
- * the reason: absent, read as a stream (only a play list reads those), or no sampler engine. */
-constexpr uint32_t PREVIEW_BLOCK = 0xFFFFFFF0u;
+/* THE LISTENING PATH (MESURES §251-252): the file browser listens to one sound of the board, to
+ * prepare a performance — whole, at its own pitch and level, on a voice of its OWN, outside both
+ * cue slots: no envelope, no effect, no cue change touches it, and the general STOP does not
+ * silence it (it is mixed after the STOP's gate; the output volume applies). It plays stopped as
+ * well as during a cue, whatever engine the cues name. A long sound of the SD is read as a stream
+ * (a stream of its own, without a head: preparing tolerates its first tens of ms of silence). A
+ * new sound replaces the previous one; stopPreview() silences it in 5 ms. `durationMs`: how long
+ * it plays. False, with the reason: absent, or refused at its arrival (format). */
 bool previewSound(const char* name, uint32_t& durationMs, String& reason);
 void stopPreview();
 

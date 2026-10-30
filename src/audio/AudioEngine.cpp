@@ -337,7 +337,10 @@ static inline float _borneGain(float g) {
   if (!(g >= 0.0f)) return 0.0f;
   return (g > GAIN_VOIX_MAX) ? GAIN_VOIX_MAX : g;
 }
-VoixEch  voixEch[VOIX_MAX];
+/* voixEch[PREVIEW_VOICE], the last one: the listening path's (§252) — beyond VOIX_MAX, so no
+ * slot, no voice stealing, no STOP counts it; rendered after the gate (boucleAudio). */
+constexpr uint8_t PREVIEW_VOICE = VOIX_MAX;
+VoixEch  voixEch[VOIX_MAX + 1];
 uint32_t voixHorloge = 0;
 
 /* ── THE TWO CUE SLOTS (MESURES §212) ──────────────────────────────────────
@@ -615,7 +618,7 @@ bool _clipJouable(const Liste& L, uint8_t k) {
  * A voice that chains from one streamed clip to another keeps its stream and repositions
  * it; towards a PSRAM sound, it gives it back. No stream available: the clip does not
  * start (false). */
-static_assert(SdStream::MAX_STREAMS >= LISTES_MAX + 1, "a streamed retrigger needs a stream beyond one per list (SdStream.h)");
+static_assert(SdStream::MAX_STREAMS >= LISTES_MAX + 2, "a streamed retrigger, and the listening path, each need a stream beyond one per list (SdStream.h)");
 bool _poserClip(VoixEch& vo, const Liste& L, uint8_t k) {
   if (!_clipJouable(L, k)) return false;
   const Clip& c = L.clips[k - 1];
@@ -891,7 +894,7 @@ void _sweepStreams() {
     const VoixEch& vo = voixEch[SdStream::voiceOf(f)];
     if (!(vo.actif && vo.stream == f)) SdStream::release(f);
   }
-  for (uint8_t v = 0; v < VOIX_MAX; v++)
+  for (uint8_t v = 0; v <= PREVIEW_VOICE; v++)
     if (voixEch[v].actif && voixEch[v].stream >= 0) SdStream::position(voixEch[v].stream, (uint32_t)(voixEch[v].pos >> 32));
 }
 
@@ -1244,6 +1247,67 @@ void rendre() {
   if (bipBlocsRestants) bipBlocsRestants--;
 }
 
+/* THE LISTENING PATH (§252). The web server only POSTS a request; the audio task sets the voice up
+ * at the start of its next block (_applyPreview) — it alone touches the voice and acquires streams. */
+struct PreviewRequest { char name[SampleStore::NOM_MAX]; bool stop; };
+PreviewRequest previewReq;
+volatile uint32_t previewSeq = 0, previewSeen = 0;
+portMUX_TYPE previewMux = portMUX_INITIALIZER_UNLOCKED;
+
+/* In the audio task, at the start of a block: the last request wins. A sound read as a stream
+ * gets a stream of its own and no head — `head` 0 with `headFrames` 0 only marks the voice as
+ * streamed for _mixVoice (the heads table never sees it): silence until the reader's first data. */
+static void _applyPreview() {
+  if (previewSeen == previewSeq) return;
+  PreviewRequest r;
+  portENTER_CRITICAL(&previewMux);
+  r = previewReq;
+  previewSeen = previewSeq;
+  portEXIT_CRITICAL(&previewMux);
+  VoixEch& vo = voixEch[PREVIEW_VOICE];
+  if (r.stop) { if (vo.actif) _eteindreEnDouceur(vo); return; }
+  const int i = SampleStore::indexDe(r.name);
+  if (i < 0) return;
+  const bool streamed = SampleStore::isStreamed((uint8_t)i);
+  int8_t f = -1;
+  if (streamed) {
+    f = SdStream::owns(vo.stream, PREVIEW_VOICE) ? vo.stream : SdStream::acquire(PREVIEW_VOICE);
+    if (f < 0) { NIDMI_WEB_LOG("[audio] ecoute de %s : aucun flux de la SD libre", r.name); vo.actif = false; return; }
+  } else if (vo.stream >= 0) SdStream::release(vo.stream);
+  vo.actif  = false;
+  vo.iEch   = (uint8_t)i;
+  vo.stream = f;
+  vo.head   = streamed ? 0 : -1;
+  vo.headPcm = nullptr; vo.headStart = 0; vo.headFrames = 0;
+  vo.pas    = _fixedStep(double(SampleStore::frequence((uint8_t)i)) / double(srReel));
+  vo.pos    = 0;
+  vo.velo   = 1.0f; vo.cible = 1.0f; vo.gain = 1.0f;
+  vo.bloc   = 0; vo.boucle = false;
+  vo.picG   = 0; vo.picD = 0;
+  vo.liste  = -1; vo.clip = 0; vo.debutT = 0; vo.finT = 0; vo.fondu = 0.0f;
+  vo.slot   = 0;
+  if (streamed)
+    SdStream::start(f, r.name, 0, (uint32_t)SampleStore::trames((uint8_t)i),
+                    SampleStore::stereo((uint8_t)i) ? 2 : 1, SampleStore::dataOffset((uint8_t)i));
+  vo.actif  = true;
+}
+
+/* After the STOP's gate and the output volume (§252): the listening voice, added and saturated. */
+static void _mixPreview() {
+  VoixEch& vo = voixEch[PREVIEW_VOICE];
+  if (!vo.actif) return;
+  static float pl[FRAMES], pr[FRAMES];
+  memset(pl, 0, sizeof(pl)); memset(pr, 0, sizeof(pr));
+  uint8_t unused = 0;
+  _mixVoice(PREVIEW_VOICE, pl, pr, unused, false);
+  const float g = gVolume * 32767.0f;
+  for (size_t i = 0; i < FRAMES; i++) {
+    float l = entrelace[2 * i] + pl[i] * g, r = entrelace[2 * i + 1] + pr[i] * g;
+    entrelace[2 * i]     = (int16_t)(l > 32767.f ? 32767.f : (l < -32768.f ? -32768.f : l));
+    entrelace[2 * i + 1] = (int16_t)(r > 32767.f ? 32767.f : (r < -32768.f ? -32768.f : r));
+  }
+}
+
 void boucleAudio(void*) {
   /* 95 % of a block's cycles: 240 MHz, 120 frames at the real rate. */
   const uint32_t budgetBloc = (uint32_t)((uint64_t)getCpuFrequencyMhz() * 1000000ULL * FRAMES
@@ -1265,9 +1329,10 @@ void boucleAudio(void*) {
      * ce balayage, une voix restee sur un emplacement retire — magasin vide,
      * rendreSample() n'etait plus appele — rejouait le son suivant qui s'y
      * installe. */
-    for (uint8_t v = 0; v < VOIX_MAX; v++)
+    for (uint8_t v = 0; v <= PREVIEW_VOICE; v++)            // the listening voice too (§252)
       if (voixEch[v].actif && !SampleStore::lisible(voixEch[v].iEch)) voixEch[v].actif = false;
 
+    _applyPreview();                     // the listening path's request, before the streams are swept (§252)
     _sweepStreams();
     const uint32_t t0 = millis();
     const uint32_t u0 = micros();
@@ -1337,6 +1402,7 @@ void boucleAudio(void*) {
     } else {
       gateGain = 1.0f;
     }
+    _mixPreview();                       // the listening path: after the gate, STOP does not silence it (§252)
     /* The gate closed (or opened again before: STOP stops them all the same): the slots that
      * were playing are drained — not one a cue arrived in since (§212). */
     if (stopVoices && (gateGain <= 0.0f || !gSilence)) {
@@ -2362,21 +2428,29 @@ void arreterEchantillon(bool listesComprises) {
 }
 
 void stopPreview() {
-  for (uint8_t v = 0; v < VOIX_MAX; v++)
-    if (voixEch[v].actif && voixEch[v].bloc == PREVIEW_BLOCK) _eteindreEnDouceur(voixEch[v]);
+  portENTER_CRITICAL(&previewMux);
+  previewReq.stop = true; previewReq.name[0] = 0;
+  previewSeq = previewSeq + 1;
+  portEXIT_CRITICAL(&previewMux);
 }
 
 bool previewSound(const char* name, uint32_t& durationMs, String& reason) {
-  stopPreview();
   const int i = SampleStore::indexDe(name);
-  if (i < 0 || !SampleStore::lisible((uint8_t)i)) { reason = String("« ") + name + " » n'est pas en memoire dans la carte"; return false; }
-  if (SampleStore::isStreamed((uint8_t)i)) { reason = "son lu en flux depuis la SD : seulement dans une play list"; return false; }
-  if (moteurCourant != -2) { reason = "la carte n'a pas son lecteur d'echantillons (aucune cue ne le nomme)"; return false; }
+  if (i < 0) {
+    const char* why = SampleStore::refusalOf(name);
+    reason = String("« ") + name + " » n'est pas dans la carte" + (why && *why ? String(" : ") + why : String(""));
+    return false;
+  }
   const uint32_t hz = SampleStore::frequence((uint8_t)i);
   durationMs = hz ? (uint32_t)((uint64_t)SampleStore::trames((uint8_t)i) * 1000u / hz) : 0;
-  if (!declencherEchantillon(name, false, 1.0f, 0.0f, PREVIEW_BLOCK)) { reason = "aucune voix"; return false; }
+  portENTER_CRITICAL(&previewMux);
+  strlcpy(previewReq.name, name, sizeof(previewReq.name));
+  previewReq.stop = false;
+  previewSeq = previewSeq + 1;
+  portEXIT_CRITICAL(&previewMux);
   return true;
 }
+
 
 /* ── LES PLAY LIST, COTE ECRIVAINS (§196) ─────────────────────────────────
  * La cue (loopTask ou serveur web), le chemin vivant et l'ecoute (serveur

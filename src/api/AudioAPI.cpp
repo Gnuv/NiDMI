@@ -686,8 +686,10 @@ void setupAudioAPI(AsyncWebServer& server) {
      * case ; poser un son dans l'inspecteur doit donc s'entendre tout de suite,
      * sans attendre un changement de cue. `loop` et `oncue` accompagnent le
      * declenchement : c'est le meme etat que la cue installerait. */
-    /* THE FILE BROWSER'S PREVIEW (MESURES §251): `name=` plays that sound of the board, whole, on
-     * a voice of its own — neither the keyboard's sound nor a cue's changes; `stop=1` silences it.
+    /* THE FILE BROWSER'S PREVIEW (MESURES §251-252): `name=` plays that sound of the board, whole,
+     * on the LISTENING PATH — a voice outside both cue slots, mixed after the STOP gate: stopped or
+     * during a cue, neither the keyboard, a cue, its effects nor the general STOP touch it (Gaël:
+     * each player has its own stop); a long SD sound is streamed. `stop=1` silences it.
      * Preparation, not playing: refused under the concert lock (not a GESTE), it would sound in the
      * hall. `duration_ms`: how long it plays, for the app's button. */
     server.on("/api/audio/preview", HTTP_POST, [](AsyncWebServerRequest *request){

@@ -41,8 +41,10 @@ namespace SdStream {
 /* One stream per playing playlist voice: LISTES_MAX lists, plus ONE for the retrigger — a list
  * that starts a new clip fades the old voice out over 5 ms, and that voice still holds its
  * stream: the new one needs another. With as many streams as lists, retriggering a list while
- * all of them play was refused, the old clip was already fading: silence. */
-constexpr uint8_t  MAX_STREAMS  = 5;
+ * all of them play was refused, the old clip was already fading: silence. And ONE for the listening
+ * path of the file browser (§252), so that preparing never takes a stream from a list. A buffer is
+ * only allocated the first time its stream is taken. */
+constexpr uint8_t  MAX_STREAMS  = 6;
 constexpr uint8_t  MAX_HEADS    = 120;      // table entries (a few dozen bytes each); stays under 128: indices are int8_t
 /* A clip's head, in FRAMES (so 0.2 s at 44.1 kHz, 0.18 s at 48 kHz, 0.4 s at 22.05 kHz). It must
  * outlast the time a (re)started stream takes to deliver its first data — `first_data` in the
