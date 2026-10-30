@@ -99,6 +99,14 @@ constexpr uint8_t DATA_TOKEN = 0xFE;
 inline void _select()   { digitalWrite(_cs, LOW); }
 inline void _deselect() { digitalWrite(_cs, HIGH); _spi->transfer(0xFF); }   // the card releases MISO
 
+/* THE DEADLINES ARE WALL TIME, THE CARD'S ANSWER IS NOT. A task above this one on its core (the
+ * storage task's flash walk at boot, §242) can keep it off the processor past a deadline while
+ * the card, not clocked, waits: the loop then gave up without having asked — a read abandoned
+ * half-way, whose data block the next attempts read as their answers (the letters of a
+ * directory), three failures, and the bus clock halved for the rest of the evening (§245). Past
+ * a deadline, the card is asked GRACE_POLLS more times, without yielding, before concluding. */
+constexpr int GRACE_POLLS = 256;
+
 /* The card is ready when it returns 0xFF (it holds MISO at 0 while it is busy). */
 bool _waitReady(uint32_t ms) {
   const uint32_t t0 = millis();
@@ -107,6 +115,7 @@ bool _waitReady(uint32_t ms) {
     r = _spi->transfer(0xFF);
     if (r != 0xFF && millis() - t0 > 4) vTaskDelay(1);      // a busy or absent card: yield (core 0's IDLE task)
   } while (r != 0xFF && millis() - t0 < ms);
+  for (int i = 0; i < GRACE_POLLS && r != 0xFF; i++) r = _spi->transfer(0xFF);   // see GRACE_POLLS
   return r == 0xFF;
 }
 
@@ -147,6 +156,7 @@ bool _block(uint8_t* buf, size_t n) {
     tok = _spi->transfer(0xFF);
     if (tok == 0xFF && millis() - t0 > 4) vTaskDelay(1);   // a slow card: yield
   } while (tok == 0xFF && millis() - t0 < 300);
+  for (int i = 0; i < GRACE_POLLS && tok == 0xFF; i++) tok = _spi->transfer(0xFF);
   _lastToken = tok;
   if (tok != DATA_TOKEN) return false;
   _spi->transferBytes(nullptr, buf, n);
