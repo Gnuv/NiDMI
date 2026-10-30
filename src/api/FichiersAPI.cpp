@@ -35,6 +35,7 @@
 // NIDMI_SD_WRITE). Pas de suppression sur la SD.
 #include "APICommon.h"
 #include "../config/StorageIndex.h"
+#include "../config/Library.h"
 #include "../config/Stockage.h"
 #include "../config/SdCard.h"
 #include "../audio/SfzStore.h"  // lister() : le diagnostic des dossiers de la SD (§208)
@@ -62,7 +63,7 @@ constexpr size_t      INTERFACE_MAX  = 128 * 1024;
 constexpr size_t      LISTE_MAX      = 32 * 1024;   // la reponse de /api/fichiers, en PSRAM
 constexpr int         USAGES_MAX     = 64;
 
-enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Cc, Texte, Interface, Autre };
+enum class Genre { Son, Script, Cues, Composition, Chaine, Options, Cc, Texte, Interface, Preset, Autre };
 
 const char* nomDuGenre(Genre g) {
   switch (g) {
@@ -75,6 +76,7 @@ const char* nomDuGenre(Genre g) {
     case Genre::Cc:            return "cc";
     case Genre::Texte:         return "texte";
     case Genre::Interface:     return "interface";
+    case Genre::Preset:        return "preset";
     default:                   return "autre";
   }
 }
@@ -95,6 +97,12 @@ Genre genreDe(const String& chemin) {
   if (dans(chemin, SampleStore::DOSSIER))            return Genre::Son;
   if (dans(chemin, ScriptStore::DOSSIER_INTERFACE))  return Genre::Script;
   if (dans(chemin, Interface::DOSSIER_ENREGISTREES)) return Genre::Interface;
+  // The library (§249): script models, and presets one folder per engine.
+  if (dans(chemin, Library::SCRIPTS) && chemin.endsWith(".nms")) return Genre::Script;
+  if (chemin.startsWith(String(Library::PRESETS) + "/") && chemin.endsWith(".json")) {
+    const int slash = chemin.indexOf('/', strlen(Library::PRESETS) + 1);
+    if (slash > 0 && chemin.indexOf('/', slash + 1) < 0) return Genre::Preset;
+  }
   uint8_t numero; String nom, fichier;
   if (Repertoire::decouper(chemin, numero, nom, fichier) && fichier.indexOf('/') < 0) {
     if (fichier == Repertoire::SOURCE)   return Genre::Composition;

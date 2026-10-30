@@ -32,6 +32,7 @@ void setupInterfaceAPI(AsyncWebServer& server);
 void setupTransportNotesAPI(AsyncWebServer& server);   // the transport notes (§215)
 extern "C" void nidmi_announce_memory_now();           // NiDMI.cpp: the memory, to a tab that asked (§217)
 void setupConcertAPI(AsyncWebServer& server);
+void setupLibraryAPI(AsyncWebServer& server);         // script models and presets (§249)
 
 Preferences preferences;
 
@@ -648,4 +649,5 @@ void setupWebAPI(AsyncWebServer& server, AsyncWebSocket& ws) {
     setupInterfaceAPI(server);
     setupConcertAPI(server);
     setupTransportNotesAPI(server);
+    setupLibraryAPI(server);
 }
