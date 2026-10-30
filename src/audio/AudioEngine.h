@@ -336,6 +336,14 @@ void arreterEchantillonNomme(const char* nom);   // ce que CETTE cue avait lance
  * list : une cue qui arrive laisse poserListes() decider des siennes (une
  * liste qui continue d'une cue a l'autre continue de jouer). */
 void arreterEchantillon(bool listesComprises = true);
+/* THE FILE BROWSER'S PREVIEW (MESURES §251): one sound of the store, whole, at its own pitch and
+ * level, on a voice tagged PREVIEW_BLOCK — never the keyboard's sound, never a cue's. It plays in
+ * the cue slot that plays (its envelope and the MIX zone's effects; no group's). A new preview, or
+ * stopPreview(), silences the previous one in 5 ms. `durationMs`: how long it plays. False, with
+ * the reason: absent, read as a stream (only a play list reads those), or no sampler engine. */
+constexpr uint32_t PREVIEW_BLOCK = 0xFFFFFFF0u;
+bool previewSound(const char* name, uint32_t& durationMs, String& reason);
+void stopPreview();
 
 /* ── LES PLAY LIST (MESURES §196) ──────────────────────────────────────────
  * Une variante de playlist~ (Max) : une liste de CLIPS — un son, une

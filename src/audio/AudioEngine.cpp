@@ -2361,6 +2361,23 @@ void arreterEchantillon(bool listesComprises) {
     if (listesComprises || voixEch[v].liste < 0) voixEch[v].actif = false;
 }
 
+void stopPreview() {
+  for (uint8_t v = 0; v < VOIX_MAX; v++)
+    if (voixEch[v].actif && voixEch[v].bloc == PREVIEW_BLOCK) _eteindreEnDouceur(voixEch[v]);
+}
+
+bool previewSound(const char* name, uint32_t& durationMs, String& reason) {
+  stopPreview();
+  const int i = SampleStore::indexDe(name);
+  if (i < 0 || !SampleStore::lisible((uint8_t)i)) { reason = String("« ") + name + " » n'est pas en memoire dans la carte"; return false; }
+  if (SampleStore::isStreamed((uint8_t)i)) { reason = "son lu en flux depuis la SD : seulement dans une play list"; return false; }
+  if (moteurCourant != -2) { reason = "la carte n'a pas son lecteur d'echantillons (aucune cue ne le nomme)"; return false; }
+  const uint32_t hz = SampleStore::frequence((uint8_t)i);
+  durationMs = hz ? (uint32_t)((uint64_t)SampleStore::trames((uint8_t)i) * 1000u / hz) : 0;
+  if (!declencherEchantillon(name, false, 1.0f, 0.0f, PREVIEW_BLOCK)) { reason = "aucune voix"; return false; }
+  return true;
+}
+
 /* ── LES PLAY LIST, COTE ECRIVAINS (§196) ─────────────────────────────────
  * La cue (loopTask ou serveur web), le chemin vivant et l'ecoute (serveur
  * web), un son qui arrive ou part. L'un apres l'autre, sous verrouListes. */

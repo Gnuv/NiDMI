@@ -686,6 +686,31 @@ void setupAudioAPI(AsyncWebServer& server) {
      * case ; poser un son dans l'inspecteur doit donc s'entendre tout de suite,
      * sans attendre un changement de cue. `loop` et `oncue` accompagnent le
      * declenchement : c'est le meme etat que la cue installerait. */
+    /* THE FILE BROWSER'S PREVIEW (MESURES §251): `name=` plays that sound of the board, whole, on
+     * a voice of its own — neither the keyboard's sound nor a cue's changes; `stop=1` silences it.
+     * Preparation, not playing: refused under the concert lock (not a GESTE), it would sound in the
+     * hall. `duration_ms`: how long it plays, for the app's button. */
+    server.on("/api/audio/preview", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (request->hasParam("stop", true)) {
+            AudioEngine::stopPreview();
+            request->send(200, "application/json", "{\"status\":\"ok\"}");
+            return;
+        }
+        if (!request->hasParam("name", true)) {
+            request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"parametre name requis\"}");
+            return;
+        }
+        const String name = request->getParam("name", true)->value();
+        uint32_t ms = 0; String reason;
+        if (!AudioEngine::previewSound(name.c_str(), ms, reason)) {
+            request->send(422, "application/json",
+                "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(reason) + "\"}");
+            return;
+        }
+        request->send(200, "application/json",
+            "{\"status\":\"ok\",\"name\":\"" + SfzStore::echapper(name) + "\",\"duration_ms\":" + String(ms) + "}");
+    });
+
     server.on("/api/audio/sampler/jouer", HTTP_POST, [](AsyncWebServerRequest *request){
         if (!AudioEngine::samplerActif()) {
             request->send(409, "application/json",
