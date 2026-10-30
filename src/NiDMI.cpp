@@ -115,6 +115,12 @@ extern "C" void nidmi_requestReloadPins(){
     g_reloadRequestTime = millis();
 }
 
+/* A CRASH ON DEMAND, for the bench (MESURES §244): what the board does after a real crash —
+ * the boot guard, the resume of the show — can only be tried by crashing it. Raised by
+ * /api/diag/crash, done by the loop: a panic, as a fault in the loop would be. */
+static volatile bool g_crashAsked = false;
+extern "C" void nidmi_requestCrash(){ g_crashAsked = true; }
+
 // Redémarrage différé (depuis la loop, pas depuis le handler HTTP — évite de couper la NVS en plein écriture)
 static volatile bool g_requestReboot = false;
 static unsigned long g_rebootRequestTime = 0;
@@ -1924,6 +1930,7 @@ void nidmi_loop() {
     Differe::boucle();              // ce qui attend le silence pour s'écrire en flash
     nidmi_chrono("differe", tc);
 
+    if (g_crashAsked) esp_system_abort("crash demande par /api/diag/crash (banc)");
     // Redémarrage différé (laisse le temps à la réponse HTTP et à la NVS de se fermer proprement)
     if (g_requestDownload && (millis() - g_rebootRequestTime >= 2000)) {
         Differe::toutEcrireMaintenant();

@@ -1,6 +1,7 @@
 #include "../audio/SdStream.h"
 #include "../diag/SurveillantFlash.h"
 #include "../diag/HeapTrough.h"
+extern "C" void nidmi_requestCrash();   // NiDMI.cpp: the loop panics (§244)
 #include "../config/Occupations.h"
 #include "../managers/ComponentManager.h"
 #include "../Globals.h"
@@ -1661,6 +1662,17 @@ server.on("/api/midi/scripts", HTTP_GET, [lieuDe](AsyncWebServerRequest *request
         request->send(200, "application/json",
             String("{\"autopsie\":") + (nidmi_autopsieActive() ? "true" : "false")
             + ",\"au_demarrage\":" + (nidmi_autopsyAtBootArmed() ? "true" : "false") + "}");
+    });
+
+    /* A CRASH ON DEMAND (MESURES §244), for the bench: POST confirm=crash. The loop panics at its
+     * next turn. Refused when the board is locked for a concert, like every write. */
+    server.on("/api/diag/crash", HTTP_POST, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("confirm", true) || request->getParam("confirm", true)->value() != "crash") {
+            request->send(400, "application/json", "{\"erreur\":\"confirm=crash\"}");
+            return;
+        }
+        request->send(200, "application/json", "{\"status\":\"ok\",\"crash\":true}");
+        nidmi_requestCrash();
     });
 
     /* THE INTERNAL HEAP AT BOOT (MESURES §243): state=boot arms the sampler for the next
