@@ -1249,7 +1249,7 @@ void rendre() {
 
 /* THE LISTENING PATH (§252). The web server only POSTS a request; the audio task sets the voice up
  * at the start of its next block (_applyPreview) — it alone touches the voice and acquires streams. */
-struct PreviewRequest { char name[SampleStore::NOM_MAX]; bool stop; };
+struct PreviewRequest { char name[SampleStore::NOM_MAX]; uint32_t startFrame; bool stop; };
 PreviewRequest previewReq;
 volatile uint32_t previewSeq = 0, previewSeen = 0;
 portMUX_TYPE previewMux = portMUX_INITIALIZER_UNLOCKED;
@@ -1280,14 +1280,16 @@ static void _applyPreview() {
   vo.head   = streamed ? 0 : -1;
   vo.headPcm = nullptr; vo.headStart = 0; vo.headFrames = 0;
   vo.pas    = _fixedStep(double(SampleStore::frequence((uint8_t)i)) / double(srReel));
-  vo.pos    = 0;
+  const uint32_t frames = (uint32_t)SampleStore::trames((uint8_t)i);
+  const uint32_t start  = r.startFrame < frames ? r.startFrame : 0;   // from a point of the sound (§253)
+  vo.pos    = (uint64_t)start << 32;
   vo.velo   = 1.0f; vo.cible = 1.0f; vo.gain = 1.0f;
   vo.bloc   = 0; vo.boucle = false;
   vo.picG   = 0; vo.picD = 0;
   vo.liste  = -1; vo.clip = 0; vo.debutT = 0; vo.finT = 0; vo.fondu = 0.0f;
   vo.slot   = 0;
   if (streamed)
-    SdStream::start(f, r.name, 0, (uint32_t)SampleStore::trames((uint8_t)i),
+    SdStream::start(f, r.name, start, frames,
                     SampleStore::stereo((uint8_t)i) ? 2 : 1, SampleStore::dataOffset((uint8_t)i));
   vo.actif  = true;
 }
@@ -2434,7 +2436,7 @@ void stopPreview() {
   portEXIT_CRITICAL(&previewMux);
 }
 
-bool previewSound(const char* name, uint32_t& durationMs, String& reason) {
+bool previewSound(const char* name, uint32_t startMs, uint32_t& durationMs, String& reason) {
   const int i = SampleStore::indexDe(name);
   if (i < 0) {
     const char* why = SampleStore::refusalOf(name);
@@ -2445,6 +2447,7 @@ bool previewSound(const char* name, uint32_t& durationMs, String& reason) {
   durationMs = hz ? (uint32_t)((uint64_t)SampleStore::trames((uint8_t)i) * 1000u / hz) : 0;
   portENTER_CRITICAL(&previewMux);
   strlcpy(previewReq.name, name, sizeof(previewReq.name));
+  previewReq.startFrame = (uint32_t)((uint64_t)startMs * hz / 1000u);
   previewReq.stop = false;
   previewSeq = previewSeq + 1;
   portEXIT_CRITICAL(&previewMux);

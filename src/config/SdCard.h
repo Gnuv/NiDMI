@@ -26,6 +26,7 @@
 // already read: they stay playable until the next boot (SampleStore only gives
 // PSRAM back one sound at a time, when a storage file is deleted — it has no
 // "unload a volume").
+#include "../audio/Peaks.h"
 #include <Arduino.h>
 #include <FS.h>
 
@@ -91,6 +92,13 @@ void requestSfz();
  * jobStatus(): the last job, as JSON — {"job","kind":"read"|"write","state":"pending"|"done"|"failed",
  * "path","bytes","ms","reloaded","reason"}. Any task. */
 bool   requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason);
+/* THE WAVEFORM OF A STREAMED SOUND (MESURES §253): the same slot, a third kind — the task reads
+ * the sound's data (`frames` frames of `channels` from byte `dataOffset`), whole up to 2 MB, else
+ * its head (up to its first sound, 1 MB at most) and one 4 KB window per column, and keeps the
+ * result. takePeaks(): 200 (`r` filled), 409 still reading, 422 failed (`reason`), 404 another job. */
+bool   requestPeaks(const char* path, uint32_t dataOffset, uint32_t frames, uint32_t rate,
+                    uint8_t channels, uint32_t& job, String& reason);
+int    takePeaks(uint32_t job, Peaks::Result& r, String& path, String& reason);
 bool   requestRead(const char* path, uint32_t& job, String& reason);
 int    takeRead(uint32_t job, uint8_t*& data, size_t& n, String& path, String& reason);
 String jobStatus();

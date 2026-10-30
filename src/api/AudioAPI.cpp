@@ -45,6 +45,8 @@ static bool compositionAttendue(AsyncWebServerRequest* r) {
 }
 #include "../config/EcrituresDifferees.h"
 #include "../audio/SampleStore.h"
+#include "../audio/Peaks.h"
+#include "../config/SdCard.h"
 #include "../diag/JournalAvant.h"
 #include "../server/ServerCallbacks.h"   // demandeur, a vide, sante
 #include "../server/ServerCore.h"        // serverCore.usbMidi() : le banc MIDI USB
@@ -691,7 +693,8 @@ void setupAudioAPI(AsyncWebServer& server) {
      * during a cue, neither the keyboard, a cue, its effects nor the general STOP touch it (Gaël:
      * each player has its own stop); a long SD sound is streamed. `stop=1` silences it.
      * Preparation, not playing: refused under the concert lock (not a GESTE), it would sound in the
-     * hall. `duration_ms`: how long it plays, for the app's button. */
+     * hall. `start_ms=`: from that point of the sound (a click in the waveform, §253).
+     * `duration_ms`: how long the whole sound lasts, for the app's playhead. */
     server.on("/api/audio/preview", HTTP_POST, [](AsyncWebServerRequest *request){
         if (request->hasParam("stop", true)) {
             AudioEngine::stopPreview();
@@ -703,14 +706,62 @@ void setupAudioAPI(AsyncWebServer& server) {
             return;
         }
         const String name = request->getParam("name", true)->value();
+        const uint32_t startMs = request->hasParam("start_ms", true)
+            ? (uint32_t)request->getParam("start_ms", true)->value().toInt() : 0;
         uint32_t ms = 0; String reason;
-        if (!AudioEngine::previewSound(name.c_str(), ms, reason)) {
+        if (!AudioEngine::previewSound(name.c_str(), startMs, ms, reason)) {
             request->send(422, "application/json",
                 "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(reason) + "\"}");
             return;
         }
         request->send(200, "application/json",
             "{\"status\":\"ok\",\"name\":\"" + SfzStore::echapper(name) + "\",\"duration_ms\":" + String(ms) + "}");
+    });
+
+    /* THE WAVEFORM OF A SOUND (MESURES §253): `name=` — a sound in PSRAM is measured here, at once
+     * (a pass over its PCM, no flash read); a sound streamed from the SD is a job of the SD card's
+     * task (202 {"job"}), refused under the concert lock (the bus is the streams'); `job=` then
+     * serves it (200; 409 still reading; 422 failed; 404 another job took the SD). Asked on a
+     * gesture — a sound selected in the file browser —, never polled beyond that wait. */
+    server.on("/api/audio/peaks", HTTP_GET, [](AsyncWebServerRequest *request){
+        static Peaks::Result r;                 // async_tcp serves one request at a time
+        auto refuse = [&](int code, const String& why) {
+            request->send(code, "application/json", "{\"status\":\"error\",\"message\":\"" + SfzStore::echapper(why) + "\"}");
+        };
+        if (request->hasParam("job")) {
+            String reason, path;
+            const uint32_t job = (uint32_t)request->getParam("job")->value().toInt();
+            const int code = SdCard::takePeaks(job, r, path, reason);
+            if (code != 200) { refuse(code, reason); return; }
+            const String name = path.substring(path.lastIndexOf('/') + 1);
+            request->send(200, "application/json", Peaks::json(r, name.c_str()));
+            return;
+        }
+        if (!request->hasParam("name")) { refuse(400, "parametre name requis"); return; }
+        const String name = request->getParam("name")->value();
+        const int i = SampleStore::indexDe(name.c_str());
+        if (i < 0) {
+            const char* why = SampleStore::refusalOf(name.c_str());
+            refuse(422, String("« ") + name + " » n'est pas dans la carte" + (why && *why ? String(" : ") + why : String("")));
+            return;
+        }
+        const uint8_t k = (uint8_t)i;
+        const uint8_t ch = SampleStore::stereo(k) ? 2 : 1;
+        if (SampleStore::isStreamed(k)) {
+            if (Concert::refuse(request, "forme d'onde d'un son de la SD refusee : la carte est verrouillee pour le concert")) return;
+            uint32_t job = 0; String reason;
+            const String path = String(SdCard::FOLDER) + "/" + name;
+            if (!SdCard::requestPeaks(path.c_str(), SampleStore::dataOffset(k), (uint32_t)SampleStore::trames(k),
+                                      SampleStore::frequence(k), ch, job, reason)) { refuse(409, reason); return; }
+            request->send(202, "application/json", "{\"status\":\"ok\",\"job\":" + String((unsigned long)job) + "}");
+            return;
+        }
+        const int16_t* pcm = SampleStore::donnees(k);
+        if (!pcm) { refuse(422, "pas jouable maintenant (retire, ou vide)"); return; }
+        const uint32_t frames = (uint32_t)SampleStore::trames(k);
+        Peaks::begin(r, frames, SampleStore::frequence(k), ch, true);
+        Peaks::feed(r, pcm, 0, frames);
+        request->send(200, "application/json", Peaks::json(r, name.c_str()));
     });
 
     server.on("/api/audio/sampler/jouer", HTTP_POST, [](AsyncWebServerRequest *request){

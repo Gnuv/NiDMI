@@ -40,6 +40,10 @@ volatile bool     _wantSfz     = false;
  * while the same file read by this task passed clean. */
 volatile bool     _wantJob     = false;
 volatile bool     _jobIsWrite  = false;
+volatile bool     _jobIsPeaks  = false;     // a waveform (§253): `_peaks` holds it, _jobData stays null
+Peaks::Result     _peaks;
+uint32_t          _pkOffset = 0, _pkFrames = 0, _pkRate = 0;
+uint8_t           _pkChannels = 1;
 char              _jobPath[200] = "";
 uint8_t*          _jobData     = nullptr;   // a write: what to write; a read: what was read, until taken
 size_t            _jobBytes    = 0;
@@ -515,11 +519,51 @@ void _read(String& reason) {
   _jobData = b; _jobBytes = n;
 }
 
+/* The waveform of a streamed sound (§253). In 16 KB chunks, a tick of sleep after each (core 0's
+ * IDLE task). Long: the head up to its first sound, then a window per column, seeking FORWARD
+ * only — FatFs goes on from the cluster it is at, the chain is walked once. */
+void _readPeaks(String& reason) {
+  File f = open(_jobPath);
+  if (!f || f.isDirectory()) { reason = "introuvable sur la SD"; return; }
+  const uint32_t bpf   = 2u * _pkChannels;
+  const uint64_t bytes = (uint64_t)_pkFrames * bpf;
+  const bool dense = bytes <= 2u * 1024 * 1024;
+  constexpr size_t CHUNK = 16384, WINDOW = 4096, HEAD_MAX = 1024 * 1024;
+  int16_t* buf = (int16_t*)heap_caps_malloc(CHUNK, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!buf) { f.close(); reason = "memoire : la PSRAM de la carte est pleine"; return; }
+  Peaks::begin(_peaks, _pkFrames, _pkRate, _pkChannels, dense);
+  uint32_t frame = 0;                                       // the next frame to read
+  auto readAt = [&](uint32_t from, size_t want) -> bool {
+    if (from != frame && !f.seek(_pkOffset + (uint64_t)from * bpf)) return false;
+    const size_t got = f.read((uint8_t*)buf, want);
+    const uint32_t n = got / bpf;
+    if (!n) return false;
+    Peaks::feed(_peaks, buf, from, n);
+    frame = from + n;
+    vTaskDelay(1);
+    return true;
+  };
+  if (!f.seek(_pkOffset)) { heap_caps_free(buf); f.close(); reason = "lecture impossible"; return; }
+  const uint64_t headEnd = dense ? bytes : (bytes < HEAD_MAX ? bytes : HEAD_MAX);
+  while ((uint64_t)frame * bpf < headEnd && (dense || _peaks.leadFrames == UINT32_MAX))
+    if (!readAt(frame, CHUNK - CHUNK % bpf)) break;
+  if (!dense)
+    for (uint16_t c = 0; c < Peaks::COLUMNS; c++) {
+      const uint32_t at = (uint32_t)((uint64_t)c * _pkFrames / Peaks::COLUMNS);
+      if (at < frame) continue;                             // read already, by the head
+      if (!readAt(at, WINDOW - WINDOW % bpf)) break;
+    }
+  heap_caps_free(buf);
+  f.close();
+  if (dense && frame < _pkFrames) reason = "lecture incomplete";
+}
+
 void _job() {
   const uint32_t t0 = millis();
   String reason;
   bool ok = false;
   if (!_mounted) reason = "carte SD absente ou perdue";
+  else if (_jobIsPeaks) { _readPeaks(reason); ok = reason.isEmpty(); }
   else if (_jobIsWrite) ok = SdSpiDisk::writeFile(_jobPath, _jobData, _jobBytes, reason);
   else { _read(reason); ok = reason.isEmpty(); }
   if (_jobIsWrite) {
@@ -536,6 +580,10 @@ void _job() {
   strlcpy(_jobReason, reason.c_str(), sizeof _jobReason);
   __sync_synchronize();
   _jobState = ok ? 2 : 3;
+  if (_jobIsPeaks) {
+    NIDMI_WEB_LOG("[SD] forme d'onde de %s : %s (%lu ms)", _jobPath, ok ? "lue" : _jobReason, (unsigned long)_jobMs);
+    return;
+  }
   if (!_jobIsWrite && ok) return;                           // a read says nothing: it is taken at once
   NIDMI_WEB_LOG("[SD] %s : %s (%u o, %lu ms%s%s)", _jobPath,
                 ok ? "ecrit" : (_jobIsWrite ? "NON ecrit" : "NON lu"),
@@ -765,6 +813,7 @@ static bool _post(bool write, const char* path, uint8_t* data, size_t n, uint32_
   if (!_takeSlot(reason)) return false;
   strlcpy(_jobPath, path, sizeof _jobPath);
   _jobIsWrite = write;
+  _jobIsPeaks = false;
   _jobData = data; _jobBytes = n;
   _jobReason[0] = 0; _jobReloaded = 0; _jobMs = 0;
   job = _jobId = _jobId + 1;
@@ -784,10 +833,43 @@ bool requestRead(const char* path, uint32_t& job, String& reason) {
   return _post(false, path, nullptr, 0, job, reason);
 }
 
+bool requestPeaks(const char* path, uint32_t dataOffset, uint32_t frames, uint32_t rate,
+                  uint8_t channels, uint32_t& job, String& reason) {
+  if (!_declared || !_mounted) { reason = "carte SD absente ou perdue"; return false; }
+  if (!path || strlen(path) >= sizeof _jobPath) { reason = "chemin trop long"; return false; }
+  if (!_takeSlot(reason)) return false;
+  strlcpy(_jobPath, path, sizeof _jobPath);
+  _jobIsWrite = false;
+  _jobIsPeaks = true;
+  _jobData = nullptr; _jobBytes = (size_t)frames * 2u * channels;
+  _pkOffset = dataOffset; _pkFrames = frames; _pkRate = rate; _pkChannels = channels ? channels : 1;
+  _jobReason[0] = 0; _jobReloaded = 0; _jobMs = 0;
+  job = _jobId = _jobId + 1;
+  __sync_synchronize();
+  _wantJob = true;
+  _startTask();
+  return true;
+}
+
+int takePeaks(uint32_t job, Peaks::Result& r, String& path, String& reason) {
+  int code = 0;
+  portENTER_CRITICAL(&_jobMux);
+  if (job != _jobId || !_jobIsPeaks) code = 404;
+  else if (_jobState == 1) code = 409;
+  else if (_jobState == 3) code = 422;
+  else code = 200;
+  portEXIT_CRITICAL(&_jobMux);
+  if (code == 200) { r = _peaks; path = _jobPath; }
+  else if (code == 404) reason = "forme d'onde inconnue (une autre demande a pris la SD)";
+  else if (code == 409) reason = "lecture en cours";
+  else reason = _jobReason;
+  return code;
+}
+
 int takeRead(uint32_t job, uint8_t*& data, size_t& n, String& path, String& reason) {
   int code = 0;
   portENTER_CRITICAL(&_jobMux);
-  if (job != _jobId || _jobIsWrite) code = 404;
+  if (job != _jobId || _jobIsWrite || _jobIsPeaks) code = 404;
   else if (_jobState == 1) code = 409;
   else if (_jobState == 3) code = 422;
   else if (!_jobData) code = 404;
@@ -804,7 +886,7 @@ String jobStatus() {
   static const char* const states[] = { "none", "pending", "done", "failed" };
   String r = _jobReason; r.replace("\"", "'");
   String p = _jobPath;   p.replace("\"", "'");
-  return "{\"job\":" + String((unsigned long)_jobId) + ",\"kind\":\"" + (_jobIsWrite ? "write" : "read")
+  return "{\"job\":" + String((unsigned long)_jobId) + ",\"kind\":\"" + (_jobIsPeaks ? "peaks" : _jobIsWrite ? "write" : "read")
        + "\",\"state\":\"" + states[_jobState & 3]
        + "\",\"path\":\"" + p + "\",\"bytes\":" + String((unsigned)_jobBytes)
        + ",\"ms\":" + String((unsigned long)_jobMs) + ",\"reloaded\":" + String(_jobReloaded)

@@ -342,9 +342,10 @@ void arreterEchantillon(bool listesComprises = true);
  * silence it (it is mixed after the STOP's gate; the output volume applies). It plays stopped as
  * well as during a cue, whatever engine the cues name. A long sound of the SD is read as a stream
  * (a stream of its own, without a head: preparing tolerates its first tens of ms of silence). A
- * new sound replaces the previous one; stopPreview() silences it in 5 ms. `durationMs`: how long
- * it plays. False, with the reason: absent, or refused at its arrival (format). */
-bool previewSound(const char* name, uint32_t& durationMs, String& reason);
+ * new sound replaces the previous one; stopPreview() silences it in 5 ms. `startMs`: from that
+ * point of the sound (§253, a click in the waveform; past its end: from its start). `durationMs`:
+ * how long the WHOLE sound lasts. False, with the reason: absent, or refused at its arrival. */
+bool previewSound(const char* name, uint32_t startMs, uint32_t& durationMs, String& reason);
 void stopPreview();
 
 /* ── LES PLAY LIST (MESURES §196) ──────────────────────────────────────────
