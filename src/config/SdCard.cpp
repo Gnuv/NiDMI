@@ -713,7 +713,8 @@ String diagnostics() {
        + ",\"crc_rejected\":" + String((unsigned long)SdSpiDisk::crcRejected())
        + ",\"fail_streak\":" + String((unsigned long)SdSpiDisk::failStreak())
        + ",\"fail_total\":" + String((unsigned long)SdSpiDisk::failTotal())
-       + ",\"retries\":" + String((unsigned long)SdSpiDisk::retries()) + "}";
+       + ",\"retries\":" + String((unsigned long)SdSpiDisk::retries())
+       + ",\"failed\":" + SdSpiDisk::failedAttemptsJson() + "}";
   j += ",\"stream\":" + SdStream::diagnostics();
   j += ",\"clusters\":" + SdClusters::diagnostics();
   j += ",\"verify\":";

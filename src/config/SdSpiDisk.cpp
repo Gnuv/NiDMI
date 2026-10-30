@@ -60,6 +60,21 @@ bool              _corruptNext = false;
 volatile bool     _outage = false;      // the bench simulates a card pulled out: every read fails until...
 volatile uint32_t _outageEndMs = 0;     // ... this time (a window, like a real outage: whoever reads, fails)
 constexpr uint32_t CRC_PROVEN = 64;
+/* DIAGNOSTIC: the last failed attempts of a read — which sector, which step, which task.
+ * A failure is not always the wire: a sector the card refuses (beyond its end) fails the
+ * same way, three times. */
+struct FailedAttempt { uint32_t ms, sector, n, hz; uint8_t stage, value; char task[12]; };
+constexpr int FAILED_RING = 12;
+FailedAttempt _failed[FAILED_RING];
+volatile uint32_t _failedCount = 0;
+enum : uint8_t { STAGE_BUSY = 1, STAGE_CMD = 2, STAGE_TOKEN = 3, STAGE_CRC = 4, STAGE_MULTI = 5 };
+uint8_t _lastToken = 0xFF;
+void _noteFailed(uint32_t sector, uint32_t n, uint8_t stage, uint8_t value) {
+  FailedAttempt& f = _failed[_failedCount % FAILED_RING];
+  f.ms = millis(); f.sector = sector; f.n = n; f.hz = _hz; f.stage = stage; f.value = value;
+  strlcpy(f.task, pcTaskGetName(nullptr), sizeof f.task);
+  _failedCount = _failedCount + 1;
+}
 /* THE BUS, one transaction at a time: FatFs serialises its own reads, but `probe()` (the
  * supervisor) reads a sector behind its back. */
 StaticSemaphore_t _busBuffer;
@@ -132,6 +147,7 @@ bool _block(uint8_t* buf, size_t n) {
     tok = _spi->transfer(0xFF);
     if (tok == 0xFF && millis() - t0 > 4) vTaskDelay(1);   // a slow card: yield
   } while (tok == 0xFF && millis() - t0 < 300);
+  _lastToken = tok;
   if (tok != DATA_TOKEN) return false;
   _spi->transferBytes(nullptr, buf, n);
   const uint16_t received = _spi->transfer16(0xFFFF);
@@ -234,16 +250,22 @@ bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
     if (attempt) { _retries = _retries + 1; _noteTrouble(); }
     else if (_forceBad) { _forceBad = _forceBad - 1; _corruptNext = true; }          // bench: this read's first block is corrupted
     _select();
-    if (!_waitReady(300)) { _deselect(); continue; }
+    if (!_waitReady(300)) { _deselect(); _noteFailed(sector, n, STAGE_BUSY, 0); continue; }
     const uint32_t address = _hc ? sector : (sector << 9);
-    if (n == 1) {
-      ok = (_cmd(17, address, 0x01) == 0x00) && _block(buf, 512);
-    } else if (_cmd(18, address, 0x01) == 0x00) {
+    const uint8_t r1 = _cmd(n == 1 ? 17 : 18, address, 0x01);
+    if (r1 != 0x00) {
+      _noteFailed(sector, n, STAGE_CMD, r1);
+    } else if (n == 1) {
+      _lastToken = 0xFF;
+      ok = _block(buf, 512);
+      if (!ok) _noteFailed(sector, n, _lastToken == DATA_TOKEN ? STAGE_CRC : STAGE_TOKEN, _lastToken);
+    } else {
       uint32_t i = 0;
       for (; i < n; i++) if (!_block(buf + 512 * i, 512)) break;
       _cmd(12, 0, 0x01);
       _waitReady(300);
       ok = (i == n);
+      if (!ok) _noteFailed(sector + i, n, STAGE_MULTI, _lastToken);
     }
     _deselect();
   }
@@ -386,6 +408,21 @@ uint32_t    fallbacks()     { return _fallbacks; }
 uint32_t    crcRejected()   { return _crcRejected; }
 uint32_t    failStreak()    { return _failStreak; }
 uint32_t    failTotal()     { return _failTotal; }
+String failedAttemptsJson() {
+  static const char* const names[] = { "", "busy", "cmd", "token", "crc", "multi" };
+  String j = "{\"count\":" + String((unsigned long)_failedCount) + ",\"sectors\":" + String((unsigned long)_sectors) + ",\"last\":[";
+  const uint32_t total = _failedCount;
+  const uint32_t first = total > FAILED_RING ? total - FAILED_RING : 0;
+  for (uint32_t k = first; k < total; k++) {
+    const FailedAttempt& f = _failed[k % FAILED_RING];
+    if (k > first) j += ",";
+    j += "{\"ms\":" + String((unsigned long)f.ms) + ",\"sector\":" + String((unsigned long)f.sector)
+       + ",\"n\":" + String((unsigned long)f.n) + ",\"mhz\":" + String((unsigned long)(f.hz / 1000000UL))
+       + ",\"stage\":\"" + names[f.stage < 6 ? f.stage : 0] + "\",\"value\":" + String((unsigned)f.value)
+       + ",\"task\":\"" + String(f.task) + "\"}";
+  }
+  return j + "]}";
+}
 void        simulateNoise(uint32_t blocks) { _forceBad = blocks; }
 void        simulateOutage(uint32_t ms) { _outageEndMs = millis() + ms; _outage = true; _failStreak = _failStreak + 1; }   // the first failure is noticed now
 bool        probe() {

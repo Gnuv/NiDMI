@@ -70,6 +70,7 @@ uint32_t fallbacks();            // how many times it fell back since the mount
  * reader that fails stops reading, so no streak builds up by itself. */
 uint32_t failStreak();
 uint32_t failTotal();
+String failedAttemptsJson();      // the last failed attempts: sector, step, task (diagnostic)
 /* Reads sector 0, with all the driver's attempts: does the card still answer? A success
  * puts `failStreak` back to 0. The supervisor (SdCard) asks it after any failed read, five
  * times a quarter of a second apart. */
