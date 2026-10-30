@@ -16,7 +16,7 @@
  */
 namespace {
 void refuse(AsyncWebServerRequest* r, int code, const String& why) {
-    r->send(code, "application/json", "{\"status\":\"error\",\"message\":" + nidmi_json_chaine(why) + "}");
+    r->send(code, "application/json", "{\"status\":\"error\",\"message\":\"" + nidmi_json_chaine(why) + "\"}");
 }
 String query(AsyncWebServerRequest* r, const char* name) {
     return r->hasParam(name) ? r->getParam(name)->value() : String();
@@ -55,7 +55,7 @@ void setupLibraryAPI(AsyncWebServer& server) {
             const char* body = (const char*)request->_tempObject;
             if (n && !body) { refuse(request, 507, "memoire"); return; }
             if (!Library::write(path, body ? body : "", n, why)) { refuse(request, 507, why); return; }
-            request->send(200, "application/json", "{\"status\":\"ok\",\"path\":" + nidmi_json_chaine(path) + "}");
+            request->send(200, "application/json", "{\"status\":\"ok\",\"path\":\"" + nidmi_json_chaine(path) + "\"}");
         },
         nullptr,
         [](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
