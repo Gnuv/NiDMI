@@ -654,13 +654,16 @@ static void surveillerLienCable(unsigned long now){
  *     note, un pitch bend, une pedale : la relance coupe le MIDI USB une a
  *     deux secondes, et un note-off perdu est une note bloquee. Des qu'il en
  *     est passe, elle y renonce, et le dit. Les CC continus n'y comptent pas :
- *     le suivant corrige le perdu (UsbMidiManager::tenuDepuisDemarrage).
+ *     le suivant corrige le perdu (UsbMidiManager::tenuDepuisDemarrage) ;
+ *   - si aucune cue ne joue, n'est en pause ou ne va partir (§246) : elle attend.
  * Un hote sans reseau USB (Windows sans pilote, un synthe) verrait donc
  * l'instrument disparaitre et revenir deux fois dans sa premiere minute, sans
  * MIDI perdu : c'est le prix, dit. */
+static bool showRunning();
 static void relanceAuDemarrage(unsigned long now){
     static uint8_t essais = 0;
     static bool fini = false;
+    static bool showSaid = false;
     static unsigned long monteDepuis = 0, derniere = 0;
     if (fini) return;
     if (now > 90000 || essais >= 2) { fini = true; return; }
@@ -681,6 +684,18 @@ static void relanceAuDemarrage(unsigned long now){
         fini = true;
         NIDMI_WEB_LOG("[usbnet] le cable n'est pas actif, mais des notes sont passees par l'USB : "
                       "pas de relance automatique (Carte > Reseau > Relancer le cable)");
+        return;
+    }
+    /* A cue playing, paused or about to play (the boot play, a resume after a crash): the relaunch
+     * would cut the USB MIDI 1 to 2 s in the middle of the show — a note in or out lost then. It
+     * waits for the transport to stop, within the same 90 s; past them, « Relancer le cable » by
+     * the WiFi that the switch keeps on while the cable is silent (audit of 30/10, §246). */
+    if (showRunning()) {
+        if (!showSaid) {
+            showSaid = true;
+            NIDMI_WEB_LOG("[usbnet] le cable n'est pas actif, mais une cue joue : pas de relance tant qu'elle joue "
+                          "(Carte > Reseau > Relancer le cable)");
+        }
         return;
     }
     if (!nidmi_usbnet::relancer()) return;           // une relance deja en cours
@@ -1011,6 +1026,8 @@ constexpr uint32_t BOOT_PLAY_WAIT_MS = 30000;
 static bool     bootPlayPending = false;
 static uint32_t bootPlayAskedAt = 0;
 static int      bootPlayIndex   = 0;
+
+static bool showRunning(){ return bootPlayPending || Cues::enLecture() || Cues::enPause(); }
 
 static void askBootPlay(){
     bootPlayPending = true;
