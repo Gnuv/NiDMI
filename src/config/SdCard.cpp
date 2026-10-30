@@ -34,6 +34,16 @@ volatile bool     _wantMeasure = false;
 volatile bool     _wantWiring  = false;
 volatile bool     _wantHeads   = false;
 volatile bool     _wantSfz     = false;
+/* THE WRITE (§248): one at a time. The web server posts it (path, buffer), the task writes it. */
+volatile bool     _wantWrite   = false;
+char              _writePath[200] = "";
+uint8_t*          _writeData   = nullptr;
+size_t            _writeBytes  = 0;
+volatile uint32_t _writeJob    = 0;
+volatile uint8_t  _writeState  = 0;         // 0 never, 1 pending, 2 done, 3 failed
+volatile uint32_t _writeMs     = 0;
+volatile int      _writeReloaded = 0;       // kits in memory reloaded after it
+char              _writeReason[112] = "";
 volatile uint32_t _taskAlive   = 0;         // the task is at work (it sleeps between two jobs)
 volatile uint32_t _lastAttemptMs = 0;
 volatile uint32_t _attempts    = 0;
@@ -473,6 +483,25 @@ void _verify() {
                 _verifyName, (unsigned long)v.spans, (unsigned long)v.mismatches);
 }
 
+void _write() {
+  const uint32_t t0 = millis();
+  String reason;
+  bool ok = _mounted && SdSpiDisk::writeFile(_writePath, _writeData, _writeBytes, reason);
+  if (!_mounted && reason.isEmpty()) reason = "carte SD absente ou perdue";
+  heap_caps_free(_writeData);
+  _writeData = nullptr;
+  _writeReloaded = ok ? SfzStore::refresh(_writePath) : 0;
+  _writeMs = millis() - t0;
+  strlcpy(_writeReason, reason.c_str(), sizeof _writeReason);
+  __sync_synchronize();
+  _writeState = ok ? 2 : 3;
+  NIDMI_WEB_LOG("[SD] %s : %s (%u o, %lu ms%s%s)", _writePath, ok ? "ecrit" : "NON ecrit",
+                (unsigned)_writeBytes, (unsigned long)_writeMs, ok ? "" : " — ", ok ? "" : _writeReason);
+  char frame[240];
+  snprintf(frame, sizeof frame, "NIDMI_SD_WRITE:%s:%s", ok ? "ok" : "error", _writePath);
+  nidmi_ws_pousser(frame);
+}
+
 void _task(void*) {
   for (;;) {
     if (_wantRebuild) { _wantRebuild = false; vTaskDelay(pdMS_TO_TICKS(2000)); SdClusters::rebuildAll(); continue; }
@@ -485,11 +514,12 @@ void _task(void*) {
     if (_wantHeads)   { _wantHeads   = false; SdStream::loadHeads(); continue; }
     if (_wantLoad)    { _wantLoad    = false; _loadSounds(); continue; }
     if (_wantSfz)     { _wantSfz     = false; SfzStore::servir(); continue; }
+    if (_wantWrite)   { _wantWrite   = false; _write();    continue; }
     __sync_lock_release(&_taskAlive);
     // A flag raised between the last turn and the release: back to work, unless its
     // raiser already took the flag — then its notification wakes us at once.
     if ((_wantRebuild || _wantVerify || _wantCheck || _wantUnmount || _wantMount || _wantLoad || _wantMeasure
-         || _wantWiring || _wantHeads || _wantSfz) && !__sync_lock_test_and_set(&_taskAlive, 1)) continue;
+         || _wantWiring || _wantHeads || _wantSfz || _wantWrite) && !__sync_lock_test_and_set(&_taskAlive, 1)) continue;
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
   }
 }
@@ -672,6 +702,31 @@ bool measure(const char* name, uint32_t hz) {
   return true;
 }
 
+bool requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason) {
+  if (!_declared || !_mounted) { heap_caps_free(data); reason = "carte SD absente ou perdue"; return false; }
+  if (_writeState == 1) { heap_caps_free(data); reason = "une ecriture sur la SD est en cours : reessayer"; return false; }
+  if (!path || strlen(path) >= sizeof _writePath) { heap_caps_free(data); reason = "chemin trop long"; return false; }
+  strlcpy(_writePath, path, sizeof _writePath);
+  _writeData = data; _writeBytes = n;
+  _writeReason[0] = 0; _writeReloaded = 0; _writeMs = 0;
+  job = _writeJob = _writeJob + 1;
+  __sync_synchronize();
+  _writeState = 1;
+  _wantWrite = true;
+  _startTask();
+  return true;
+}
+
+String writeStatus() {
+  static const char* const states[] = { "none", "pending", "done", "failed" };
+  String r = _writeReason; r.replace("\"", "'");
+  String p = _writePath;   p.replace("\"", "'");
+  return "{\"job\":" + String((unsigned long)_writeJob) + ",\"state\":\"" + states[_writeState & 3]
+       + "\",\"path\":\"" + p + "\",\"bytes\":" + String((unsigned)_writeBytes)
+       + ",\"ms\":" + String((unsigned long)_writeMs) + ",\"reloaded\":" + String(_writeReloaded)
+       + ",\"reason\":\"" + r + "\"}";
+}
+
 File openForWeb(const char* path) {
   if (!_mounted || _wantCheck || SdSpiDisk::failStreak() > 0) return File();
   return open(path);
@@ -709,6 +764,7 @@ String diagnostics() {
   if (_mounted)
     j += ",\"driver\":{\"type\":\"" + String(SdSpiDisk::type()) + "\",\"cmd8_echo\":" + String((unsigned long)SdSpiDisk::cmd8Echo())
        + ",\"blocks_read\":" + String((unsigned long)SdSpiDisk::blocksRead())
+       + ",\"blocks_written\":" + String((unsigned long)SdSpiDisk::blocksWritten())
        + ",\"crc_errors\":" + String((unsigned long)SdSpiDisk::crcErrors())
        + ",\"crc_rejected\":" + String((unsigned long)SdSpiDisk::crcRejected())
        + ",\"fail_streak\":" + String((unsigned long)SdSpiDisk::failStreak())

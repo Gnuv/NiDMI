@@ -69,6 +69,13 @@ void entretenir(const String& employesCsv);
 // ── The sd-card task only (SdCard calls it for its `_wantSfz` flag) ─────────
 void servir();
 
+/* A FILE OF THE SD CHANGED (MESURES §248: the SFZ editor saved it) — `fichier` under the card's
+ * root ("/sfz/kit/kit.sfz", "/sfz/kit/samples/a.wav"). Every kit in memory that reads it is read
+ * again: its engines go silent (fast release), the kit is loaded anew, then adopted again; a kit
+ * held for the next cue (sfzpre=) is loaded anew too. Returns how many kits were concerned. The
+ * sd-card task only (SdCard's write calls it). */
+int refresh(const char* fichier);
+
 // ── Audio task only ─────────────────────────────────────────────────────────
 void adopter();                       // block start: swap the proposed instruments, every engine
 bool notesArmees(uint8_t moteur);     // a cue routes notes to that engine

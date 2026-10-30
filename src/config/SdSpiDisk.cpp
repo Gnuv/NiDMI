@@ -36,6 +36,7 @@ volatile uint32_t _blocksRead = 0, _crcErrors = 0, _retries = 0;
  * (some cheap ones do not compute it in SPI mode) is never rejected: counted only.
  * `_failStreak`: reads that failed after all their attempts, in a row — the signature of a
  * card that was pulled out or lost its contact (SdCard watches it). */
+volatile uint32_t _blocksWritten = 0;
 volatile uint32_t _crcGood = 0, _crcRejected = 0, _failStreak = 0, _failTotal = 0;
 /* THE BUS SPEED FALLS BACK BY ITSELF: a flaky wire at 20 MHz shows as reads that must be done
  * again. TROUBLE_LIMIT of them within TROUBLE_WINDOW_MS and the clock is HALVED (down to
@@ -285,14 +286,47 @@ bool _readSectors(uint8_t* buf, uint32_t sector, uint32_t n) {
   return ok;
 }
 
-// ── FatFs: a read-only drive ────────────────────────────────────────────────
-DSTATUS _ffInit(BYTE)   { return _ready ? STA_PROTECT : STA_NOINIT; }
-DSTATUS _ffStatus(BYTE) { return _ready ? STA_PROTECT : STA_NOINIT; }
+/* WRITE `n` sectors, one at a time (CMD24): the token, 512 bytes, a dummy CRC (SPI mode does not
+ * check it), the card's data response (xxx0 0101: accepted), then its busy time — up to 250 ms by
+ * the specification for an SDHC, more for a cheap one. Three attempts per sector. Only the sd-card
+ * task writes (SdCard::requestWrite), and only under /sfz: the editor's kits (MESURES §248). */
+bool _writeSectors(const uint8_t* buf, uint32_t sector, uint32_t n) {
+  BusLock lock;
+  if (_outage && (int32_t)(millis() - _outageEndMs) < 0) return false;   // simulated loss: writes fail too
+  _spi->beginTransaction(SPISettings(_hz, MSBFIRST, SPI_MODE0));
+  bool ok = true;
+  for (uint32_t i = 0; i < n && ok; i++) {
+    ok = false;
+    for (int attempt = 0; attempt < 3 && !ok; attempt++) {
+      _select();
+      if (!_waitReady(500)) { _deselect(); continue; }
+      const uint32_t s = sector + i;
+      if (_cmd(24, _hc ? s : (s << 9), 0x01) != 0x00) { _deselect(); continue; }
+      _spi->transfer(0xFF);                              // one byte before the token
+      _spi->transfer(DATA_TOKEN);
+      _spi->writeBytes(buf + 512 * i, 512);
+      _spi->transfer16(0xFFFF);                          // CRC, unchecked in SPI mode
+      const uint8_t resp = _spi->transfer(0xFF) & 0x1F;
+      ok = (resp == 0x05) && _waitReady(1000);           // accepted, then programmed
+      _deselect();
+    }
+  }
+  _spi->endTransaction();
+  if (ok) _blocksWritten = _blocksWritten + n;
+  return ok;
+}
+
+// ── FatFs: the drive (written under /sfz only: SdCard::requestWrite) ────────
+DSTATUS _ffInit(BYTE)   { return _ready ? 0 : STA_NOINIT; }
+DSTATUS _ffStatus(BYTE) { return _ready ? 0 : STA_NOINIT; }
 DRESULT _ffRead(BYTE, BYTE* b, DWORD sec, UINT n) {
   if (!_ready) return RES_NOTRDY;
   return _readSectors(b, sec, n) ? RES_OK : RES_ERROR;
 }
-DRESULT _ffWrite(BYTE, const BYTE*, DWORD, UINT) { return RES_WRPRT; }
+DRESULT _ffWrite(BYTE, const BYTE* b, DWORD sec, UINT n) {
+  if (!_ready) return RES_NOTRDY;
+  return _writeSectors(b, sec, n) ? RES_OK : RES_ERROR;
+}
 DRESULT _ffIoctl(BYTE, BYTE cmd, void* buff) {
   switch (cmd) {
     case CTRL_SYNC:        return RES_OK;
@@ -445,6 +479,60 @@ File open(const char* path) {
   if (!_ready || !_fs) return File();
   return _fs->open(path, FILE_READ);
 }
+
+/* Creates the folders of `full` ("0:/sfz/kit/samples/x.wav") that do not exist yet. */
+static bool _makeParents(char* full) {
+  for (char* p = strchr(full + 3, '/'); p; p = strchr(p + 1, '/')) {
+    *p = 0;
+    const FRESULT r = f_mkdir(full);
+    *p = '/';
+    if (r != FR_OK && r != FR_EXIST) return false;
+  }
+  return true;
+}
+
+bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason) {
+  if (!_ready || _pdrv == 0xFF || !path || path[0] != '/') { reason = "carte SD non montee"; return false; }
+  /* In PSRAM: a FIL and two long paths, the sd-card task's stack is 8 KB. */
+  struct Job { FIL fil; char full[200]; char temp[208]; };
+  Job* j = (Job*)heap_caps_calloc(1, sizeof(Job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!j) { reason = "memoire"; return false; }
+  snprintf(j->full, sizeof j->full, "%c:%s", (char)('0' + _pdrv), path);
+  snprintf(j->temp, sizeof j->temp, "%s.part", j->full);
+  bool ok = false;
+  FRESULT r = FR_OK;
+  if (!_makeParents(j->full)) { reason = "dossier impossible a creer"; goto done; }
+  /* WRITTEN BESIDE, THEN SWAPPED: a card pulled out half-way leaves a `.part` and the old file whole. */
+  r = f_open(&j->fil, j->temp, FA_WRITE | FA_CREATE_ALWAYS);
+  if (r != FR_OK) { reason = "creation refusee (FatFs " + String((int)r) + ")"; goto done; }
+  {
+    size_t written = 0;
+    while (written < n && r == FR_OK) {
+      const UINT step = (UINT)((n - written) < 16384 ? (n - written) : 16384);
+      UINT wrote = 0;
+      r = f_write(&j->fil, data + written, step, &wrote);
+      if (r == FR_OK && wrote != step) { r = FR_DENIED; break; }   // the card is full
+      written += wrote;
+      vTaskDelay(1);                                              // core 0's IDLE task
+    }
+  }
+  if (r == FR_OK) r = f_sync(&j->fil);
+  f_close(&j->fil);
+  if (r != FR_OK) {
+    f_unlink(j->temp);
+    reason = r == FR_DENIED ? String("carte SD pleine") : "ecriture echouee (FatFs " + String((int)r) + ")";
+    goto done;
+  }
+  r = f_unlink(j->full);
+  if (r != FR_OK && r != FR_NO_FILE) { reason = "remplacement refuse (FatFs " + String((int)r) + ")"; goto done; }
+  r = f_rename(j->temp, j->full);
+  if (r != FR_OK) { reason = "renommage echoue (FatFs " + String((int)r) + ")"; goto done; }
+  ok = true;
+done:
+  heap_caps_free(j);
+  return ok;
+}
+uint32_t blocksWritten() { return _blocksWritten; }
 
 bool listDir(const char* path, bool (*visit)(const char* name, bool dir, uint32_t size, void* ctx), void* ctx) {
   if (!_ready) return false;

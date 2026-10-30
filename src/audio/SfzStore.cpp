@@ -580,6 +580,75 @@ void servir() {
   _prechargerEmployes();                         // the kits a cue holds without playing them (§218)
 }
 
+/* A path as FAT compares it: "./" dropped, "x/../" folded, letters case-free (the kernel's sample
+ * paths keep what the .sfz wrote — `default_path=../samples/`). */
+static void _normaliser(const char* in, char* out, size_t cap) {
+  size_t n = 0;
+  for (const char* p = in; *p && n + 1 < cap;) {
+    if (p[0] == '.' && p[1] == '/' && (p == in || p[-1] == '/')) { p += 2; continue; }
+    if (p[0] == '.' && p[1] == '.' && p[2] == '/' && n > 1 && out[n - 1] == '/') {
+      size_t k = n - 1;                            // back over "seg/"
+      while (k > 0 && out[k - 1] != '/') k--;
+      n = k; p += 3; continue;
+    }
+    out[n++] = (char)tolower((unsigned char)*p++);
+  }
+  out[n] = 0;
+}
+
+int refresh(const char* fichier) {
+  if (!fichier || !_sons) return 0;
+  char cible[sizeof(SonSfz::chemin)], vu[sizeof(SonSfz::chemin)];
+  _normaliser(fichier, cible, sizeof cible);
+  /* The samples it is: forgotten by name (a new load reads the file again); their PCM goes when
+   * no kit holds it. */
+  bool sonChange = false;
+  for (int i = 0; i < SONS_MAX; i++) {
+    if (!_sons[i].pris || !_sons[i].chemin[0]) continue;
+    _normaliser(_sons[i].chemin, vu, sizeof vu);
+    if (!strcmp(vu, cible)) { _sons[i].chemin[0] = 0; sonChange = true; }
+  }
+  char rafraichis[SIMULTANES][CHEMIN_MAX];
+  int n = 0;
+  for (int j = 0; j < SIMULTANES; j++) {
+    if (!_instrs[j].pris || !_instrs[j].chemin[0]) continue;
+    snprintf(vu, sizeof vu, "%s/%s", DOSSIER, _instrs[j].chemin);
+    char kit[sizeof vu];
+    _normaliser(vu, kit, sizeof kit);
+    bool lit = !strcmp(kit, cible);
+    for (int k = 0; k < _instrs[j].inst->sample_count && !lit && sonChange; k++)
+      for (int i = 0; i < SONS_MAX && !lit; i++)
+        lit = _sons[i].pris && !_sons[i].chemin[0] && _sons[i].pcm == _instrs[j].inst->samples[k].data;
+    if (!lit) continue;
+    strlcpy(rafraichis[n++], _instrs[j].chemin, CHEMIN_MAX);
+    /* The engines that play it go silent first: the old kit must leave memory before the new one
+     * comes (both may not fit the budget). */
+    portENTER_CRITICAL(&_mux);
+    for (uint8_t m = 0; m < MOTEURS; m++) if (_actif[m] == j || _proposition[m] == j) _proposition[m] = -2;
+    portEXIT_CRITICAL(&_mux);
+    _instrs[j].chemin[0] = 0;                      // never found again by name
+    _instrs[j].libererApres = _echeance();
+  }
+  if (!n) { _nettoyerSonsOrphelins(); return 0; }
+  for (int t = 0; t < 20; t++) {                   // the audio task adopts the silence (a block: 2.5 ms)
+    bool attend = false;
+    for (uint8_t m = 0; m < MOTEURS; m++) attend = attend || _proposition[m] == -2;
+    if (!attend) break;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  _attendreLesRetraits();
+  /* The wishes that named it are deposited again: servir() loads it anew and gives it back to
+   * its engines; a kit held for the next cue is found missing and loaded again (_prechargerEmployes). */
+  portENTER_CRITICAL(&_mux);
+  for (uint8_t m = 0; m < MOTEURS; m++)
+    for (int r = 0; r < n; r++)
+      if (!strcmp(_voeux[m].veut, rafraichis[r])) { _voeux[m].ticket++; break; }
+  portEXIT_CRITICAL(&_mux);
+  for (int r = 0; r < n; r++) NIDMI_WEB_LOG("[sfz] %s relu : %s a change sur la SD", rafraichis[r], fichier);
+  servir();
+  return n;
+}
+
 // ── audio task ──────────────────────────────────────────────────────────────
 
 static void _adopter(uint8_t m) {

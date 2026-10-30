@@ -1,5 +1,5 @@
 #pragma once
-// src/config/SdSpiDisk.h — OUR SD-CARD-OVER-SPI DRIVER, read-only.
+// src/config/SdSpiDisk.h — OUR SD-CARD-OVER-SPI DRIVER.
 //
 // Why not Arduino's SD library: it demands that CMD8 return the 0x1AA echo and
 // gives up otherwise (`goto unknown_card`), without saying why — the board has no
@@ -12,7 +12,8 @@
 // Multi-block reads (CMD18) in one go, block CRC16 checked: counted, and REJECTED (read
 // again) once the card has proven it sends valid ones — a corrupted transfer must never
 // reach the audio; a card that sends no valid CRC at all is only counted. A failed block
-// is read again. Nothing writes: FatFs sees a protected medium.
+// is read again. It WRITES too (CMD24, one sector at a time) since the SFZ editor saves its kits
+// on the card (MESURES §248) — only the sd-card task, only under /sfz (SdCard::requestWrite).
 //
 // It plugs into FatFs the way the library does (ff_diskio_register, then
 // esp_vfs_fat_register): files are opened through Arduino's `File` API, under the
@@ -35,6 +36,11 @@ const char* type();              // "SD", "SDHC/SDXC"
 uint32_t    cmd8Echo();          // what CMD8 returned (0x1AA: a conforming card)
 
 File open(const char* path);                     // read-only; empty when nothing is mounted
+/* Writes a whole file (path under the mount's root: "/sfz/kit/kit.sfz"), its folders created: written
+ * beside as `<path>.part`, then swapped in — a card pulled out half-way keeps the old file whole.
+ * THE SD-CARD TASK ONLY (SdCard::requestWrite). False with `reason`. */
+bool writeFile(const char* path, const uint8_t* data, size_t n, String& reason);
+uint32_t blocksWritten();        // 512-byte blocks written since boot
 
 /* A folder's entries WITHOUT OPENING THEM (FatFs f_readdir): name, folder or not, size — `visit`
  * returns false to stop. Opening every file to weigh it cost ~7 ms each, the "._" twins a Mac

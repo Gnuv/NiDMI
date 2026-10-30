@@ -22,8 +22,15 @@
 // LES SUPPORTS (§180). Tout ce qui precede vit sur la memoire interne —
 // `storage`, LittleFS. Une carte SD viendra : chaque fichier dit donc sur QUEL support il
 // est (`volume`), la liste declare les supports et leur etat, et les routes
-// prennent `volume=` (`storage` par defaut). Ce firmware declare la SD pour dire
-// qu'il ne la lit pas encore — l'app n'a pas a l'inventer.
+// prennent `volume=` (`storage` par defaut).
+//
+// LA SD ET L'EDITEUR SFZ (MESURES §248). Sur `volume=sd`, ces routes ne voient que
+// /sfz : les kits et leurs samples. GET lit un `.sfz` ou un `.wav` (refuse en
+// concert : le bus de la SD est aux flux) ; POST ecrit un `.sfz` ou un `.wav` —
+// `nom` est alors le CHEMIN sous la racine (/sfz/kit/kit.sfz) — par la tache
+// `sd-card`, qui recharge ensuite les kits en memoire qui le lisent. Le POST rend
+// la main : 202, puis GET /api/sd/write dit ou en est l'ecriture (annoncee aussi :
+// NIDMI_SD_WRITE). Pas de suppression sur la SD.
 #include "APICommon.h"
 #include "../config/StorageIndex.h"
 #include "../config/Stockage.h"
@@ -125,14 +132,13 @@ bool cheminValide(const String& c) {
 String baseDe(const String& c) { return c.substring(c.lastIndexOf('/') + 1); }
 
 const char* typeDe(const String& chemin) {
-  if (chemin.endsWith(".wav"))  return "audio/wav";
+  if (chemin.endsWith(".wav") || chemin.endsWith(".WAV")) return "audio/wav";
   if (chemin.endsWith(".json")) return "application/json";
   return "text/plain; charset=utf-8";
 }
 
-/* The medium the request aims at; storage if none is said. Another one: refused
- * (501) — the SD is READ only (its sounds, through the store): it is filled from a
- * computer, nothing else goes through the board. */
+/* The medium the request aims at; storage if none is said. The SD has its own branch in each
+ * route (volumeSd: the kits under /sfz, §248); any other medium is refused (501). */
 bool volumeInterne(AsyncWebServerRequest* r) {
   return !r->hasParam("volume") || r->getParam("volume")->value() == VOLUME_INTERNE;
 }
@@ -262,9 +268,59 @@ template <typename F> void walkSdCard(F voir) {
   }
 }
 
+/* ── LA SD : les kits SFZ (§248) ─────────────────────────────────────────── */
+constexpr size_t SD_SFZ_MAX = 64 * 1024;            // SfzStore's own ceiling for a .sfz text
+constexpr size_t SD_WAV_MAX = 3 * 1024 * 1024;      // a sample; the kits share a 4 MB budget
+constexpr size_t SD_PSRAM_MARGIN = 1024 * 1024;     // left to the board while a body waits
+
+bool volumeSd(AsyncWebServerRequest* r) {
+  return r->hasParam("volume") && r->getParam("volume")->value() == SdCard::VOLUME_ID;
+}
+
+/* Under /sfz, a `.sfz` or a `.wav`, a name FAT takes and a cue can say. */
+bool cheminKit(const String& c, String& raison) {
+  String bas = c; bas.toLowerCase();
+  const String dossier = String(SfzStore::DOSSIER) + "/";
+  if (!c.startsWith(dossier) || c.length() <= dossier.length() || c.length() >= 180) {
+    raison = "un fichier de kit se range sous " + dossier; return false;
+  }
+  if (c.indexOf("..") >= 0 || c.indexOf("//") >= 0 || c.indexOf('\\') >= 0) { raison = "chemin invalide"; return false; }
+  for (size_t i = 0; i < c.length(); i++) {
+    const char k = c[i];
+    if ((uint8_t)k < 0x20 || strchr(":*?\"<>|,;=", k)) { raison = String("caractere refuse dans le nom : ") + k; return false; }
+  }
+  if (baseDe(c).startsWith(".")) { raison = "nom cache refuse"; return false; }
+  if (!bas.endsWith(".sfz") && !bas.endsWith(".wav")) { raison = "la SD prend des .sfz et des .wav"; return false; }
+  return true;
+}
+
+/* A WAV the SFZ store can read: RIFF/WAVE, PCM 16 bits, mono or stereo. */
+bool wavJouable(const uint8_t* d, size_t n, String& raison) {
+  if (n < 44 || memcmp(d, "RIFF", 4) || memcmp(d + 8, "WAVE", 4)) { raison = "pas un fichier WAV"; return false; }
+  for (size_t p = 12; p + 8 <= n;) {
+    const uint32_t taille = d[p + 4] | (d[p + 5] << 8) | (d[p + 6] << 16) | ((uint32_t)d[p + 7] << 24);
+    if (!memcmp(d + p, "fmt ", 4) && p + 24 <= n) {
+      const uint16_t format = d[p + 8] | (d[p + 9] << 8), canaux = d[p + 10] | (d[p + 11] << 8);
+      const uint16_t bits = d[p + 22] | (d[p + 23] << 8);
+      if ((format != 1 && format != 0xFFFE) || bits != 16) {
+        raison = "WAV " + String(bits) + " bits : la carte lit le PCM 16 bits"; return false;
+      }
+      if (canaux < 1 || canaux > 2) { raison = "WAV a " + String(canaux) + " canaux : mono ou stereo"; return false; }
+      return true;
+    }
+    p += 8 + taille + (taille & 1);
+  }
+  raison = "WAV sans bloc fmt"; return false;
+}
+
 }  // namespace
 
 void setupFichiersAPI(AsyncWebServer& server) {
+  /* WHERE THE LAST SD WRITE IS (§248) — asked after a POST volume=sd, until it is done. */
+  server.on("/api/sd/write", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send(200, "application/json", SdCard::writeStatus());
+  });
+
 
   /* THE SD CARD DIAGNOSTICS — the board has no serial port: this is where it says why
    * the SD does not mount (CMD0/CMD8 probed by hand) and what its reading is worth.
@@ -420,7 +476,23 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * recent), sinon depuis la flash — lu d'un coup en PSRAM, puis servi. */
   server.on("/api/fichier", HTTP_GET, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
-    if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
+    if (volumeSd(request)) {
+      /* A kit's file, for the SFZ editor (§248). Read in pieces as the response goes — the bus is the
+       * streams' in a concert: refused then. A card in doubt answers nothing (openForWeb). */
+      String raison;
+      if (!cheminKit(chemin, raison)) { repondre(request, 400, raison); return; }
+      if (Concert::refuse(request, "lecture de la SD refusee : la carte est verrouillee pour le concert")) return;
+      auto f = std::make_shared<File>(SdCard::openForWeb(chemin.c_str()));
+      if (!*f || f->isDirectory()) { repondre(request, 404, "introuvable sur la SD : " + chemin); return; }
+      const size_t taille = f->size();
+      request->send(request->beginResponse(typeDe(chemin), taille, [f](uint8_t* out, size_t max, size_t) -> size_t {
+        const size_t k = f->read(out, max);
+        if (!k) f->close();
+        return k;
+      }));
+      return;
+    }
+    if (!volumeInterne(request)) { repondre(request, 501, "volume inconnu"); return; }
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
     if (!SampleStore::monter()) { repondre(request, 503, "storage non monte"); return; }
     std::shared_ptr<char> t; size_t n = 0; bool sup = false;
@@ -449,7 +521,24 @@ void setupFichiersAPI(AsyncWebServer& server) {
     [](AsyncWebServerRequest* request) {
       const String nom = request->hasParam("nom") ? request->getParam("nom")->value() : String();
       String raison;
-      if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
+      if (volumeSd(request)) {
+        /* A kit's file (§248): the body is in PSRAM, the sd-card task writes it. */
+        uint8_t* corps = (uint8_t*)request->_tempObject;
+        const size_t n = request->contentLength();
+        String bas = nom; bas.toLowerCase();
+        const size_t max = bas.endsWith(".wav") ? SD_WAV_MAX : SD_SFZ_MAX;
+        if (!cheminKit(nom, raison)) { repondre(request, 400, raison); return; }
+        if (!n || n > max) { repondre(request, 413, "fichier vide ou trop gros (" + String((unsigned)(max / 1024)) + " Ko au plus)"); return; }
+        if (!corps) { repondre(request, 507, "memoire : la carte n'a pas pu garder le fichier"); return; }
+        if (bas.endsWith(".wav") && !wavJouable(corps, n, raison)) { repondre(request, 422, raison); return; }
+        request->_tempObject = nullptr;           // the card takes it (freed after the write)
+        uint32_t job = 0;
+        if (!SdCard::requestWrite(nom.c_str(), corps, n, job, raison)) { repondre(request, 409, raison); return; }
+        request->send(202, "application/json", "{\"status\":\"pending\",\"job\":" + String((unsigned long)job)
+                      + ",\"chemin\":\"" + nom + "\"}");
+        return;
+      }
+      if (!volumeInterne(request)) { repondre(request, 501, "volume inconnu"); return; }
       switch (genreTeleverse(nom)) {
         case Genre::Son: {
           if (!SampleStore::ecrireFin(request, raison)) { repondre(request, 422, raison); return; }
@@ -484,6 +573,16 @@ void setupFichiersAPI(AsyncWebServer& server) {
     nullptr,
     [](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
       const String nom = request->hasParam("nom") ? request->getParam("nom")->value() : String();
+      if (volumeSd(request)) {
+        String bas = nom; bas.toLowerCase();
+        const size_t max = bas.endsWith(".wav") ? SD_WAV_MAX : SD_SFZ_MAX;
+        if (index == 0 && total && total <= max
+            && heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) > total + SD_PSRAM_MARGIN)
+          request->_tempObject = heap_caps_malloc(total, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (request->_tempObject && index + len <= total)
+          memcpy((uint8_t*)request->_tempObject + index, data, len);
+        return;                                    // checked at the end, with the reason
+      }
       if (!volumeInterne(request)) return;          // refuse a la fin, avec la raison
       switch (genreTeleverse(nom)) {
         case Genre::Son:
@@ -510,7 +609,7 @@ void setupFichiersAPI(AsyncWebServer& server) {
    * un script ou une interface enregistree s'effacent au silence (Differe). */
   server.on("/api/fichier", HTTP_DELETE, [](AsyncWebServerRequest* request) {
     const String chemin = request->hasParam("chemin") ? request->getParam("chemin")->value() : String();
-    if (!volumeInterne(request)) { repondre(request, 501, "la carte SD se lit seule pour l'instant : ni telechargement, ni televersement, ni suppression par la carte"); return; }
+    if (!volumeInterne(request)) { repondre(request, 501, "rien ne se supprime sur la SD par la carte"); return; }
     if (!cheminValide(chemin)) { repondre(request, 400, "chemin invalide"); return; }
     const Genre g = genreDe(chemin);
     if (!supprimable(g)) {

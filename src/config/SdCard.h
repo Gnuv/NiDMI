@@ -11,9 +11,9 @@
 //     of storage: same store (SampleStore), same names in the cues. A name that
 //     storage already holds wins. Sounds too long for PSRAM are STREAMED instead
 //     (SdStream.h);
-//   - that is ALL: read-only. No upload, no delete, no composition or
-//     .instrument on the card (CONVERGENCE §9.7, later); the card is filled from
-//     a computer.
+//   - it WRITES one thing: the SFZ kits the editor saves — a `.sfz` or a `.wav` under /sfz
+//     (requestWrite, MESURES §248). No delete, no composition or .instrument on the card
+//     (CONVERGENCE §9.7, later); the rest is filled from a computer.
 //
 // ITS OWN TASK, never the loop nor the web server. Mounting a card means SPI
 // exchanges that can take a while (an absent card makes you wait); reading a
@@ -78,6 +78,15 @@ void loadHeads();
 /* The SFZ store has a wish or housekeeping waiting (SfzStore.h): the task serves it —
  * reads the kit, retires what no cue names. Callable from ANY task; never waits. */
 void requestSfz();
+
+/* WRITE A FILE UNDER /sfz (MESURES §248: the SFZ editor saves a kit, or sends one of its samples).
+ * `data` is a PSRAM buffer the card TAKES (freed after the write, or now on a refusal). Returns at
+ * once — false with `reason` when the card is absent or a write is still running; the task writes
+ * it, then reloads every kit in memory that reads it (SfzStore::refresh) and announces the result
+ * (`NIDMI_SD_WRITE:ok|error:<path>`). writeStatus(): the last write, as JSON — {"job","state":
+ * "pending"|"done"|"failed","path","bytes","ms","reason","reloaded"}. Any task. */
+bool   requestWrite(const char* path, uint8_t* data, size_t n, uint32_t& job, String& reason);
+String writeStatus();
 
 // Opens a card file for reading; an empty File when the card is not mounted.
 File open(const char* path);
