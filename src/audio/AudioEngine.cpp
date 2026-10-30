@@ -1639,6 +1639,40 @@ void gardeElection(void*) {
     if ((int32_t)(t - attendu) > 0) attendu = t + GARDE_PERIODE_MS * 1000;   // pas de dette
   }
 }
+
+/* THE AUDIO WATCH (audit of 30/10, MESURES §247). Nothing restarted a board whose audio stopped
+ * WITHOUT crashing: the task watchdog watches IDLE0 only, and the audio task (core 1) is not
+ * registered with it. A lock never given back, a wait that never ends — silence for the rest of
+ * the show, and the resume after a crash (§244) never called. This task, on core 0, reads the
+ * block counter every WATCH_PERIOD_MS while the audio runs. The time the flash held both cores
+ * (an erase: ~45 ms, §155; an upload: 25 to 35 ms per 4 KB) is taken out. No block for
+ * WATCH_STALL_MS: a deliberate crash, and the board comes back on its cue. Above everything that
+ * plays on core 0 (sensors 20, MIDI 19, synth voice 17): a few microseconds every 100 ms. */
+constexpr UBaseType_t WATCH_PRIORITY   = 21;
+constexpr uint32_t    WATCH_PERIOD_MS  = 100;
+constexpr uint32_t    WATCH_STALL_MS   = 1500;
+TaskHandle_t watch = nullptr;
+
+void audioWatch(void*) {
+  const uint32_t cyclesPerMs = (uint32_t)getCpuFrequencyMhz() * 1000UL;
+  uint32_t lastBlocks = nBlocs, lastFlash = SurveillantFlash::cyclesSinceBoot(), stallMs = 0;
+  TickType_t wake = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(WATCH_PERIOD_MS));
+    const uint32_t blocks = nBlocs, flash = SurveillantFlash::cyclesSinceBoot();
+    const uint32_t flashMs = (flash - lastFlash) / cyclesPerMs;
+    lastFlash = flash;
+    if (!demarre || arretDemande || blocks != lastBlocks) { lastBlocks = blocks; stallMs = 0; continue; }
+    stallMs += WATCH_PERIOD_MS > flashMs ? WATCH_PERIOD_MS - flashMs : 0;
+    if (stallMs < WATCH_STALL_MS) continue;
+    const eTaskState st = tache ? eTaskGetState(tache) : eInvalid;
+    static const char* const states[] = { "en cours", "prete", "bloquee", "suspendue", "detruite", "invalide" };
+    char why[96];
+    snprintf(why, sizeof why, "audio fige : aucun bloc depuis %lu ms (tache audio %s)",
+             (unsigned long)stallMs, states[st <= eInvalid ? st : eInvalid]);
+    esp_system_abort(why);
+  }
+}
 }  // namespace
 
 bool ensureStarted() {
@@ -1745,6 +1779,9 @@ bool ensureStarted() {
   if (!garde && xTaskCreatePinnedToCore(gardeElection, "garde", 1280, nullptr,
                                         GARDE_PRIORITE, &garde, 1) != pdPASS)
     Serial.println("[audio] garde d'election impossible");
+  if (!watch && xTaskCreatePinnedToCore(audioWatch, "audiowatch", 2048, nullptr,
+                                        WATCH_PRIORITY, &watch, 0) != pdPASS)
+    Serial.println("[audio] surveillant de l'audio impossible");
 
   heapApres = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
   demarre = true;
