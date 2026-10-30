@@ -1672,6 +1672,9 @@ void audioWatch(void*) {
     char why[96];
     snprintf(why, sizeof why, "audio fige : aucun bloc depuis %lu ms (tache audio %s)",
              (unsigned long)stallMs, states[st <= eInvalid ? st : eInvalid]);
+    /* The panic keeps its reason only when it lies in DRAM — not this one: said first as an
+     * [audio] line, which the previous life's report keeps (§162). */
+    NIDMI_WEB_LOG("[audio] %s : la carte redemarre (surveillant, §247)", why);
     esp_system_abort(why);
   }
 }
